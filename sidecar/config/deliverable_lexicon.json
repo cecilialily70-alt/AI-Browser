@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "_comment": "纯数据资源（非代码）：识别「目标里除了打开/搜索之外还有别的交付动作」的通用动词。命中即代表这个任务不止是「搜到了就完事」，确定性加速器不得跳过模型判完成——否则会把「搜索 + 点栏目 + 下载第 N 项」这类目标误判成已完成。代码层不含任何站点文案，只把本文件当判定数据。删掉本文件会退化为「不做后续动作识别」的旧行为（加速器恢复激进）。可用 TIANSHUTAI_DELIVERABLE_LEXICON 指向自定义路径整体替换。",
+  "policy": {
+    "_comment": "maxTermLength：单个词条长度上限，超过视为脏数据丢弃。",
+    "maxTermLength": 48
+  },
+  "terms": {
+    "_comment": "followup = 后续交付动作。原则：只收「在打开/搜索之后还要做点什么」的动词与指代，不收「打开 / 搜索 / 查找」本身——那些正是这一轮加速器要完成的事。",
+    "followup": [
+      "下载", "保存到", "保存为", "另存为", "导出", "右键", "复制", "截图", "截取", "摘录",
+      "点击", "点开", "单击", "双击", "进入", "切换到", "切换", "跳转", "前往", "返回",
+      "第二张", "第三张", "第四张", "第二张图", "第2张", "第3张", "前五张", "前5张",
+      "第二个", "第三个", "第二个结果", "第2个", "第3个",
+      "第一条结果", "打开第一条", "点开第一条", "前三条", "前3条", "前五条", "前5条", "前十条", "前10条",
+      "翻页", "下一页", "下一张", "更多", "展开", "查看详情", "查看全部", "查看大图", "看大图",
+      "收藏", "关注", "点赞", "评论", "分享", "转发", "加入购物车", "加购", "已加购", "结算页", "收银台", "已达收银台", "待支付", "下单", "购买",
+      "填写", "填表", "填入", "输入并", "提交", "上传", "勾选", "选中", "选择", "切换语言",
+      "download", "save as", "export", "click", "open the second", "switch to", "next page",
+      "screenshot", "copy", "bookmark", "share", "add to cart", "checkout page", "awaiting payment", "fill in", "submit", "upload", "select"
+    ]
+  },
+  "deliverableKinds": {
+    "_comment": "任务契约用：把「一句话交付物」归到一种可验证的交付物类型（kind），供 core/deliverable_verify.ts 逐项核销。命中规则：取该句里出现的第一个 kind（priority 顺序），并把命中的词当线索。词条只描述通用动作语义，不含任何站点文案；缺这一节时契约退化为「只有 navigation/content_read」两种最粗类型。",
+    "policy": {
+      "_comment": "maxHints：单个交付物保留的线索词上限（防脏数据灌爆提示词）。priority 越靠前的 kind 越先被匹配到。",
+      "maxHints": 6,
+      "maxDeliverables": 8
+    },
+    "priority": [
+      "download",
+      "prepay_reached",
+      "submitted",
+      "choice_made",
+      "field_filled",
+      "content_read",
+      "element_state",
+      "answer_given",
+      "navigation"
+    ],
+    "kinds": {
+      "download": {
+        "terms": ["下载", "另存为", "保存到", "保存为", "导出", "存图", "另存", "download", "save as", "save to", "export"],
+        "required": true
+      },
+      "prepay_reached": {
+        "_comment": "停在支付前：加购/收银台/待支付。优先于 submitted，避免「结算页」被「结算」收成已提交订单。不是已付款。",
+        "terms": ["加购", "加入购物车", "加到购物车", "加进购物车", "已加购", "结算页", "收银台", "已达收银台", "待支付", "停在支付前", "add to cart", "checkout page", "stop before pay", "stop before payment", "awaiting payment"],
+        "required": true
+      },
+      "submitted": {
+        "terms": ["提交", "注册", "登录", "登入", "下单", "结算", "购买", "支付", "付款", "上传", "发布", "报名", "订阅", "submit", "register", "sign up", "login", "checkout", "order", "purchase", "pay", "upload", "publish", "subscribe"],
+        "required": true
+      },
+      "choice_made": {
+        "terms": ["勾选", "选中", "打勾", "同意", "勾上", "选择", "check", "tick", "agree", "select", "choose"],
+        "required": true
+      },
+      "field_filled": {
+        "terms": ["填写", "填表", "填入", "输入", "录入", "填好", "fill in", "fill out", "type", "enter", "input"],
+        "required": true
+      },
+      "content_read": {
+        "terms": ["总结", "摘要", "概括", "分析", "解读", "介绍", "是谁", "是什么", "怎么样", "阅读", "提取", "读取", "汇报", "告诉我", "详情", "第一时间", "探讨", "讨论", "点评", "评价", "评估", "综述", "梳理", "summarize", "summary", "analyze", "explain", "discuss", "read", "extract", "tell me", "who is", "what is"],
+        "required": false
+      },
+      "element_state": {
+        "terms": ["点击", "点开", "单击", "双击", "进入", "切换到", "切换", "跳转", "前往", "展开", "翻页", "下一", "查看", "click", "enter", "next page", "expand"],
+        "required": true
+      },
+      "answer_given": {
+        "terms": ["回答", "说明", "结论", "给出", "报告", "answer", "report", "conclusion"],
+        "required": true
+      },
+      "navigation": {
+        "terms": ["打开", "访问", "前往", "导航", "进入网站", "open", "visit", "navigate", "go to"],
+        "required": true
+      }
+    }
+  }
+}

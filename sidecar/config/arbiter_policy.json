@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "_comment": "Arbiter 权威档位（P0.1）。mode: shadow=只记日志不改行为；guide=默认，注入 nudges 且 halt/escalate 生效；hard=硬闸，halt/escalate 时跳过本步危险动作并 replan/HITL。可用 TIANSHUTAI_ARBITER_MODE 覆盖。无站点文案。",
+  "mode": "guide"
+}

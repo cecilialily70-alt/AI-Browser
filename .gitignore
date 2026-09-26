@@ -1,0 +1,73 @@
+# Dependencies
+node_modules/
+sidecar/node_modules/
+
+# Build outputs
+dist/
+sidecar/dist/
+src-tauri/target/
+release-dist/
+*.tsbuildinfo
+
+# Tauri / WebView2 runtime blobs
+src-tauri/WebView2/*.exe
+src-tauri/WebView2/*.dll
+src-tauri/WebView2/*.pak
+src-tauri/WebView2/*.dat
+src-tauri/WebView2/Locales/
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+*.local
+*.tsk
+*.rar
+__pycache__/
+
+# Local docs (not published to GitHub)
+docs/
+
+# OS / editor / IDE
+.DS_Store
+Thumbs.db
+.cursor/
+.cursorrules-v2.md
+*.log
+
+# Binaries (keep icons)
+*.exe
+!src-tauri/icons/*.ico
+
+# Local CloakBrowser / Chromium unpack trees (not source)
+Browse/
+Browse/**
+内核/
+内核/**
+# 编码无关兜底：任何解包后的 Chromium 内核目录（无论父目录名/编码如何）
+**/chromium-*/
+
+# Upstream browser-use reference clone (local mirror only; not runtime)
+_ref_browser_use/
+
+# Third-party extension unpack dirs
+extensions/twp/
+extensions/immersive-translate/
+
+# Agent / temp assets
+agent-transcripts/
+assets/
+
+# Sidecar runtime artifacts (debug logs / control memory LRU)
+sidecar/logs/
+sidecar/agent_exports/control_memory/
+
+# Sidecar 验证码测试二进制固件（本地采样录制的帧图，体积大且不可复现，不入库）
+sidecar/tests/captcha_fixtures/
+
+# Keygen local build outputs
+tools/**/build/
+tools/**/dist/*.exe
+tools/**/dist/*.rar
+tools/**/*.egg-info/
+

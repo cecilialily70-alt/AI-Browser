@@ -1,0 +1,25 @@
+{
+  "providers": {
+    "gmail": {
+      "label": "Gmail",
+      "inboxUrl": "https://mail.google.com/mail/u/0/#inbox",
+      "inboxHosts": ["mail.google.com"],
+      "loginHosts": ["accounts.google.com"],
+      "aliases": ["googlemail"]
+    },
+    "qq": {
+      "label": "QQ 邮箱",
+      "inboxUrl": "https://wx.mail.qq.com/",
+      "inboxHosts": ["wx.mail.qq.com", "mail.qq.com"],
+      "loginHosts": ["login.qq.com", "ptlogin2.qq.com", "ssl.ptlogin2.qq.com"],
+      "aliases": ["qqmail", "qq_mail"]
+    },
+    "outlook": {
+      "label": "Outlook",
+      "inboxUrl": "https://outlook.live.com/mail/0/",
+      "inboxHosts": ["outlook.live.com", "outlook.office.com", "outlook.office365.com"],
+      "loginHosts": ["login.live.com", "login.microsoftonline.com"],
+      "aliases": ["hotmail", "office365"]
+    }
+  }
+}

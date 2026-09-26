@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "_comment": "搜索引擎政策数据（Policy Data，非判断词表）。内容是封闭、稳定的事实：引擎首页地址、主机匹配、结果页 URL 形态、搜索框与提交控件选择器。运行期所有引擎相关逻辑（宪法 Guard、确定性导航、表单搜索）都必须以此文件为唯一事实源，代码层不再出现任何引擎域名或选择器字面量。可用 TIANSHUTAI_SEARCH_ENGINES 指向自定义路径整体替换；文件缺失时退化为内置的 google 兜底。",
+  "default": "google",
+  "engines": [
+    {
+      "id": "google",
+      "homepage": "https://www.google.com/",
+      "hostPattern": "(^|\\.)google\\.[a-z]{2,}(\\.[a-z]{2,})?$",
+      "serpPatterns": ["^/search"],
+      "searchBoxSelectors": ["textarea[name=\"q\"]", "input[name=\"q\"]"],
+      "submitSelectors": [
+        "input[name=\"btnK\"]",
+        "button[name=\"btnK\"]",
+        "input[type=\"submit\"][value*=\"搜\"]",
+        "input[type=\"submit\"][value*=\"Search\"]"
+      ],
+      "searchBoxRoles": ["textbox", "combobox"]
+    },
+    {
+      "id": "baidu",
+      "homepage": "https://www.baidu.com/",
+      "hostPattern": "(^|\\.)baidu\\.com$",
+      "serpPatterns": ["^/s(\\?|/)", "^/sf/", "[?&]tn=news"],
+      "searchBoxSelectors": ["input#kw", "input[name=\"wd\"]"],
+      "submitSelectors": ["input#su", "input[type=\"submit\"][value*=\"百度\"]"],
+      "searchBoxRoles": ["textbox", "searchbox"]
+    },
+    {
+      "id": "bing",
+      "homepage": "https://www.bing.com/",
+      "hostPattern": "(^|\\.)bing\\.com$",
+      "serpPatterns": ["^/search"],
+      "searchBoxSelectors": ["input#sb_form_q", "input[name=\"q\"]"],
+      "submitSelectors": ["label#sb_form_go", "button#sb_form_go", "input#sb_form_go"],
+      "searchBoxRoles": ["textbox", "searchbox", "combobox"]
+    },
+    {
+      "id": "duckduckgo",
+      "homepage": "https://duckduckgo.com/",
+      "hostPattern": "(^|\\.)duckduckgo\\.com$",
+      "serpPatterns": ["^/\\?q=", "^/html", "^/lite"],
+      "searchBoxSelectors": ["input#searchbox_input", "input[name=\"q\"]"],
+      "submitSelectors": ["button[type=\"submit\"]", "button[aria-label*=\"Search\"]"],
+      "searchBoxRoles": ["textbox", "searchbox", "combobox"]
+    }
+  ],
+  "legacyLooseSerpPatterns": {
+    "_comment": "只读识别用的宽松结果页特征，用于兼容改造前的 isSearchResultsUrl 判定（它把任意带 ?q=/wd= 的地址都算结果页）。**宪法 Guard 严禁使用本组** —— 它会把无关站点的 ?q= 页面误判成结果页并拦掉。",
+    "patterns": [
+      "[?&](wd|word|q|query|keyword)=",
+      "/s(\\?|/)",
+      "tn=news",
+      "/sf/vsearch"
+    ]
+  }
+}

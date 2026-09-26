@@ -1,0 +1,579 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   天枢台 · 设计令牌
+   ----------------------------------------------------------------------------
+   - 所有语义色都以「H S% L%」三元组形式落在 CSS 变量里，Tailwind 只做映射。
+   - 深色为默认主题（:root），浅色通过 <html data-theme="light"> 覆盖。
+   - 组件类只依赖令牌，因此换肤不需要动任何组件代码。
+   ========================================================================== */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* 画布 / 面板 / 抬升 / 沉井
+     相邻层级至少要差 3~4% 明度，否则「无边框 + 靠底色分层」会退化成一片糊。
+     画布 6 < 面板 9 < 分组带 12 < 抬升 16；沉井 4（更暗，用于输入 / 日志 / 列表）。
+     这样弹窗（16）里放分组带（12）、分组带里放输入井（4）都看得出边界。 */
+  --background: 224 33% 6%;
+  --foreground: 210 32% 94%;
+  --card: 224 27% 9%;
+  --card-foreground: 210 32% 94%;
+  --surface-raised: 224 23% 16%;
+  --surface-sunken: 226 36% 4%;
+  --surface-muted: 224 22% 12%;
+
+  /* 交互面 */
+  --secondary: 224 22% 15%;
+  --secondary-foreground: 210 30% 92%;
+  --muted: 224 20% 14%;
+  --muted-foreground: 216 16% 63%;
+  --accent: 224 22% 17%;
+  --accent-foreground: 210 30% 95%;
+
+  /* 描边 / 输入 / 焦点 */
+  --border: 222 18% 19%;
+  --border-subtle: 222 16% 15%;
+  --border-strong: 222 18% 28%;
+  --input: 222 18% 24%;
+  --ring: 243 74% 63%;
+  --highlight: 0 0% 100%;
+  /* 输入框边缘：无边框语言下唯一保留的「实体感」，只给可编辑控件用 */
+  --field-border: 222 16% 38%;
+  /* 占位符：≥4.5:1，比正文弱但不糊（在井上 4.65:1、在卡片上 4.8:1） */
+  --placeholder: 216 16% 53%;
+
+  /* 强调与语义色 */
+  --primary: 243 74% 63%;
+  --primary-foreground: 0 0% 100%;
+  /* 主色作为文字（链接 / 小标签）时用这个：--primary 对卡片只有 3.6:1，
+     而调亮 --primary 会连累 btn-primary 上的白字。
+     还要照顾「主色淡底上的主色文字」（.row-selected / active 标签页：bg-primary/10~20），
+     所以这里比自己那一档再亮 15%，最差一格（primary/20 on raised）也有 4.87:1。 */
+  --primary-text: 243 88% 78%;
+  --success: 152 58% 46%;
+  --success-foreground: 152 60% 8%;
+  --warning: 38 92% 58%;
+  --warning-foreground: 32 70% 10%;
+  --info: 199 85% 60%;
+  --info-foreground: 200 80% 8%;
+  --destructive: 350 82% 62%;
+  --destructive-foreground: 0 0% 100%;
+
+  /* 日志 / 终端井 */
+  --code-bg: 226 36% 4%;
+  --code-border: 222 18% 17%;
+  --code-text: 210 30% 89%;
+  --code-muted: 216 16% 58%;
+  /* 时间戳 / 折叠提示等最弱一级的日志文字：原来 42% 只有约 3.5:1，看不清 */
+  --code-subtle: 215 16% 52%;
+  --code-hover: 224 22% 15%;
+
+  --shadow-panel: 0 1px 2px hsl(226 40% 2% / 0.5), 0 12px 32px hsl(226 40% 2% / 0.42);
+  --shadow-pop: 0 4px 12px hsl(226 40% 2% / 0.5), 0 16px 40px hsl(226 40% 2% / 0.45);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* 浅色靠「白面板 + 灰画布 + 更深的输入井」分层，抬升交给 shadow-panel。
+     原来 card 与 surface-raised 都是纯白、sunken 只差 7%，弹窗里所有分组和
+     输入框都糊在一起 —— 这是浅色主题最主要的对比度缺陷。 */
+  --background: 220 24% 96%;
+  --foreground: 222 40% 13%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 40% 13%;
+  --surface-raised: 0 0% 100%;
+  --surface-sunken: 220 24% 90%;
+  --surface-muted: 220 22% 94%;
+
+  --secondary: 220 20% 94%;
+  --secondary-foreground: 222 38% 15%;
+  --muted: 220 20% 95%;
+  /* 浅色下 muted-foreground 要压到 36% 以内才对「井 90%」过 4.5:1；
+     同时必须比 --placeholder 更深（浅色里越低越强），否则标签比占位符还淡。 */
+  --muted-foreground: 218 14% 34%;
+  --accent: 220 20% 92%;
+  --accent-foreground: 222 38% 15%;
+
+  --border: 220 16% 88%;
+  --border-subtle: 220 16% 92%;
+  --border-strong: 220 14% 78%;
+  --input: 220 16% 84%;
+  --ring: 243 70% 58%;
+  --highlight: 0 0% 100%;
+  /* 输入框边缘 / 占位符（浅色下都得更实一点才看得出） */
+  --field-border: 220 14% 62%;
+  /* 占位符：在输入井（90%）上也要过 4.5:1，且必须比 --muted-foreground 淡一档 */
+  --placeholder: 218 12% 40%;
+
+  --primary: 243 70% 58%;
+  --primary-foreground: 0 0% 100%;
+  /* 浅色下 --primary 当文字在纯白卡片上有 6.25:1，但「主色淡底 + 主色文字」
+     （.row-selected / active 标签页）会掉到 4.3:1，所以这里压深一档到 50%
+     （最差一格 primary/20 on sunken 仍有 5.21:1），观感仍是同一个紫。 */
+  --primary-text: 243 72% 50%;
+  /* 语义色当文字用也必须过 4.5:1 —— 而且这里算的是「叠在本色 15% 淡底上」
+     的实际对比（原来 warning/destructive 只有 3.5~4:1），所以浅色档要更深。 */
+  --success: 152 62% 24%;
+  --success-foreground: 0 0% 100%;
+  --warning: 30 92% 27%;
+  --warning-foreground: 0 0% 100%;
+  --info: 199 82% 27%;
+  --info-foreground: 0 0% 100%;
+  --destructive: 350 72% 40%;
+  --destructive-foreground: 0 0% 100%;
+
+  /* 日志井在浅色主题下依然是深色（终端语义） */
+  --code-bg: 224 30% 11%;
+  --code-border: 224 18% 22%;
+  --code-text: 210 30% 91%;
+  --code-muted: 216 16% 62%;
+  --code-subtle: 215 16% 54%;
+  --code-hover: 224 22% 18%;
+
+  --shadow-panel: 0 1px 2px hsl(220 40% 20% / 0.06), 0 10px 28px hsl(220 40% 20% / 0.08);
+  --shadow-pop: 0 6px 16px hsl(220 40% 20% / 0.1), 0 18px 44px hsl(220 40% 20% / 0.12);
+}
+
+@layer base {
+  * {
+    /* 无边框语言：默认描边透明，任何遗留的 `border` 宽度都不会画出灰线 */
+    @apply border-transparent;
+  }
+
+  html,
+  body {
+    @apply h-full w-full overflow-hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    font-size: 12px;
+  }
+
+  #root {
+    @apply flex h-full min-h-0 w-full flex-col;
+  }
+
+  /* 桌面级滚动条：窄、低对比，悬停才明显 */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--foreground) / 0.14);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--foreground) / 0.26);
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::selection {
+    background-color: hsl(var(--primary) / 0.32);
+  }
+
+  :focus-visible {
+    outline: none;
+  }
+}
+
+@layer components {
+  /* ---- 表面与面板 ----
+     无边框语言：层级靠「底色明暗」而非描边表达。
+     画布 background < 面板 card < 抬升 raised；沉井 sunken 更暗，用于输入/日志/嵌套分组。
+
+     嵌套铁律（改任何 `bg-sunken` / `bg-surface-muted` 之前先读这段）：
+     1. `bg-sunken` 里不得再放 `bg-sunken` —— 同色号叠加等于没有分组。
+     2. `bg-surface-muted/40`·`/50` 这类半透明不要再手写：直接落在 `bg-raised`
+        的弹窗上时（40% × 12% ≈ 11.8%）与弹窗自身 14% 几乎同色，看着就是没分。
+     3. 分组只有两种合法做法：
+        - `.well`      = 一个「井」（列表 / 编辑器 / 内容面板），用 bg-sunken。
+        - `.group-well`= 井**里面**再分一层的小组标题带 / 分组块，往上走一档 bg-surface-muted。
+        弹窗内的一级分组用 `.well`；`.well` 内再分组才用 `.group-well`。 */
+  .panel {
+    @apply flex min-h-0 flex-col overflow-hidden rounded-lg bg-card;
+  }
+
+  .well {
+    @apply rounded-md bg-sunken;
+  }
+
+  .group-well {
+    @apply rounded-md bg-surface-muted;
+  }
+
+  .panel-header {
+    @apply flex shrink-0 items-center justify-between gap-2 px-3 py-2;
+  }
+
+  .panel-title {
+    @apply text-ui font-semibold tracking-tight text-foreground;
+  }
+
+  .panel-body {
+    @apply min-h-0 flex-1 overflow-auto;
+  }
+
+  .panel-footer {
+    @apply flex shrink-0 items-center justify-between gap-2 bg-surface-muted px-3 py-1.5 text-caption text-muted-foreground;
+  }
+
+  /* 全大写小标题：面板内的分组标签 */
+  .label-caps {
+    @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground;
+  }
+
+  .section-title {
+    @apply flex items-center gap-1.5 text-ui font-semibold text-foreground;
+  }
+
+  /* ---- 按钮：primary（实心强调）/ 软底（默认与 outline）/ ghost（无底） ---- */
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-1.5 rounded-md bg-secondary/60 px-3 py-1.5 text-caption font-medium text-foreground transition-colors;
+    @apply hover:bg-secondary focus-visible:ring-2 focus-visible:ring-ring/40;
+    @apply disabled:cursor-not-allowed disabled:bg-muted/60 disabled:text-muted-foreground disabled:hover:bg-muted/60;
+  }
+
+  .btn-primary {
+    @apply bg-primary text-primary-foreground shadow-inset hover:bg-primary/90;
+    @apply disabled:bg-muted disabled:text-muted-foreground disabled:hover:bg-muted;
+  }
+
+  .btn-danger {
+    @apply bg-destructive/15 text-destructive hover:bg-destructive/25;
+    @apply disabled:bg-muted/60 disabled:text-muted-foreground disabled:hover:bg-muted/60;
+  }
+
+  .btn-outline {
+    @apply bg-secondary/45 hover:bg-secondary;
+    @apply disabled:bg-muted/60 disabled:text-muted-foreground disabled:hover:bg-muted/60;
+  }
+
+  .btn-ghost {
+    @apply bg-transparent text-muted-foreground shadow-none hover:bg-secondary hover:text-foreground;
+  }
+
+  .btn-icon-danger {
+    @apply inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive;
+    @apply focus-visible:ring-2 focus-visible:ring-destructive/40;
+  }
+
+  .btn-compact {
+    @apply gap-1 px-2 py-1 text-[11px];
+  }
+
+  /* ---- 图标按钮（顶栏 / 面板通用） ---- */
+  .icon-button {
+    @apply inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground;
+    @apply focus-visible:ring-2 focus-visible:ring-ring/40;
+  }
+
+  /* ---- 开关 ---- */
+  .ui-switch {
+    @apply relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full bg-muted transition-colors;
+    @apply focus-visible:ring-2 focus-visible:ring-ring/40;
+  }
+
+  .ui-switch-on {
+    @apply bg-primary;
+  }
+
+  .ui-switch-knob {
+    @apply absolute top-0.5 h-3 w-3 rounded-full bg-background shadow transition-transform;
+  }
+
+  /* ---- 分段导航（右栏四个工作区切换）---- */
+  .segmented {
+    @apply flex shrink-0 items-stretch gap-0.5 rounded-lg bg-sunken p-0.5;
+  }
+
+  .segmented-item {
+    @apply relative flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground;
+    @apply focus-visible:ring-2 focus-visible:ring-ring/40;
+  }
+
+  .segmented-item-active {
+    /* 选中态统一口径：淡色填充 + 1px 强调色光边。
+       只靠 bg-raised 换底色时，容器是 bg-sunken 还是 bg-card 会让"选中"看起来时有时无。 */
+    @apply bg-primary/10 text-foreground ring-1 ring-primary/40;
+  }
+
+  /* ---- 徽章 / 胶囊 ---- */
+  .badge {
+    @apply inline-flex shrink-0 items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground;
+  }
+
+  .badge-primary {
+    @apply bg-primary/15 text-primary-text;
+  }
+
+  .badge-success {
+    @apply bg-success/15 text-success;
+  }
+
+  .badge-warning {
+    @apply bg-warning/15 text-warning;
+  }
+
+  .badge-danger {
+    @apply bg-destructive/15 text-destructive;
+  }
+
+  .badge-info {
+    @apply bg-info/15 text-info;
+  }
+
+  .status-pill {
+    @apply inline-flex shrink-0 items-center gap-1.5 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-medium leading-none text-muted-foreground;
+  }
+
+  /* ---- 工作区底栏（Agent 输入 / Chat 填表） ---- */
+  .workbench-footer {
+    @apply shrink-0 bg-surface-muted;
+  }
+
+  /* ---- 上下文徽章（@引用 / 目标环境） ---- */
+  .context-badge {
+    @apply inline-flex max-w-full items-center gap-1.5 rounded-md bg-primary/10 px-2 py-1 text-[11px] font-medium text-foreground;
+  }
+
+  /* ---- 弹层 ---- */
+  .modal-overlay {
+    /* pointer-events-auto：浮层可能挂在 `pointer-events-none` 容器里（如介入收件箱），
+       不显式取回指针事件时弹窗可见但点不动、输不了字。 */
+    @apply pointer-events-auto fixed inset-0 z-50 flex items-center justify-center bg-black/[0.55] p-4 backdrop-blur-[2px];
+  }
+
+  .modal-overlay-elevated {
+    @apply z-[60];
+  }
+
+  .modal-panel {
+    @apply max-h-[90vh] w-full overflow-auto rounded-xl bg-raised shadow-panel;
+  }
+
+  /* ---- 列表行选中态 ----
+     一个语义只有一个口径：淡色填充 + 1px 内描边光边，不再用 bg-secondary/60、
+     bg-primary/[0.04]、bg-primary/[0.06] 这类「几乎看不出来」的差异。
+     hover 必须用带色相的主色淡填：灰阶（secondary / accent）在「井 4%」与
+     「抬升 16%」两类父面上不是太黑就是没差，只有彩色相在任何父面上都读得出。 */
+  .row-selectable {
+    @apply transition-colors hover:bg-primary/[0.07];
+  }
+
+  .row-selected {
+    @apply bg-primary/10 ring-1 ring-inset ring-primary/40;
+  }
+
+  /* ---- 表单 ---- */
+  .field-label {
+    @apply flex flex-col gap-1.5 text-caption font-medium text-foreground;
+  }
+
+  .field-input {
+    /* 无边框语言下，容器不描边；但可编辑控件必须看得出边界，
+       否则「哪一格能打字」全靠猜。这里用非透明的井 + 1px 内描边。 */
+    @apply rounded-md bg-sunken px-2.5 py-1.5 text-ui font-normal text-foreground outline-none transition-colors;
+    @apply ring-1 ring-inset ring-field/70 placeholder:text-placeholder;
+    @apply hover:ring-field focus:ring-2 focus:ring-inset focus:ring-ring/50;
+  }
+
+  .field-hint {
+    @apply text-[10px] leading-4 text-muted-foreground;
+  }
+
+  /* ---- 勾选框 ---- */
+  .checkbox {
+    @apply inline-flex h-4 w-4 items-center justify-center rounded bg-secondary text-primary transition-colors;
+    @apply hover:bg-secondary/80 focus-visible:ring-2 focus-visible:ring-ring/40;
+  }
+
+  .checkbox-checked {
+    @apply bg-primary text-primary-foreground hover:bg-primary;
+  }
+
+  /* ---- 状态点 ---- */
+  .status-dot {
+    @apply h-2 w-2 rounded-full bg-muted-foreground/50;
+  }
+
+  .status-running {
+    @apply bg-success shadow-[0_0_0_3px_hsl(var(--success)/0.18)];
+  }
+
+  .status-stopped {
+    @apply bg-muted-foreground/60;
+  }
+
+  /* ---- 风控评分徽章 ---- */
+  .score-badge {
+    @apply inline-flex min-w-[3rem] items-center justify-center rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold;
+  }
+
+  .score-good {
+    @apply bg-success/15 text-success;
+  }
+
+  .score-warn {
+    @apply bg-warning/15 text-warning;
+  }
+
+  .score-bad {
+    @apply bg-destructive/15 text-destructive;
+  }
+
+  .score-neutral {
+    @apply bg-secondary text-muted-foreground;
+  }
+
+  /* ---- 横幅（顶栏下方） ---- */
+  .banner {
+    @apply flex min-h-[38px] items-center justify-between gap-3 bg-destructive/10 px-4 py-2 text-caption text-destructive;
+  }
+
+  /* ---- 表格：无竖线，仅斑马纹 + 悬停 ---- */
+  .data-table {
+    @apply w-full border-collapse text-ui;
+  }
+
+  .data-table thead th {
+    @apply sticky top-0 z-10 bg-surface-muted px-2.5 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground;
+  }
+
+  .data-table tbody tr:nth-child(even) {
+    @apply bg-secondary/25;
+  }
+
+  .data-table tbody tr {
+    @apply transition-colors;
+  }
+
+  .data-table tbody tr:hover {
+    @apply bg-secondary/40;
+  }
+
+  /* ---- 键盘提示 ---- */
+  .kbd {
+    @apply inline-flex items-center rounded bg-surface-muted px-1 font-mono text-[10px] leading-4 text-muted-foreground;
+  }
+
+  /* ---- Agent 监视日志卡片 ----
+     恒定深色的日志井内展示，配色不随主题变化，集中在这里统一调。
+     无边框：靠左侧语义色条 + 底色区分。 */
+  .monitor-card {
+    @apply relative overflow-hidden rounded-md;
+  }
+
+  .monitor-card--thought {
+    @apply bg-code-hover/40;
+  }
+
+  .monitor-card--perceive {
+    @apply bg-sky-500/[0.10];
+  }
+
+  .monitor-card--action {
+    @apply bg-emerald-500/[0.10];
+  }
+
+  .monitor-card--alert {
+    @apply bg-amber-500/[0.15];
+  }
+
+  .monitor-card--success {
+    @apply bg-emerald-500/[0.15];
+  }
+
+  .monitor-card--error {
+    @apply bg-red-500/[0.15];
+  }
+
+  .monitor-accent--thought {
+    @apply bg-code-subtle;
+  }
+
+  .monitor-accent--perceive {
+    @apply bg-sky-400;
+  }
+
+  .monitor-accent--action {
+    @apply bg-emerald-400;
+  }
+
+  .monitor-accent--alert {
+    @apply bg-amber-400;
+  }
+
+  .monitor-accent--success {
+    @apply bg-emerald-500;
+  }
+
+  .monitor-accent--error {
+    @apply bg-red-400;
+  }
+
+  .monitor-icon--thought {
+    @apply text-code-muted;
+  }
+
+  .monitor-icon--perceive {
+    @apply text-sky-300;
+  }
+
+  .monitor-icon--action {
+    @apply text-emerald-300;
+  }
+
+  .monitor-icon--alert {
+    @apply text-amber-300;
+  }
+
+  .monitor-icon--success {
+    @apply text-emerald-300;
+  }
+
+  .monitor-icon--error {
+    @apply text-red-300;
+  }
+
+  .monitor-title--thought {
+    @apply text-code-muted;
+  }
+
+  .monitor-title--perceive {
+    @apply text-sky-300;
+  }
+
+  .monitor-title--action {
+    @apply text-emerald-200;
+  }
+
+  .monitor-title--alert {
+    @apply text-amber-200;
+  }
+
+  .monitor-title--success {
+    @apply text-emerald-300;
+  }
+
+  .monitor-title--error {
+    @apply text-red-300;
+  }
+}

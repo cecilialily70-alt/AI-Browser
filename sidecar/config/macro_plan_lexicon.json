@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "_comment": "MACRO_ANALYZE 长程门禁词表（纯数据）。命中后才跑独立 Planner；短任务不进本相位。删除本文件时代码退化为内置兜底词。可用 TIANSHUTAI_MACRO_PLAN_LEXICON 指向自定义路径。",
+  "strongTriggers": {
+    "_comment": "单独命中即可启用 MACRO_ANALYZE（对比/报告/多站类）",
+    "terms": [
+      "对比",
+      "比价",
+      "比较",
+      "对照",
+      "报告",
+      "调研",
+      "汇总",
+      "综述",
+      "多站点",
+      "跨站",
+      "跨平台",
+      "三家",
+      "两家",
+      "几家",
+      "几个平台",
+      "多个平台",
+      "多家",
+      "长任务",
+      "compare",
+      "comparison",
+      "versus",
+      " vs ",
+      "report",
+      "multi-site",
+      "cross-site"
+    ]
+  },
+  "weakTriggers": {
+    "_comment": "弱触发：须同时满足站点≥2 或预估步数≥8，避免「规划/plan」单独误杀短任务",
+    "terms": ["规划", "plan", "拆解", "子任务", "分步"]
+  },
+  "platformMarkers": {
+    "_comment": "通用平台名标记，用于统计目标里出现了几个站点（非选择器、非结算文案）",
+    "terms": [
+      "淘宝",
+      "天猫",
+      "京东",
+      "拼多多",
+      "抖音",
+      "小红书",
+      "亚马逊",
+      "amazon",
+      "ebay",
+      "知乎",
+      "微博",
+      "百度",
+      "谷歌",
+      "必应",
+      "google",
+      "bing",
+      "baidu",
+      "taobao",
+      "tmall",
+      "jd",
+      "pinduoduo"
+    ]
+  },
+  "thresholds": {
+    "minSites": 2,
+    "minEstimateSteps": 8,
+    "stepsPerSite": 3,
+    "synthesizeSteps": 2
+  },
+  "siteHomepages": {
+    "_comment": "目标里出现站名时，规划可补的首页。搜索引擎不在此列，走 page_policy 的 engineHomepage。",
+    "entries": [
+      { "label": "淘宝", "pattern": "淘宝|taobao", "url": "https://www.taobao.com/" },
+      { "label": "京东", "pattern": "京东|jd\\.com", "url": "https://www.jd.com/" },
+      { "label": "知乎", "pattern": "知乎|zhihu", "url": "https://www.zhihu.com/" },
+      { "label": "微博", "pattern": "微博|weibo", "url": "https://weibo.com/" }
+    ]
+  }
+}

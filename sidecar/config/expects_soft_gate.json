@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "_comment": "Plan Expects soft-gate（P0.2）。首次违反只强 nudge；连续 N 次同一违反签名则强制 replan，禁止继续原动作。简单 SERP 任务（isSimpleAgentTask）永不因 soft-gate 强制 replan。可用 TIANSHUTAI_EXPECTS_SOFT_GATE_STREAK 覆盖 N。无站点文案。",
+  "consecutiveViolationsToReplan": 2
+}

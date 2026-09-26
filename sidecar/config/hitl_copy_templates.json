@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "_comment": "P1.4 HITL 情境文案模板兜底。LLM 超时/失败/输出不合规时使用；禁止站点硬编码。可用 TIANSHUTAI_HITL_COPY_TEMPLATES 覆盖路径。",
+  "llmTimeoutMs": 10000,
+  "templates": {
+    "enter_code": {
+      "title": "需要你输入验证码",
+      "body": "当前页面在等待邮箱/短信/验证器里的一次性验证码。\n请打开对应收件箱或验证器，把刚收到的码填到下方。\n系统不会猜测或编造验证码。",
+      "primaryButton": "提交验证码"
+    },
+    "complete_challenge": {
+      "title": "需要你完成人机验证",
+      "body": "自动过验证码已达上限或无法继续。\n请在浏览器里手动完成滑块/点选等人机挑战。\n完成后点继续，Agent 会重新感知页面。",
+      "primaryButton": "我已完成验证"
+    },
+    "confirm_payment": {
+      "title": "支付前需你确认",
+      "body": "即将触及支付/扣款相关操作，Agent 不会自动提交支付。\n请核对金额与收款方后，由你本人确认或接管浏览器完成支付。\n取消将视为本步失败，Agent 不会换说法重试同一支付动作。",
+      "primaryButton": "确认继续"
+    },
+    "take_over_browser": {
+      "title": "需要你接管浏览器",
+      "body": "当前步骤无法安全自动完成，Agent 已暂停。\n请在浏览器中手动处理当前页面，完成后点继续。\n若无法继续，可中止本次任务。",
+      "primaryButton": "我已处理，继续"
+    }
+  }
+}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>天枢台翻译</title>
+    <style>
+      body {
+        margin: 0;
+        min-width: 220px;
+        font: 13px/1.45 system-ui, "Segoe UI", sans-serif;
+        color: #111;
+        background: #fff;
+      }
+      .wrap {
+        padding: 12px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 14px;
+      }
+      p {
+        margin: 0 0 10px;
+        color: #555;
+        font-size: 12px;
+      }
+      button {
+        width: 100%;
+        border: 1px solid #d0d0d0;
+        border-radius: 6px;
+        background: #111;
+        color: #fff;
+        padding: 8px 10px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button:hover {
+        background: #333;
+      }
+      .hint {
+        margin-top: 8px;
+        font-size: 11px;
+        color: #888;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>页面翻译</h1>
+      <p>用 Google 翻译打开当前页（绕过浏览器原生灰掉的「翻譯…」）。</p>
+      <button id="translate-btn" type="button">翻译当前页</button>
+      <div class="hint">也可在页面空白处右键 →「翻译整个页面」</div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

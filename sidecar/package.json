@@ -1,0 +1,26 @@
+{
+  "name": "ai-browser-sidecar",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI Browser Playwright CDP sidecar — JSON stdout IPC only",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "launch": "node dist/launch.js",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "dependencies": {
+    "cloakbrowser": "^0.5.10",
+    "openai": "^4.104.0",
+    "playwright-core": "^1.52.0"
+  },
+  "optionalDependencies": {
+    "mmdb-lib": "^2.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}

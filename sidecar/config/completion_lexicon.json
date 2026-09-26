@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "_comment": "纯数据资源（非代码）：任务完成度验收词典。代码中不含任何站点/业务文案，只把本文件当判定依据。goalIntents.outcome = 成功必须外部可观测（页面跳转/成功提示）的任务意图；goalIntents.informational = 交付物是信息本身（总结/查询）的任务意图。successSignals.strong = 独立即可证明完成的强提示；weak = 泛化词（首页/通用文案里也会出现），只在已有可验证副作用时才作数。删除本文件会退化为通用策略（只要求轨迹里存在可验证副作用）。可用 TIANSHUTAI_COMPLETION_LEXICON 指向自定义路径整体替换。",
+  "policy": {
+    "_comment": "maxDoneRejections：同一任务内 done(success=true) 因缺证据被驳回的上限，超过即放行但在结论里标注「未验证」，避免死循环。scanChars：页面文案扫描上限（字符），控制开销。minClaimChars：informational 目标下结论正文的最短长度，低于视为未交付。",
+    "maxDoneRejections": 2,
+    "scanChars": 6000,
+    "minClaimChars": 30
+  },
+  "goalIntents": {
+    "outcome": {
+      "terms": [
+        "注册", "注册账号", "注册账户", "创建账号", "创建账户", "开户", "登录", "登入", "登陆", "登出", "退出登录", "注销", "提交", "提交表单", "上传", "发送", "发布", "下单", "购买", "支付", "付款", "充值", "提现", "转账", "申请", "预约", "订阅", "关注", "点赞", "评论", "收藏", "报名", "投票", "激活", "绑定", "解绑", "改密", "重置密码", "开通",
+        "register", "sign up", "signup", "create account", "create an account", "open an account", "log in", "login", "sign in", "signin", "log out", "logout", "submit", "upload", "send", "post", "publish", "place order", "checkout", "purchase", "buy", "pay", "deposit", "withdraw", "transfer", "apply", "book", "reserve", "subscribe", "follow", "like", "comment", "enroll", "activate", "bind", "unbind", "reset password", "change password"
+      ]
+    },
+    "informational": {
+      "terms": [
+        "总结", "概括", "摘要", "是什么", "什么是", "多少钱", "价格", "查询", "查找", "告诉我", "回答", "解释", "分析", "统计", "对比", "列出", "提取", "读取", "翻译", "帮我看看", "看一下", "读一下", "探讨", "讨论", "点评", "评价", "评估", "综述", "梳理",
+        "summarize", "summary", "what is", "who is", "how much", "price of", "look up", "find out", "tell me", "answer", "explain", "analyze", "analyse", "compare", "list", "extract", "read", "translate", "how many", "discuss"
+      ]
+    }
+  },
+  "successSignals": {
+    "strong": {
+      "_comment": "不得放入「已下单 / 已付款 / 支付成功 / order placed / payment successful」。那些词只证明不了已付款，见 commerceHalt。",
+      "terms": [
+        "注册成功", "登录成功", "提交成功", "发送成功", "创建成功", "保存成功", "确认成功", "操作成功", "申请成功", "绑定成功", "激活成功", "已成功", "成功创建", "已提交", "已发送", "已收到", "已登录", "欢迎回来", "恭喜",
+        "registered successfully", "registration successful", "successfully registered", "logged in", "login successful", "you are logged in", "signed in", "successfully submitted", "submitted successfully", "your submission", "successfully sent", "message sent", "email sent", "account created", "your account has been created", "successfully created", "successfully applied", "application received", "successfully activated", "verified successfully", "congratulations", "welcome back", "you're all set", "you are all set"
+      ]
+    },
+    "weak": {
+      "terms": [
+        "成功", "已完成", "已保存", "已确认", "已创建", "已开通", "已激活", "完成", "谢谢", "感谢", "欢迎",
+        "success", "successful", "completed", "saved", "confirmed", "created", "activated", "thank you", "thanks", "welcome"
+      ]
+    }
+  },
+  "commerceHalt": {
+    "_comment": "购物/订票停在支付前。prePay=可验证成功态（已加购/已达收银台/待支付），只证明还没付款。notAutoSuccess=不得单独作为 done(success=true) 的强证据（已下单≠已付款；已付款无人工确认也不得自动成功）。paidClaims=只有人工确认支付之后才可引用的付款完成说法。payDemand=目标明确要付掉。checkoutStop=目标只要加购/到结算页。paymentConfirm=用户批准的提交支付动作（不含「去结算/加购」）。",
+    "prePay": {
+      "terms": [
+        "已加购", "已加入购物车", "加入购物车成功", "已达收银台", "已到收银台", "到达收银台",
+        "待支付", "待付款", "等待支付", "等待付款", "请完成支付", "订单待支付",
+        "added to cart", "added to your cart", "item added to cart", "in your cart",
+        "awaiting payment", "payment pending", "pending payment", "ready for payment"
+      ]
+    },
+    "notAutoSuccess": {
+      "terms": [
+        "已下单", "下单成功", "订单已提交", "已付款", "已支付", "支付成功", "付款成功", "支付完成", "付款完成",
+        "order placed", "order confirmed", "order submitted", "payment successful", "payment received",
+        "payment complete", "paid successfully", "successfully paid"
+      ]
+    },
+    "paidClaims": {
+      "terms": [
+        "已付款", "已支付", "支付成功", "付款成功", "支付完成", "付款完成",
+        "payment successful", "payment received", "payment complete", "paid successfully", "successfully paid"
+      ]
+    },
+    "payDemand": {
+      "terms": [
+        "帮我付掉", "帮我支付", "帮我付款", "把钱付了", "付掉",
+        "完成支付", "完成付款", "付款完成", "支付完成", "付款成功", "支付成功",
+        "pay for me", "pay it off", "complete the payment", "complete payment", "make the payment"
+      ]
+    },
+    "checkoutStop": {
+      "terms": [
+        "加购", "加入购物车", "加到购物车", "加进购物车", "结算页", "收银台", "待支付", "停在支付前",
+        "add to cart", "checkout page", "stop before pay", "stop before payment", "reach checkout"
+      ]
+    },
+    "paymentConfirm": {
+      "terms": [
+        "确认支付", "立即付款", "立即支付", "确认付款", "提交支付", "支付订单",
+        "pay now", "confirm payment", "submit payment", "complete purchase",
+        "cvv", "cvc", "安全码", "支付密码", "信用卡", "卡号"
+      ]
+    }
+  },
+  "failureSignals": {
+    "terms": [
+      "失败", "错误", "出错", "无效", "不合法", "被拒绝", "拒绝访问", "禁止访问", "请重试", "请稍后", "不能为空", "已被使用", "已存在", "过于频繁", "超出限制", "验证失败", "校验失败", "格式不正确", "密码错误", "账号或密码", "不安全",
+      "failed", "failure", "invalid", "incorrect", "denied", "access denied", "forbidden", "try again", "please try again", "already taken", "already exists", "too many", "rate limit", "verification failed", "failed to verify", "does not match", "doesn't match", "wrong password", "incorrect password", "unsafe"
+    ]
+  }
+}

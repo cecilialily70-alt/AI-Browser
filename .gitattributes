@@ -1,0 +1,3 @@
+# 打包/下载归档时自动排除的文件（git archive / GitHub 的 Download ZIP、tar.gz 都会生效）
+# 安装包体积大，仓库里保留可见，但下载源码压缩包时不携带
+天枢台环境安装器.exe export-ignore

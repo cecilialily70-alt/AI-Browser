@@ -1,0 +1,543 @@
+# 天枢台 (TianshuTai) · Cursor AI 宪法 (.cursorrules)
+
+> **效力**：本文件是仓库内 AI 编码的最高行为约束。口头讨论、历史计划、其它文档与本文件冲突时，**以本文件为准**。
+> **基线**：2026-09，按全仓库代码事实维护；面向后续**发现 / 修复 BUG** 与增量功能改动。
+> **产品目标**：可靠 L4 Web Agent（监督闭环 · 凭证三层 · 注册/购物停在支付前）。**不追求无人支付。**
+> **用户协作**：非技术用户——少问、少选择题；红线内自行决定命名 / 落点 / 方案并直接做完。**禁止擅自 `git commit` / `push`。**
+> **实现进度**：`执行计划.md`（回放 / 数据集 / 剪贴板 / 外部数据 API 的**计划 + 对外契约**，需求原文亦称 `API对接说明.md`）的 P1–P7 **已实现完成**；它**不放宽 §1 红线**——回放照旧过支付闸门与凭证闸门，预检单**不能**用来「预授权支付」，外部 API 走同一条回放链路与同一套闸门。新增坑族见 §0.5.3，落点见 §10 速查。
+> **检查伴侣**：`docs/检查提示词.MD`（若存在）供「只检查不改码」审计，条款编号（R*/B*/S*）与本文件对齐；二者冲突或伴侣缺失时**以本宪法为准**，审计按 §0.5 + §6.1 + R*/B*/S* 出报告。
+
+**导航**：§0 工作模式与排障 · §1 产品红线 · §2 不可回退 · §3 产品面地图 · §4 改动落点 · §5 UI 纪律 · §6 改码行为与自检 · §7 架构纪律 · §8 Agent 能力约束 · §9 代码健康 · §10 关键路径速查 · §11 总纲
+
+---
+
+## 0. 冲突优先级与工作模式
+
+### 0.1 冲突优先级（自上而下，不可颠倒）
+
+1. **产品红线**（§1）— 不可协商  
+2. **已落地不可回退**（§2）— 含侧栏口径、提取/全景恒开、监督层可拦截  
+3. **发现/修复 BUG 操作**（§0.5）— 排障与修缺陷时优先于「加功能」冲动  
+4. **产品面与改动落点**（§3–§5）— 新功能/UI 先对号入座再改码  
+5. **资产复用与外科手术**（§6）— 每次改码强制  
+6. **架构边界 / Agent 约束 / 代码健康**（§7–§9）
+
+### 0.2 判定等级（改码与审计共用）
+
+| 等级 | 含义 | 例子 |
+|------|------|------|
+| **P0 红线** | 不可协商；存在即产品不可接受 | 无人支付、编造 OTP/token、核心写死站点、人设接回自动填表 |
+| **P1 回退** | 已落地行为被打回或口径分裂 | Arbiter 仅日志、Ai Chat 挂回 RPA、提取开关列恢复 |
+| **P2 落点错误** | 能力放错层或平行重建 | 在 `chat_engine` 另起 Agent 循环；Puppeteer 第二启动栈 |
+| **P3 健康债** | DRY/死代码/文案不一致，未破红线 | 重复工具函数、过时注释、词典混用 |
+| **INFO** | 合法残留或说明性发现 | DB 保留 `profiles.persona_data`（无读写方）/ `agent_persona_selection`（仅兼容回落读）；RPA 面板文件未挂载 |
+
+### 0.3 工作模式
+
+| 用户意图 | AI 必须 |
+|----------|---------|
+| 「检查 / 审计 / 对照提示词」 | **只报告，不改码**；不跑真实注册/购物/支付；不 commit/push；不删文件。有伴侣则按伴侣 §Z；否则按本文件 §0.5.5 输出。 |
+| 「修 / 修 BUG / 修复 / 为什么坏了」 | 走 §0.5：**先定位根因再最小修复**；禁止借修 BUG 重写整文件或顺手加功能。 |
+| 「改 / 实现 / 重构 / 加功能」 | 红线内直接做完；最小 diff；交付说明见 §6；禁止擅自 commit/push。 |
+| 与代码事实冲突 | **先改本宪法（或相关文档）再编码**，并在回复里说明。 |
+
+### 0.4 技术栈锚点（不可平行重建）
+
+```
+React (src/) → Tauri 2 / Rust (src-tauri/) → Node Sidecar (sidecar/) → CloakBrowser CDP
+```
+
+- Host：SQLite 单写队列、密钥、进程生命周期、IPC — **唯一可信边界**。  
+- Sidecar：无状态执行；stdin JSON / stdout JSONL；上报本地 IPC。  
+- `playwright-core` 仅作现有 CDP 连接库；**禁止**再引入 Puppeteer、Selenium 或第二浏览器启动栈。禁止因「文件里有 playwright」就拆掉 CDP。
+
+---
+
+## 0.5 发现与修复 BUG — 操作手册（优先阅读）
+
+> 用户说「帮我查问题 / 修 BUG」时：**先读本节**，再按症状表跳到文件；不要从零扫全仓，也不要先开「下一阶段功能」。
+
+### 0.5.1 修 BUG 强制五步
+
+1. **归类**：UI 回退 / 运行时崩溃 / 填表错乱 / 验证码失败 / OTP·HITL / 支付相关 / Chat·桥接 / 引擎互斥 / 设置不同步。对照 §0.2 定级（P0–INFO）。  
+2. **对症落点**：查 §0.5.2 症状表 → 打开对应文件；同时 Grep §10 与 §6.1 关键词。  
+3. **写清 Root Cause（1–3 句）**：先证据后猜想。优先：错误类型 / `phase` / 事件字段 / 日志结构化字段；**禁止**把 `err.message.includes("某中文")` 当主路径修复手段（见 §6）。  
+4. **最小修复**：只改导致问题的最小范围；先复用现有封装；配置/Skill/适配器能解决的不改主循环。修完对照 §0.5.3 防复发。  
+5. **短汇报**：症状 → 根因 → 改了哪些文件 → 有无碰红线（R*/B*）→ 残留字段谁写/谁读（若涉及）。
+
+### 0.5.2 症状 → 优先落点（先打开这些）
+
+| 用户/日志症状 | 优先打开 | 旁路核对 |
+|---------------|----------|----------|
+| Agent 中途挂、页已关、`Target closed`、上下文销毁 | `bu_agent/service.ts`（`pickLivePage` / `AllPagesClosedError`） | `launch.ts`、Host `browser_manager` |
+| 输入框被清空再重打、填完又纠正、尾字符丢失 | `core/action_gateway.ts`、`core/fill_verify.ts`、`bu_agent/actions.ts` | `fill_interactions.ts` |
+| 滑块过不了、缺口乱跳、拖完失败 | `bu_agent/slider_captcha.ts`、`bu_agent/captcha_*.ts` | captcha strategy / Layer 升级逻辑 |
+| 点选验证码点错、题干读飞、凭空造目标点 | `bu_agent/point_select/`、`animated_captcha.ts` | **禁止**失败时编造坐标/token（R2） |
+| 验证码总失败却不弹人工 | captcha 策略与阈值、`hitl_policy.ts` | 设置 `CaptchaOtpSettingsTab` 与运行时是否一致 |
+| 验证界面刚出现就「找不到验证码控件」、连报 3 次失败 | `captcha_dispatch.ts`（组件就绪等待 `hasVisibleCaptchaWidget`/`waitForCaptchaWidget`）、对应求解器的目标轮询 | 组件异步渲染，须等到结构可见再定位；**禁止**判「用户没开提取」 |
+| 邮箱/短信码拿不到、乱猜码、附件图取码 | `sidecar/src/otp/`、`core/human_credential.ts` | Chat 附件路径（B7）；网页邮箱须显式启用（R5） |
+| 停不住支付、假装已付款、`done` 成功可疑 | `core/completion_evidence.ts`、`deliverable_verify.ts`、commerce/booking Skill | `hitl_policy.ts`（`awaiting_human_payment`） |
+| Arbiter/Expects「只说话不拦」 | `arbiter.ts`、`plan_expects.ts`、`expects_soft_gate_policy.ts` | 禁止打回仅日志（B1） |
+| Chat 想自动点网页 / 另起半套 Agent | `chat_engine.ts`、`agentGoalRouter.ts` | Host `start_autonomous_agent`；禁止 Chat 内循环（B2） |
+| 采集结果在 Agent Tab 有、Ai Chat 没有 | `ScraperDataPanel.tsx`、事件 `scraper-data-collected` | `AIChatPanel` / `AIFillDrawer`（S4） |
+| 同环境两套引擎抢浏览器 | `engine_mutex.ts`、Host `rpa_session` | 新命令是否绕过互斥（S5） |
+| 鼠标轨迹/CDP 输入异常、点击偏、拖拽无效 | CloakBrowser 补丁 / CDP 连接路径、`action_gateway` | **禁止**为过检测改指纹（R3） |
+| 人设姓名重复、读了环境人设、地址与代理城不符；人设没写 @ 却生效了 | `persona_engine.ts`、`AgentRulesModal`（人设栏） | Agent/填表不得读 `profiles.persona_data`（已下线）；只认被 `@人设名` 引用的人设的固定字段（R6）；没有 @ 就不套人设 |
+| 用户自定义完成条件不生效 / AI 自称完成却没达标 / 命中即完成却不收尾 | `core/task_rules.ts`、`bu_agent/actions.ts`（`done` 闸门）、`bu_agent/service.ts`（每步巡检 + `completedByRule` 收尾） | 严格条件由机器核对，不靠模型自述；收尾同样过 `completion_evidence.blocksRuleAutoComplete`（支付/凭证红线） |
+| 回放里写 `@人设/@规则` 不生效 / `{{persona.*}}` 不展开 | `BatchReplaySandbox.tsx`（目标编辑 + `resolveGoalMentions`）、`src-tauri/src/rpa_session.rs`（`persona_data` / `task_rules` / `task_persona` 转发）、`sidecar/src/index.ts`（`handleTrajectoryReplay` 的规则运行时与收尾硬闸） | 回放@ 与 Agent 同一套解析；Host 只转发不判定；没写 @ 时 `{{persona.*}}` 保持原样（不静默套环境人设） |
+| 提取失败却提示「请先开启元素提取」 | `page_pipeline/`、`interactive_elements.ts`、ProfileTable 文案 | 提取/全景**恒开无开关**（B6 / §3.4） |
+| Ai Chat 又出现 RPA 模板 UI | `AIChatPanel` / `AIFillDrawer` 引用 | 禁止挂回（B5）；文件可留 |
+| HITL 双弹窗抢焦点 | `InterventionCenter*` | 禁止第二收件箱（§5.6） |
+| consult/AI 答错后无法复盘 | `service.ts` consult 路径、`json-logger` `agentProgress`、轨迹写入 | 拒绝原因与原始答案必须留痕 |
+| 设置开关与运行时行为不一致 | 对应 `settings/*Tab.tsx` + Sidecar 读取处 | 密钥只经 `secret_store` |
+
+### 0.5.3 已踩坑族 — 修同类问题时禁止再犯
+
+> 按类别分组；「错误做法」都是已真实踩过的坑，「正确做法」是硬约束。
+
+**A · 判定与错误处理**
+
+- **脆弱字符串匹配** — 错误做法：`err.message.includes("页面关闭")` 当主逻辑；正确做法：用类型 / 错误码 / 稳定 `phase`（如 `AllPagesClosedError`）。
+- **瞬时回读当真** — 错误做法：`fill` 不抛错就假定 DOM 已落值，立刻纠正「空/丢尾」；正确做法：受控组件要延迟/稳态回读，纠正策略勿过激（见 `fill_verify`）。
+- **DOM 已卸仍算** — 错误做法：忽略 `isConnected` / 已关闭 Page；正确做法：操作前校验连接与存活页。
+- **校验失败谎报为未命中** — 错误做法：判定**没跑成**（选择器语法错、页面文本被截断、视觉模型返回垃圾/不可用）却输出「界面未出现」，用户按假失败去改本来正确的规则；正确做法：判定改三态 `matched / not_matched / inconclusive`，只有**真正跑完**才记 `evaluated`，`inconclusive` 一律 fail-closed 拦下收尾并落 `phase: "task_rule_inconclusive"`（带 `ruleId` 与底层原因），禁止把异常吞成 `null`/`false`。
+
+**B · 红线与用户规则**
+
+- **失败后编造** — 错误做法：题干读失败仍捏造点选坐标 / 验证码 token / OTP；正确做法：升 Layer 3 HITL，禁止猜测（R2）。
+- **执行用户脚本** — 错误做法：把规则里的「代码」当 JS 跑（eval / Function / 注入 script）；正确做法：规则只支持 CSS 选择器与文本匹配，视觉走参考图比对。
+- **规则绕过红线** — 错误做法：用户把「出现下单成功」写成完成条件就放行支付页；正确做法：支付闸门在 `completion_evidence` 内**最先**判定，用户规则不得越过，凭证闸门同理；命中即收尾另过 `blocksRuleAutoComplete`（服务端再拦一道）。
+- **做完的一方自己判定做成** — 错误做法：「命中即完成」的规则一命中就收尾，只过支付/凭证红线，**绕过同一批用户写的其它严格完成条件**（用户配「A 命中即完成 + B 必须严格核对」时 B 从未核对）；正确做法：`done` 与「命中即完成」共用**同一个** `guardUserConstraints`（`core/task_rules.ts`）——strict 完成条件 / 流程步骤 / `must_click` 点击台账 / `fixed_data` 钉值都要过，支付与凭证闸门仍最先判定（R1 不动），`sidecar/tests/task-roles.mjs` 锁行为。
+- **配置静默降级 / 静默丢弃** — 错误做法：参考图超上限、规则/步骤/附件超量、人设零固定字段、flow 步数超总上限，一律静默丢弃或静默关掉 `strict`/`autoComplete`，用户看到的规则与真正生效的**不是一回事**；正确做法：任何降级/丢弃/截断都写进 `TaskRuleDiagnostic`（`rule_dropped / cap_truncated / image_rejected / flag_downgraded / step_cap_reached / persona_empty / condition_incomplete`），后端落 `phase: "task_rules_diagnostics"`，前端规则窗口黄条**先说后跑**；上限用尽导致判据失效时在 `guardUserConstraints` 给出明确理由（A6），不装「无需校验」。
+
+**C · 架构与工程纪律**
+
+- **借 BUG 重构** — 错误做法：修一处顺便重写 `service.ts` / 改产品口径；正确做法：一次一类问题，最小 diff。
+- **平行重建** — 错误做法：Chat 内再写半套点击循环；再引 Puppeteer；正确做法：走现有 Agent / CDP 栈。
+- **开关幽灵** — 错误做法：新逻辑依赖「用户关掉了提取」；正确做法：提取/全景运行时视为开，失败报真实原因。
+- **幽灵 AI 决策** — 错误做法：consult 拒答不记原因；正确做法：`agentProgress` + 轨迹留 `accepted` / `rejectReason`。
+
+**D · 验证码**
+
+- **组件未就绪即判失败** — 错误做法：验证界面刚出现（题面/骨架先渲染，Arkose 等组件几秒后才注入）就判「找不到目标」，连续 3 次 → 误触验证码硬闸/HITL；正确做法：求解前用**结构判据**确组件可见（`hasVisibleCaptchaWidget`），不可见则按预算轮询等待（≤30s，出现即继续）再定位，等完仍无才 unsupported。
+- **按住时长写死** — 错误做法：长按验证码把按住时长固定成 3s/6s，进度条慢的站点（实测 3~8s 不等）在中途松手 → 判失败、白丢次数；正确做法：只设下限（~3s）与保险丝上限（15s），松手时机由反馈决定（进度条 `progressbar`/`aria-valuenow`/宽度或 `scaleX` 满 → 再保持 0.7s 松手；仍在提示按住 → 继续），松手后**轮询**验收（≤7s），不睡固定时长就下结论。
+
+**E · 协议与并发**
+
+- **协议事件被日志壳包住** — 错误做法：用 `logger.result("xxx_request", {...})` 发宿主事件（宿主按**顶层 `type`** 分发，而该方法把载荷塞进 `data`，宿主永远收不到）→ 请求悬着直到超时，表现是「偶发地什么都没发生」；正确做法：需要宿主处理的事件**裸写 stdout**（`process.stdout.write(JSON.stringify({type,...})+"\n")`），与 `browser_restart_request` 同写法；返回值类结果才用 `logger.result`。
+- **回执早于结果** — 错误做法：外部/长任务按「引擎完成行」收尾（填表引擎先写 `fill_engine_complete`，此时字段闸门与逐字段回执还没生成）→ 拿到「没有回执的成功」；正确做法：每条链路只认**自己的终态行**（如 `external_fill_result`），终态必须包含 `ok` 与逐项结果，缺了就报错而不是当成功。
+- **剪贴板跨 worker 串味** — 错误做法：每个环境各自读系统剪贴板（剪贴板是 **OS 级共享资源**，Playwright 的 context 隔离对它无效）→ A 环境把 B 环境刚复制的内容填进表单，或快照被第一个环境「消费」掉后第二个环境直接报「快照已失效」；正确做法：读取统一走 Host `clipboard.rs` 单例——**全局互斥** + 内存快照 + TTL，快照**按指纹索引且不消费**（多环境各取一次），一致性靠 `dataset_hash`（内容变则拒绝启动），不靠「读一次就作废」。
+- **并发领取不分环境** — 错误做法：多环境共抢同一批数据行，同环境两轮并行 → 绕过引擎互斥、并行踩同一 CDP；正确做法：领取 SQL 内加 `NOT EXISTS`——同一 job 同一 `env_id` 存在**未过期 lease** 时不得再领（S5），租约 + fencing token 防迟到完成覆盖新结果。
+
+**F · 回放 / 数据集 / 人设**
+
+- **随机当唯一** — 错误做法：用随机数 / 时间戳当「每轮唯一标识」→ 会撞值、不可复现，且「预览的和执行的不是一份」；正确做法：唯一性来自**种子 + 序号**（`{{run.uniqueId}}` / `run.seq`，`hash32` 派生），可复现；执行阶段只认预检单 `plan_json`，**不重跑分配器**。
+- **预览与执行漂移** — 错误做法：改了数据集 / 数据行 / 跳过 / 标签策略后仍拿旧预检单开跑 → 实际跑的和用户看过、确认过的不是一份；正确做法：两级指纹——`dataset_hash` 锁数据、`plan_hash` 锁整张执行表（含逐行 edits），启动前 `verify_plan_hash`，不一致即 `409 plan_stale` 拒启动，且**一个页面都不许启动**。
+- **人设绑定环境当开关** — 错误做法：人设「指定给某环境」后 Agent / 回放就自动套用，删了圆圈却仍按环境读 → 用户以为「没写 @ 也生效」；正确做法：人设固定字段存人设自身（`fixedFields`），Agent 与回放都只认 `@人设名`（唯一开关），旧 `agent_persona_selection` 一次性迁移后清空，只留兼容回落。
+- **回放目标只能照抄录制** — 错误做法：回放目标写死在 `trajectory.goal`，用户既改不了词也写不了 `@人设 / @规则`；正确做法：沙盘提供可编辑「回放目标 / 指令」（含 `@` 插入菜单），目标进预检单与派发**同一份**，@ 载荷走 `taskRules / taskPersona / personaData` 三个字段，Host 只转发、Sidecar 判定。
+- **回放不校验用户规则** — 错误做法：回放机械步一跑完就报成功，用户在「规则」里写的完成条件 / 必须点击 / 固定数据在回放里形同虚设；正确做法：@规则 进同一个 `createTaskRulesRuntime`，收尾先跑 `guardUserConstraints`（与 Agent done 闸门同一份），没满足**不报成功**并如实说明差在哪，click 步骤记 `must_click` 台账。
+- **目标与变量漂移** — 错误做法：数据集 / 沙盘换了变量值，但 `goal` 还是录制时的旧词 → AI 交付按旧目标判错，甚至又去搜旧词；正确做法：目标里的 `recordedValue` 改写成 `{{data.<列>}}`，由 Host **逐轮**展开（`replay_job::interpolate_plan_row_goal`）；生成型轮次残留的 `{{data.*}}` 抹成空串，绝不把模板语法喂给模型。
+- **数据集未映射当已生效** — 错误做法：上传了数据行却没做「变量 → 字段」映射，跑完发现一个字段都没换；正确做法：无映射且未显式引用行数据变量时给**黄条**（前端 + 预检单两处），单列单字段自动兜底绑定，解析后显示行列数与未映射计数。
+- **前后端两套解析器分叉** — 错误做法：前端能解析、后端拒收（或反过来），同一份文件两种结论；正确做法：解析规则以 `sidecar/src/core/dataset_parse.ts` 为权威、`src/lib/replayDataset.ts` 同源镜像，改一边必须同步，并用源码级断言锁住关键规则。
+
+**G · 打包与 UI**
+
+- **打包漏运行时数据目录** — 错误做法：便携包只拷 `sidecar/dist` + `node_modules`，漏 `sidecar/config`、`sidecar/agent_skills`，运行时**静默降级**（HITL 退回英文兜底词典 → 中文目标不再覆盖、Skill 全找不到）；正确做法：打包脚本必须连 `config` / `agent_skills` 一起拷，改完抽查便携包 `sidecar\` 目录结构。
+- **弹窗挂进 `pointer-events-none`** — 错误做法：模态框挂在 `pointer-events-none` 容器（如介入收件箱）里，overlay 未显式取回指针事件 → 弹窗可见却点不动、输不了字；正确做法：模态 overlay 显式 `pointer-events-auto`，或把弹窗移出该容器。
+
+### 0.5.4 证据从哪来（定位顺序）
+
+1. 用户描述的界面现象 + 环境是否在跑。  
+2. Sidecar JSONL / `logger.agentProgress`（含 `phase`、结构化 data）。  
+3. 前端介入中心队列与 Agent 监视日志。  
+4. 轨迹记忆 / 运行历史（若该次勾选录制）。  
+5. 再读源码；**不要**一上来改提示词「催模型 done」。
+
+### 0.5.5 只检查不改码时的最短输出
+
+按优先级列出发现项，每条包含：
+
+- **等级**（P0–INFO）  
+- **条款**（R*/B*/S* 或本节坑族）  
+- **证据**（文件路径 + 符号/行为，禁止空喊）  
+- **影响**（一句话）  
+- **建议修复落点**（文件/模块；不写补丁）
+
+结尾：P0/P1 计数；声明未改码、未 commit。
+
+---
+
+## 1. 产品红线 — 不可破坏
+
+### 1.1 禁止实现（R1–R6）
+
+| ID | 禁止项 | 说明 |
+|----|--------|------|
+| **R1** | **无人支付 / 自动扣款 / 自动提交支付** | 支付、转账、改密、删号等 critical 必须 HITL（确认或 handover）。Commerce/Booking 合法终态：`stop_before_pay` → `awaiting_human_payment`。禁止 `done(success=true)` 冒充已付款。契约：`AUTO_PAYMENT_ALLOWED=false`。 |
+| **R2** | **编造短信码 / TOTP / 验证码 token** | 值不在站内；禁止猜测；禁止用视觉「读」短信/邮箱界面代替用户；禁止编造 Turnstile / reCAPTCHA / hCaptcha token。**Chat 附件图同禁**：不得当 Layer 2 自动取码依据。 |
+| **R3** | **为过检测而改指纹 / 注入绕过脚本** | 禁止改 navigator/WebGL 等「骗过」人机。过码走 captcha 策略层；不过则 HITL。 |
+| **R4** | **站点定制脚本写入核心引擎** | 禁止在 `bu_agent/service.ts`、`actions.ts` 等核心循环为某电商/邮箱写死 URL、选择器、文案。差异走 config / Skill / 适配器。 |
+| **R5** | **网页邮箱 UI 作为默认取码主路径** | Gmail/QQ/Outlook 网页翻信仅可作**显式启用**的非默认适配器。默认必须是 IMAP / 临时邮 API；不得偷偷开启。 |
+| **R6** | **环境人设接回自动填表** | 环境人设（`profiles.persona_data`）已**下线**（无常规读写方）；用户人设走「规则」窗口的**人设库**（Host `global_settings.agent_personas`），**不绑定环境**。Agent / 智能填表 / 自动注册**不得**读取 `profiles.persona_data`。人设只在被 `@人设名` 引用时生效（**`@` 是唯一开关**）；勾选「固定」的字段为权威值，未勾选的必填项现生成。详见 §1.4（回放 `{{persona.*}}` 以被 @ 引用的人设整套字段为源）。 |
+
+### 1.2 验证码与凭证三层（必须遵守）
+
+```
+Layer 1 — 内置可自动过（保持并加固，禁止削弱）
+  image_text_read / slider_gap_drag / point_select_click / math_image_solve
+  → solve_captcha；失败满阈值（默认 3）升 Layer 3
+
+Layer 2 — 可委托通道（须已配置；失败回 Layer 3）
+  邮箱 OTP：环境绑定 mailbox（IMAP 或临时邮 API）→ 抽码 → input
+  Token 挑战：Turnstile / reCAPTCHA / hCaptcha → token_challenge_remote
+    （仅设置里启用了第三方 solver；未配置或失败 → Layer 3；禁止编造 token）
+  短信接码、网页邮箱：仅用户显式启用，默认关闭，不得偷偷开启
+
+Layer 3 — 人工确认
+  短信 / TOTP / 通道未配置或失败 / 支付与 critical
+  → HITL；弹窗文案由 AI 按情境生成（结构化事实包 + 模板兜底）
+```
+
+**critical（支付/转账/删号/改密等）永远 Layer 3，不得进 Layer 2。**  
+**sensitive 填写授权（配置驱动）**：用户在目标里写明「其余随机 / 跳过人工」等短语（`action_risk_lexicon.json → goalAuthorization.sensitiveFillTerms`）时，**填写类**敏感字段（邮箱/手机号/密码…）视为已覆盖意图、不再逐条确认；**点击类（提交/同意…）与 critical（支付/卡号/CVV）永不因此豁免**。  
+设置 UI（`CaptchaOtpSettingsTab`）与运行时默认必须一致：短信/网页邮箱默认关。
+
+### 1.3 一次性码与隐私
+
+- 邮箱/短信/OTP **用完即弃**；禁止写入 `results.md`、轨迹明文、控制记忆值字段。  
+- 密钥只经 Host `secret_store`（DPAPI 等）；Sidecar 日志必须脱敏。  
+- 仓库内禁止提交明文 API Key / 代理密码。
+
+### 1.4 填表身份（人设）——人设的唯一权威口径（其它处只引用本节）
+
+- **唯一生效开关**：环境人设表单（`profiles.persona_data`）已下线；用户人设在「规则」窗口的**人设**栏维护（可存无限多条，含国家），**每条人设自己持有字段级「固定」勾选**，**不绑定任何环境**（已无「点圆圈指定给浏览器」「应用于全部浏览器」）。**Agent 任务与轨迹回放都只在输入框 / 回放目标里被 `@人设名` 引用时才生效（无 @ 不套人设，必填项现生成）**——与规则同口径。
+- **字段级固定**：用户勾选「固定」的字段在自动填表时是**权威值**，AI 不得改写；未勾选的必填项由 AI 现生成（`persona_engine.ts`），同轮内前后一致，不得复用上一轮的姓名。
+- **不落盘**：现生成的人设不写回环境；不得提示「必须复用已保存人设」。
+- **地域一致**：地址、电话须与代理 GeoIP 同城；冲突要标明，禁止静默填错城。
+- **敏感字段**：证件号等环境没有的敏感字段走 `ask_user`，禁止编造后假装已有。
+- **回放**：回放目标（`BatchReplaySandbox` 里可编辑的「回放目标 / 指令」）写 `@人设名` → 用该人设的**整套字段**展开 `{{persona.*}}`（不受「固定字段」勾选限制），同任务再写 `@规则名` 则收尾按规则硬校验。没写 @ 时 `{{persona.*}}` 保持原样（未知变量不展开）；旧 `agent_persona_selection` 只作兼容回落，前端一次性迁移后不再写入。
+
+### 1.5 任务结束与步数保险丝
+
+- 做完与否由模型 `done` + 证据门禁（§8）决定。  
+- `maxSteps`：默认 200、硬顶 400；是防死循环保险丝，**不是**完成配额。  
+- 禁止在提示词 / Nudge / Skill 写「步数过 75% 就收尾」「最后一步必须 done」「聊满 N 句结束」。  
+- **Chat 与 Agent 步数无关**；禁止在 `chat_engine` 内再造半自动 Agent 循环。
+
+---
+
+## 2. 已落地行为 — 禁止回退
+
+此后改码 = 修缺陷、去残留、加用户点名的能力；不是重开 Phase。
+
+| ID | 不可回退项 | 纪律 |
+|----|------------|------|
+| **B1** | 监督层可改变行为 | Arbiter / Plan Expects **可拦截**；禁止打回「仅日志」。 |
+| **B2** | Chat 可桥接 Agent | `agentGoalRouter` + Host `start_autonomous_agent`；走现有 Agent，Chat 不另起循环。 |
+| **B3** | 自定义下拉 | combobox/listbox 须确认列表已打开再报点击成功；禁止用 CloakBrowser 不支持的 humanized role 选择器硬点选项。 |
+| **B4** | 中 Tab 主名 **Ai Chat** | 不得改回「智能填表」当产品主名。 |
+| **B5** | Ai Chat **不挂** RPA 模板 UI | 禁止模板下拉、同域套用、保存/删除入口、Tab RPA 角标；`RpaTemplatePanel`/`SaveTemplateModal` 文件可留，**不得挂回**。 |
+| **B6** | 环境列表无提取/全景开关列 | 无「元素提取」「全景截图」产品开关列；「元素提取测试窗」可作次要调试入口。 |
+| **B7** | 聊天附件主路径保留且不取码 | 附件 → vision/摘要可用；**不得**用附件图自动取短信/邮箱码。 |
+
+### 2.1 决策自主（少打扰）
+
+1. 命名、落点、库内方案选型 —— 红线内直接选最符合本宪法的方案并动手；不要列 A/B 让用户挑。  
+2. 不要问「要不要继续？」「先重构吗？」。做完短汇报即可。  
+3. **必须停下来问**的仅有：将破 §1 红线；不可逆删大量用户数据且未授权；用户消息含糊到连要改什么都无法判断。  
+4. 能在 Agent 模式直接做完的，不要为「讨论」切 Plan（除非用户点名）。  
+5. 用户只要「检查 / 审计」：只报告，不改代码、不跑注册测试、不 commit（见 §0.3 / §0.5.5）。
+
+---
+
+## 3. 产品面地图（改 UI / 加功能前先对号）
+
+### 3.1 主壳布局（当前事实）
+
+```
+AppLayout
+├── 左/主区：环境列表 ProfileTable
+│     · 新建 / 批量新建 / 启停 / Cookie 导入导出 / 编辑
+│     · 行内「元素提取测试窗」→ ElementExtractDebugPanel（调试，不是产品开关）
+│     · 无「元素提取」「全景截图」列开关（见 B6 / §3.4）
+├── 右栏抽屉：AIFillDrawer（三个 Tab）
+│     ① 浏览器 Agent — 目标、启停/暂停、思维链、开页栏、监视日志、录制轨迹勾选
+│     ② Ai Chat — 多轮聊天 + 附件 + 采集结果 ScraperDataPanel + 底部可选填表
+│     ③ 轨迹记忆 — 轨迹库 / 运行历史 / 控制记忆 / 沙盘回放
+├── 全局：SettingsModal、InterventionCenter（HITL SSOT）、横幅/对话框
+└── 环境编辑：ProfileFormModal（**已无人设栏**；人设统一到「规则」窗口，见 §1.4）
+```
+
+### 3.2 命名词典（文案只能用这一套）
+
+| 对外名称 | 含义 | 禁止混用 |
+|----------|------|----------|
+| **浏览器 Agent** | 右栏 Tab①；自主任务 | 不要叫「AI 中枢」 |
+| **Ai Chat** | 右栏 Tab②；聊天主轴 | 不要当 Tab 主名写「智能填表」「AI 填表工作室」 |
+| **轨迹记忆** | 右栏 Tab③；轨迹与回放资产 | — |
+| **智能填表** | Ai Chat **底部能力按钮之一**（自然语言→填表） | 不是产品 Tab 名 |
+| **直接填表 / AI 混合填表** | 同底部可选能力 | 不是独立产品线 |
+| **规则** | 浏览器 Agent 底部按钮 + 弹窗（`AgentRulesModal`）；内含「规则」与「人设」两栏 | 不要叫「任务定义库」「结束边界编辑器」 |
+| **环境列表** | 浏览器环境管理 | 不要堆 Agent 状态徽章到侧栏顶栏 |
+| **介入中心** | HITL 单一收件箱 | 禁止第二套互抢确认的弹窗队列 |
+
+### 3.3 设置面（SettingsModal 四 Tab）
+
+| Tab | 职责 | 落点 |
+|-----|------|------|
+| AI 设置 | 模型槽、API、连通性 | `settings/AiSettingsTab.tsx` |
+| 验证码与邮箱 | OTP / 远程 solver / 通道开关 | `settings/CaptchaOtpSettingsTab.tsx` |
+| 常规设置 | 内核、下载、调试类全局项 | `settings/GeneralSettingsTab.tsx` |
+| 代理池 | 代理 CRUD | `settings/ProxyPoolTab.tsx` |
+
+密钥进 Host `secret_store`；禁止明文进仓库或日志。设置项须与 Sidecar 运行时读取一致；无「关了提取就全站不能观察」的诱导文案。
+
+### 3.4 残留与兼容（必须写清谁写、谁读、恒开/忽略）
+
+| 项 | 谁写 | 谁读 | 恒开或忽略 | 改码纪律 |
+|----|------|------|------------|----------|
+| `interactive_element_extract_enabled` / `agent_panorama_enabled` | DB 迁移/创建默认 1；Host 仍可写字段 | 运行时**视为开**；UI **无开关** | **恒开** | 新路径不得依赖「用户关掉了」；失败不得提示「请先开启元素提取」 |
+| `profiles.persona_data` | **无写入方**（`set_profile_persona_data` 命令、Sidecar 上报、DB 写队列项均已移除；列保留避免迁移风险） | **无读取方**（回放与 data_planner 已改读规则库人设） | **忽略** | INFO 残留；禁止接回自动注册/智能填表数据源；用户人设走规则库 |
+| 规则库人设（`global_settings.agent_personas`，含 `fixedFields` / `fixedFieldsConfigured`） | 「规则」窗口（`AgentRulesModal` → Host `update_setting`）；「固定」直接写人设自身 | Agent 任务（`AIFillDrawer` 输入框 `@人设名`）、回放（`BatchReplaySandbox` / 单环境回放目标 `@人设名`）**仅在有 @ 时读取** | 无 @ 即不下传（未配置则现生成）；人设不绑定环境 | 口径见 §1.4；未勾选字段现生成；禁止写回 `profiles.persona_data`；禁止恢复「点圆圈指定给浏览器」「应用于全部浏览器」 |
+| `agent_persona_selection`（旧：profile → 人设 + 固定字段） | **无写入方**（前端迁移时写一次 `{}` 后不再写） | **仅兼容回落**：`db::resolve_agent_persona_for_profile`（回放 / data_planner 在没拿到 `@人设` 载荷时查它） | 一次性迁移把字段并进人设 `fixedFields` 后清空 | INFO 残留；禁止新增读取方，禁止用它当「人设生效开关」 |
+| `RpaTemplatePanel.tsx` / `SaveTemplateModal.tsx` | —（未挂载） | 无 Ai Chat 引用 | **INFO 残留** | 引擎/DB 模板表可留；禁止挂回 Ai Chat；删文件前须全仓零引用 |
+| `Agent` 命令上的 `taskRules` / `taskPersona` / `attachments` | 前端 `tauri.ts` → `rpa_session.rs` → Sidecar | Sidecar `core/task_rules.ts` 归一化后注入提示词 + done 闸门 | 缺省即不改变原行为 | 规则里的「代码」只支持选择器/文本，**禁止执行用户脚本**；附件禁止取 OTP |
+
+---
+
+## 4. 功能改动落点手册（新能力往哪放）
+
+### 4.1 选型顺序（强制）
+
+1. **配置** `sidecar/config/*.json`（词表、风险、策略阈值、HITL 模板）  
+2. **Skill** `sidecar/agent_skills/*/SKILL.md`（领域阶段、流程手册）  
+3. **适配器**（如 `otp/` 新 provider、captcha 策略项）  
+4. **薄封装模块**（`core/`、`page_pipeline/`、独立 `*_engine.ts`）  
+5. **最后才动** `bu_agent/service.ts` 主循环 / Host 会话内核  
+
+能不改主循环就不改。新增站点或流程 = 配置 + Skill + 适配器，**不是**核心 `if (site === …)`。
+
+### 4.2 需求 → 落点
+
+| 需求类型 | 优先落点 | 禁止 |
+|----------|----------|------|
+| 验证码求解 | `bu_agent/captcha_*` + strategy | 在 Chat 里过码；削弱 Layer 1 |
+| Token 挑战 | `captcha_remote.ts`（显式启用） | 编造 token、改指纹 |
+| 邮箱/短信/网页邮箱 OTP | `otp/` + config（`email_otp_*` / `sms_*` / `webmail_*` / `tempmail_*`） | 网页邮箱当默认；码写入轨迹 |
+| 人工凭证分类 | `core/human_credential.ts` + lexicon | 敏感值落盘 |
+| HITL 文案 / 队列 | Sidecar 事件 payload + `InterventionCenter*` + `hitl_copy*` | 双轨互抢且无 SSOT |
+| 长程规划 | MACRO_ANALYZE + `macro-planner` Skill | Execute 相位吐裸计划 JSON |
+| 注册/购物/订票 | `account-lifecycle` / `commerce-checkout` / `travel-booking` 等 Skill | 核心循环写死结账 DOM；`done` 冒充已付 |
+| 填表身份生成 | `persona_engine.ts`（任务内） | 读/写环境 `persona_data` |
+| 回放占位符 / @引用 | `BatchReplaySandbox` 可编辑目标 + `{{persona.*}}` / `@人设名` / `@规则名` + `replay_agent_trajectory` → `taskRules` / `taskPersona` / `personaData` | 把回放人设说成自动注册数据源；在 Host 里再写一套 @ 解析或规则判定 |
+| 页面观察/元素/全景 | `page_pipeline/` · `interactive_elements.ts` | 主路径要求用户开开关 |
+| Chat 对话/附件/意图 | `chat_engine.ts` · `chat_intent_router.ts` · `AIChatPanel` | Chat 内第二套 Agent 循环；附图取 OTP |
+| Chat→Agent 桥接 | `agentGoalRouter` + 现有 `agent_start` | 在 Chat 里复制半套 bu_agent |
+| 采集结果分析 | `ScraperDataPanel` + 事件 `scraper-data-collected` → **Ai Chat 可见** | 强制拽回 Agent Tab 导致 Chat 看不到 |
+| 可选填表（非 RPA 模板） | `fill` / `smart_element_fill` / `hybrid_fill` + Ai Chat 底部按钮 | 站点选择器写进核心；挂回 RPA 模板面板 |
+| 轨迹/回放/沙盘 | `TrajectoryMemoryPanel` · Host trajectory · Sidecar replay | 与 Agent 会话互斥被绕过 |
+| 设置 / 密钥 | `secret_store` + Settings 对应 Tab | 明文密钥进 git |
+| 外部程序传数据（Python/JSON） | `src-tauri/src/data_api.rs`（独立 token + 回环 + Host 校验 + `deny_unknown_fields`）→ `fill_sidecar::execute_external_fill` → Sidecar `external_fill`（字段名闸门 `core/external_fill_gate.ts`） | 接受动作/脚本/命令；开读接口；让外部程序灌支付或一次性凭证字段（R1/R2）；默认开 |
+| 内核/指纹/代理/启停 | CloakBrowser + `browser_manager` / `browser_launcher` / CDP | 引入 Puppeteer/Selenium/第二启动栈 |
+| 引擎互斥 | `engine_mutex` + Host `RpaSessionManager` | 新命令绕过互斥 |
+
+### 4.3 Sidecar 命令边界（Host ↔ Sidecar）
+
+常见命令族（见 `sidecar/src/index.ts`）：`agent_*`、`fill` / `smart_element_fill` / `preview_hybrid`、`rpa_*`、`trajectory_*`、`get_url`、HITL 回复类。  
+**同一环境** Agent / RPA / Replay / 填表会话 **互斥**；新能力必须挂进现有会话管理，不得另起无锁通道。
+
+---
+
+## 5. UI 改动纪律（专门约束界面）
+
+### 5.1 改 UI 的默认流程
+
+1. 用 §3 地图确认：改的是环境列表、哪个右栏 Tab、设置 Tab、还是 HITL。  
+2. 复用现有组件与样式，不新造平行壳。  
+3. 文案对照 §3.2 词典；同一规则只保留一套说法。  
+4. 最小 diff：只改目标面板；禁止「顺便重排」整个 `AIFillDrawer`。  
+5. 改完自检：红线文案、Tab 名、提取/全景无开关、Ai Chat 无 RPA 模板、附件不取码。
+
+### 5.2 设计系统（跟现有，不另起炉灶）
+
+- 样式入口：`src/styles/globals.css`（Tailwind + 组件类）。  
+- 按钮：优先 `.btn` / `.btn-primary` / `.btn-outline` / `.btn-ghost` / `.btn-danger`。  
+- Tab：优先 `.tab-rail` / `.tab-item` / `.tab-item-active`。  
+- 开关：`.ui-switch`；图标按钮：`.icon-button`。  
+- 弹层：复用 `Modal`、现有 Settings / HITL / FillConfirm 模式。  
+- 新页面/面板：延续现有密度与中性桌面工具气质；不要引入整套无关营销风视觉。
+
+### 5.3 右栏三 Tab 铁律
+
+| Tab | 必须 | 禁止 |
+|-----|------|------|
+| **浏览器 Agent** | 任务启停、监视、开页、录制勾选；输入框可附附件（图片/文本）；底部「规则」按钮打开规则库；状态以本 Tab + 环境列表为准 | 把采集结果独占到本 Tab 且强制切走 Ai Chat |
+| **Ai Chat** | 聊天主轴；附件（图→vision，文本→摘要，有硬顶）；采集可见可分析；底栏可选填表；可桥接 Agent | 顶栏堆「天枢台 AI 中枢」+ 焦点/并行等冗余徽章；挂 RPA 模板 UI；大段须知占主视区；用附件自动取 OTP |
+| **轨迹记忆** | 轨迹库、运行历史、控制记忆、单开回放/沙盘 | 要求用户「必须先有环境人设才能回放」之外的虚假前提；把自动注册说成人设来源 |
+
+### 5.4 环境列表铁律
+
+- 产品列：**不要**「元素提取」「全景截图」开关。  
+- 「元素提取测试窗」是调试入口，保持次要；失败报真实原因，禁止「请先开启元素提取」。  
+- 智能填表 / 聊天读页 / Agent 观察：只要求环境在跑（及真实提取错误），不要求用户开已删除的开关。
+
+### 5.5 填表与聊天互斥
+
+- Ai Chat 输入与底部填表共用时须互斥锁（聊天进行中禁用填表或反之，见现有 `chatDisabled` / submitting 态）。  
+- 文案区分「聊天」与「可选填表」，不互相打架。
+
+### 5.6 HITL UI
+
+- **唯一收件箱**：`InterventionCenterProvider` + Panel/Modal。  
+- 新增人工确认类型：接入同一 inbox（confirm / ask / handover），禁止另起一套全局弹窗抢焦点。
+
+---
+
+## 6. AI 改码行为 — 每次强制
+
+1. **CloakBrowser 优先**（见 §0.4）。  
+2. **先检索，后编码**：全局搜 §10 路径与 §0.5.2 症状表；有封装则复用；严禁重复造轮子。  
+3. **外科手术**：只改导致问题的最小范围；严禁为局部问题重写整文件；严禁擅自「优化」无关稳定代码；**一次只动一类问题**。  
+4. **配置与 Skill 优先于改引擎**（§4.1）。  
+5. **诊断前置**：修复前用一两句写明 Root Cause（修 BUG 时强制走 §0.5）。  
+6. **异常处理**：禁止靠硬匹配特定 Error Message 字符串做主路径；优先错误码 / 类型 / 稳定 `phase`。  
+7. **边界防御**：DOM、网络、LLM 输出皆不可靠；空值安全、`isConnected`、类型校验、降级与超时。  
+8. **交付汇报**：改了哪些文件、一句话原因、有无碰红线（R*/B*）；残留字段写清谁写/谁读。  
+9. **禁止擅自 git commit / push**（除非用户明确要求）。
+
+### 6.1 交付 / 修完自检闸门（强制）
+
+至少自检：
+
+- [ ] §1 红线（支付前停、不编造码/token、不改指纹过检、核心无站点脚本、网页邮箱非默认、人设不接回自动填表）  
+- [ ] §2 回退（Ai Chat 主名、无 RPA 面板、无提取/全景开关列、附件不取码、Arbiter 可拦截）  
+- [ ] §5 UI 铁律（词典、HITL 单收件箱、采集在 Ai Chat 可见）  
+- [ ] §0.5.3 同类坑未复发（字符串匹配、瞬时回读、失败编造、借 BUG 重构）
+
+推荐 Grep（可直接复制）：
+
+```
+awaiting_human_payment|stop_before_pay|AUTO_PAYMENT|无人支付
+human_only|fetch_email_otp|fetch_sms_otp|webmail|token_challenge|persona_data|personaData|persona_engine
+RpaTemplatePanel|SaveTemplateModal|智能填表|Ai Chat|元素提取|全景截图|interactive_element_extract|agent_panorama
+arbiter|plan_expects|completion_evidence|deliverable_verify|maxSteps|done\(success
+puppeteer|selenium|webdriver|AllPagesClosedError|fill_verify|isConnected
+results\.md|secret_store|DPAPI|err\.message\.includes
+```
+
+---
+
+## 7. 架构与多站点纪律
+
+### 7.1 哲学
+
+1. 全局思维：方案须覆盖多站点、多环境、HITL、引擎互斥；禁止单点头痛医头。  
+2. 极度泛用：面向任意网站；禁止沦为特定站点脚本。  
+3. 零容忍屎山：DRY；拒绝两套互相矛盾的产品规则同时活着。
+
+### 7.2 反硬编码
+
+- **禁止**在核心业务逻辑写死：特定网站 URL、CSS/XPath、特定中英文错误文案、特定发件人域名。  
+- **差异化**走：策略、适配器、Skill、外部 JSON。  
+- **Lexicon 合法**：`sidecar/config/*lexicon.json` 等是配置，不是「硬编码站点」；但禁止把「某购物站结算按钮 class」写进 TS 核心。
+
+### 7.3 跨进程
+
+- 考虑端口池、席位/License、资源竞争、取消与销毁。  
+- 对外 Type/IPC 契约保持兼容；内部可优化。  
+- 免费内核 AI 受限等策略跟现有 `kernelPolicy` / License，不要另写一套互相打架的提示。
+
+---
+
+## 8. Agent 能力约束
+
+1. **证据门禁**：注册/登录/提交/下单等 `done(success=true)` 必须有跳转或明确成功提示；禁止无证据完成。支付成功尤其需要**人工侧证据**。落点：`completion_evidence.ts`、`deliverable_verify.ts`、`actions.ts`。
+2. **用户规则优先于通用证据推断，但不越过红线**：`core/task_rules.ts` 归一化后，`complete`+`strict` 的规则在 `done` 时硬校验（CSS 选择器/文本/参考图机器核对，不靠自述），`complete`+`autoComplete` 的规则命中即由主循环收尾（AI 没说完成也算完成）。规则里的「代码」**只支持选择器与文本匹配，禁止执行用户脚本**；参考图只做界面比对，禁止当 OTP/验证码取码依据。红线拦两道：`done` 闸门里支付闸门（R1）与凭证闸门在规则分支之前判定；主循环「命中即收尾」之前还要过 `completion_evidence.blocksRuleAutoComplete`（目标要求付掉且未人工确认、或页面仍有空的一次性凭证 → 只记命中、不收尾）。
+3. **Skills** = 策略手册 + 可召回上下文；可执行状态机须有明确运行时相位（如 MACRO_ANALYZE），不能只靠「模型想起 Skill」。关键包：`account-lifecycle`、`commerce-checkout`、`travel-booking`、`macro-planner`、`execution-framework`、`auth-hitl` — 与 `system_prompt_text.ts` 不得互相打架。
+4. **自愈优先级**：观察降级 → 失败账本 → expects/arbiter → replan → 元素指纹重连 → vision relocate → HITL；禁止一失败就 handover（Layer 1 须先耗尽）。
+5. **步数保险丝**：遵守 §1.5；禁止把 `maxSteps` 调成无限，也禁止改回「到点必须收尾」配额。
+6. **前端**：HITL 单一收件箱；OTP/验证码通道可配置；Agent Run 可追溯；人设编辑同时服务 Agent 任务与轨迹回放（都靠 `@人设名` 生效）；侧栏遵守 §3 / §5。
+
+### 8.1 场景红线速记（改相关能力时不得破坏）
+
+| 场景 | 必须保持 |
+|------|----------|
+| **S1 注册→验证码** | 人设现生成 → Layer1 `solve_captcha` → 邮箱 OTP（IMAP/临时邮）→ 失败升 HITL；无网页邮箱默认、无编造码、无无证据 `done`。只有在任务 / 回放目标里 `@人设名` 时该人设才生效，勾选「固定」的字段为权威值 |
+| **S2 购物/订票→支付前** | Skill 至 `stop_before_pay` / `awaiting_human_payment`；支付控件 HITL；禁止自动提交支付与冒充已付。**用户把「下单成功」写成完成条件也不得放行支付页** |
+| **S3 Chat→Agent** | `agentGoalRouter` → Host 启动现有 Agent；Chat 不本地循环执行浏览器动作 |
+| **S4 采集可见** | `scraper-data-collected` → Ai Chat 内 `ScraperDataPanel` 可见；无强制切走导致 Chat 看不到 |
+| **S5 引擎互斥** | 同环境 Agent / 填表 / RPA / 回放互斥或排队，不并行踩 CDP |
+| **S6 设置通道** | 关闭远程 solver / 未配置邮箱时：Token 与 OTP 升 Layer 3，不编造、不空转成功 |
+
+---
+
+## 9. 代码健康
+
+- 两处以上相似逻辑 → 抽公共模块（先确认仓库无等价物）。  
+- 函数短小；早返回；async/await。  
+- 标识符英文；用户可见文案可用中文；保留红线类注释，删除解释「糟糕逻辑」的废话注释。  
+- **同一产品规则只保留一套说法**。提示词、Nudge、Skill、前端、Host 注入矛盾时，先对齐再加功能。必须对齐：人设现生成、步数保险丝、支付前停、网页邮箱非默认、**Ai Chat 主名**、**提取/全景恒开无开关**、**Ai Chat 不挂 RPA 模板**、**聊天可附件但不读短信图取码**。  
+- **死代码**：全仓检索（含 Rust 命令、JSON、Skill、测试）确认零引用才可删；用户只要求检查时只报告不删。卸 Ai Chat 的 RPA **面板**时，勿误删仍被其它入口使用的 RPA 引擎 / DB。  
+- **残留字段**：见 §3.4；报告中标明「谁写、谁读、恒开/忽略」。  
+- **新踩坑写入宪法**：若修出新的稳定坑族，用最小 diff **追加到 §0.5.3**（不要另起平行文档互相打架）。
+
+---
+
+## 10. 关键路径速查
+
+| 主题 | 路径 |
+|------|------|
+| 本宪法 | `.cursorrules` |
+| 检查提示词（只读审计） | `docs/检查提示词.MD`（可缺失；缺失时用 §0.5.5） |
+| 升级计划（仅对照） | `docs/L4-AGENT-UPGRADE-PLAN.md` |
+| 回放 / 数据集 / 剪贴板 / 外部 API（**计划 + 契约，已实现 P1–P7**） | `执行计划.md`（§4.6 预检单 · §7 API 契约 · §9 阶段 · §11 验收；需求原文亦称 `API对接说明.md`） |
+| 数据集解析 / 变量映射 / 逐轮目标替换 | `src/lib/replayDataset.ts` · `sidecar/src/core/dataset_parse.ts` · `ReplayDatasetEditor.tsx` · `replay_job.rs`（`interpolate_plan_row_goal`） |
+| Agent 主循环 / 活页 | `sidecar/src/bu_agent/service.ts`（`pickLivePage`、`AllPagesClosedError`） |
+| 系统提示词 | `sidecar/src/bu_agent/system_prompt_text.ts` |
+| Arbiter / Expects | `arbiter.ts` · `plan_expects.ts` · `expects_soft_gate_policy.ts` |
+| 动作与闸门 | `bu_agent/actions.ts` |
+| 填值与回读 | `core/action_gateway.ts` · `core/fill_verify.ts` · `fill_interactions.ts` |
+| 验证码 | `bu_agent/captcha_*.ts` · `slider_captcha.ts` · `animated_captcha.ts` · `point_select/` |
+| OTP / 邮箱短信 | `sidecar/src/otp/` |
+| 人工凭证 / HITL 策略 | `core/human_credential.ts` · `hitl_policy.ts` · `hitl_copy*.ts` |
+| 完成证据 | `core/completion_evidence.ts` · `deliverable_verify.ts` |
+| 进度/日志 | `json-logger.ts`（`agentProgress`） |
+| Skills | `sidecar/agent_skills/*/SKILL.md` |
+| 配置词表 | `sidecar/config/*.json` |
+| Chat | `chat_engine.ts` · `chat_intent_router.ts` |
+| 人设现生成 | `persona_engine.ts` |
+| 页面管线 | `page_pipeline/` · `interactive_elements.ts` |
+| 引擎互斥 | `engine_mutex.ts` |
+| 侧栏壳 | `src/components/AIFillDrawer.tsx` |
+| Ai Chat UI | `AIChatPanel.tsx` |
+| 采集面板 | `ScraperDataPanel.tsx` |
+| 「规则」窗口（规则 + 人设）/ 规则库数据层 | `AgentRulesModal.tsx` · `lib/agentRules.ts`（`fixedFields` / `personaEffectiveFixedFields` / `personaTemplateValues` / `resolveGoalMentions`） · Host `global_settings.agent_personas` |
+| 回放 @人设 / @规则（目标编辑 → 载荷 → 硬校验） | `BatchReplaySandbox.tsx`（可编辑目标 + @菜单） · `tauri.ts`（`taskRules` / `taskPersona` / `personaData`） · `src-tauri/src/rpa_session.rs` · `sidecar/src/index.ts`（`handleTrajectoryReplay`） · `core/task_rules.ts` |
+| 规则运行时（归一化 / brief / DOM·视觉校验 / 命中态 / 硬约束闸门） | `sidecar/src/core/task_rules.ts` |
+| 规则回归测试（三态 / 诊断 / 点击台账 / 钉值 / hitl） | `sidecar/tests/task-rules.mjs` · `sidecar/tests/task-roles.mjs` |
+| Agent 输入框附件（与 Ai Chat 共用） | `ChatComposerAttachments.tsx` |
+| 轨迹记忆 | `TrajectoryMemoryPanel.tsx` · `BatchReplaySandbox.tsx` · `ReplayDatasetEditor.tsx` · `AgentRunHistoryPanel.tsx` |
+| RPA 模板面板（勿挂回 Ai Chat） | `RpaTemplatePanel.tsx` |
+| 环境列表 | `ProfileTable.tsx` |
+| 外部数据 API（Python/JSON，只传数据） | `data_api.rs` · `fill_sidecar::execute_external_fill` · `sidecar/src/core/external_fill_gate.ts` · `docs/外部数据API.md` · 设置「常规设置」Tab |
+| 环境编辑（已无人设栏） | `ProfileFormModal.tsx` |
+| HITL UI | `InterventionCenter*.tsx` · `Agent*Modal.tsx` |
+| 设置 | `SettingsModal.tsx` · `settings/*` |
+| 样式 | `src/styles/globals.css` |
+| 前端桥接 / 队列 | `src/lib/agentGoalRouter.ts` · `agentHumanQueue.ts` · `tauri.ts` |
+| Host 密钥 / DB / 会话 | `secret_store.rs` · `db.rs` · `rpa_session.rs` · `browser_manager.rs` |
+
+---
+
+## 11. 总纲 — 十条铁律
+
+1. **先定位再动刀**：修 BUG 走 §0.5 症状表 → 根因 → 最小 diff；一次只动一类问题。
+2. **用 CloakBrowser 做浏览器**：不引 Puppeteer / Selenium / 第二启动栈。
+3. **站点差异走配置 + Skill + 适配器**：核心循环不写死站点。
+4. **三层过验证码**：Layer 1 内置求解 → Layer 2 已配置通道 → Layer 3 HITL；失败禁止编造坐标 / token / OTP。
+5. **用 Arbiter / Plan Expects 纠偏**：监督层必须能拦截，不是仅日志。
+6. **HITL 守两处**：支付与拿不到的码；**永远不要无人支付**，不冒充已付。
+7. **人设每轮现生成**：用户「规则」的人设自持「固定」字段；Agent 任务与回放只在写 `@人设名` 时生效，回放目标还能 `@规则名` 让收尾按规则硬校验。
+8. **步数只是保险丝**（默认 200 / 硬顶 400）：不是完成配额。
+9. **右栏中 Tab 是 Ai Chat**（可附件、可分析采集、底栏可选填表、**不挂 RPA 模板**）；**浏览器 Agent** 可输入附件、底部「规则」窗口管完成条件 / 提醒 / 人工介入与人设。
+10. **规则由机器硬校验**：但不执行用户脚本、不越过支付与凭证红线；**提取与全景默认开且无开关**；禁止失败编造与脆弱字符串匹配。

@@ -1,0 +1,12 @@
+{
+  "providers": {
+    "sms-activate": {
+      "baseUrl": "https://api.sms-activate.org/stubs/handler_api.php",
+      "aliases": ["sms_activate", "smsactivate"]
+    },
+    "five_sim": {
+      "baseUrl": "https://5sim.net/v1",
+      "aliases": ["5sim", "fivesim"]
+    }
+  }
+}

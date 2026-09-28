@@ -154,6 +154,24 @@ const leftStartPage = (ctx: VerifierContext): boolean =>
   isRealPage(ctx) &&
   Boolean(ctx.currentUrl && ctx.ledger.startUrl && ctx.currentUrl !== ctx.ledger.startUrl);
 
+/**
+ * 起始地址本身就是目标页（起点即目标）。
+ *
+ * 判据只认 `ledger.startUrl`：会话页 / 详情页 / 用户已开好的后台页这类「就地做事」的任务，
+ * 浏览器一开始就停在目标上，**从未跳转**才是正常的 —— 不能因为「没跳转」就判未达成
+ * （P9：会话型目标里臆造的 navigation 交付物会因此永久卡住 done）。
+ */
+function startHitsHints(hints: string[], ctx: VerifierContext): string | null {
+  const start = String(ctx.ledger.startUrl ?? "").trim();
+  if (hints.length === 0 || !start) return null;
+  const hay = normalizeHaystack(start);
+  for (const hint of hints) {
+    const term = normalizeHaystack(hint);
+    if (term && termHit(hay, term)) return hint;
+  }
+  return null;
+}
+
 function verifyNavigation(spec: DeliverableSpec, ctx: VerifierContext): VerifierResult {
   if (!isRealPage(ctx)) {
     return {
@@ -166,17 +184,29 @@ function verifyNavigation(spec: DeliverableSpec, ctx: VerifierContext): Verifier
   const moved = leftStartPage(ctx) || Boolean(nav);
   if (!moved) {
     /*
-     * 信息型目标（总结/分析/介绍当前页）**从不需要导航** —— 阅读对象就是当前页。
+     * ① 起点即目标：浏览器本来就停在这一页 → 该项当场成立。
+     */
+    const startHit = startHitsHints(spec.hints, ctx);
+    if (startHit) {
+      return {
+        ok: true,
+        verifier: "navigation",
+        reason: `起点即目标页（起始地址命中线索「${startHit}」）`,
+      };
+    }
+    /*
+     * ② 信息型 / 会话型目标**从不需要导航** —— 阅读对象是当前页、交付物是「话发出去」。
      * 这类任务里出现 navigation 交付物本身就是契约瑕疵（历史事故：模型给一句总结文案
      * 标上 kind=navigation，于是「页面从未离开起始地址」被永久判未达成，done 被反复驳回，
      * 任务原地打转）。此时返回「不确定」而不是「确认未达成」：不猜测、也绝不用它把任务判死；
      * 真正的拦截已由 task_contract 的契约闸门在源头完成。
      */
-    if (ctx.goalIntent === "informational") {
+    if (ctx.goalIntent === "informational" || ctx.goalIntent === "chat") {
+      const label = ctx.goalIntent === "chat" ? "会话型" : "信息型";
       return {
         ok: null,
         verifier: "navigation",
-        reason: "信息型目标不要求导航（阅读对象即当前页），不能据此判定该项未达成",
+        reason: `${label}目标不要求导航（就地完成，阅读/发送对象即当前页），不能据此判定该项未达成`,
       };
     }
     const seenNow = hintSeen(spec.hints, ctx);

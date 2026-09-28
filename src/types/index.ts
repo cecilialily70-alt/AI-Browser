@@ -159,6 +159,343 @@ export interface CacheCleanupReport {
   details: string[];
 }
 
+/** 聊天模式：某环境的线程索引行（镜像磁盘上下文，不是第二套状态机） */
+export interface ChatThreadRow {
+  profileId: number;
+  siteKey: string;
+  contactKey: string;
+  contactLabel: string;
+  stage: string;
+  followUpIndex: number;
+  messageCount: number;
+  lastContactAt: string | null;
+  lastReplyAt: string | null;
+  nextDueAt: string | null;
+  /** 连续值守：下次片内复查 / 短唤醒（与回访 nextDueAt 区分） */
+  nextCheckAt?: string | null;
+  stopped: boolean;
+  stopReason: string | null;
+  /** 人工接管模式：`engine`（引擎值守）| `human`（用户接管，引擎不自动开口）| `paused`（彻底不碰） */
+  takeover: ChatTakeoverMode;
+  takeoverReason: string | null;
+  /** 每联系人开关：对方来消息时引擎回不回（缺省＝开） */
+  autoReply: boolean;
+  /** 每联系人开关：到点要不要主动找话（缺省＝开） */
+  followUp: boolean;
+}
+
+/** 谁能对这个联系人说话（§5 人工优先） */
+export type ChatTakeoverMode = "engine" | "human" | "paused";
+
+export interface PurgeChatContextReport {
+  profileId: string;
+  removedDirs: number;
+  freedBytes: number;
+  /** profile | site | contact */
+  scope: string;
+  details: string[];
+}
+
+/** 有聊天上下文的环境总览 */
+export interface ChatEnvSummary {
+  profileId: string;
+  profileName: string;
+  contactCount: number;
+  messageCount: number;
+  bytes: number;
+  running: boolean;
+}
+
+export interface PurgeAllChatContextReport {
+  purgedProfiles: number;
+  skippedRunning: number;
+  removedDirs: number;
+  freedBytes: number;
+  details: string[];
+}
+
+/* ————————————————————————— 环境数据清理（浏览器身份数据） ————————————————————————— */
+
+/**
+ * 清理范围：
+ * - `cookies`：站点登录票据
+ * - `storage`：IndexedDB / WebStorage / Service Worker 等站点存储
+ * - `cache`：磁盘与代码缓存（不影响登录态）
+ * - `all`：以上全部
+ */
+export type BrowserDataScope = "cookies" | "storage" | "cache" | "all";
+
+export interface BrowserDataEnvSummary {
+  profileId: string;
+  profileName: string;
+  running: boolean;
+  cookiesBytes: number;
+  storageBytes: number;
+  cacheBytes: number;
+  totalBytes: number;
+}
+
+export interface PurgeBrowserDataReport {
+  profileId: string;
+  scope: BrowserDataScope | string;
+  removedDirs: number;
+  removedFiles: number;
+  freedBytes: number;
+  details: string[];
+}
+
+export interface PurgeAllBrowserDataReport {
+  scope: BrowserDataScope | string;
+  purgedProfiles: number;
+  skippedRunning: number;
+  removedDirs: number;
+  removedFiles: number;
+  freedBytes: number;
+  details: string[];
+}
+
+/* ————————————————————————— P7 聊天模式：Host 命令面 ————————————————————————— */
+
+/** 引擎快照里的运行态（`chat_context/state.json`，Host 只读） */
+export interface ChatRuntimeStatus {
+  /** booting | reading | drafting | sending | recording | waiting | idle | stopped | … */
+  phase: string;
+  nextWakeAt: string | null;
+  contactCount: number;
+  sentToday: number;
+  sentTotal: number;
+  rejectedToday: number;
+  llmCallsToday: number;
+}
+
+/** `chat_status` 的一次性快照（不产生副作用，Sidecar 不在也能答） */
+export interface ChatStatusPayload {
+  profileId: string;
+  /** Host 侧有挂起的聊天切片 */
+  running: boolean;
+  browserRunning: boolean;
+  snapshot: ChatRuntimeStatus | null;
+  contacts: ChatThreadRow[];
+}
+
+/** 启动一片聊天值守时给的目标（不猜：必须显式给昵称或会话 URL） */
+export interface ChatContactInput {
+  label: string;
+  url?: string | null;
+  index?: number | null;
+  siteKey?: string | null;
+}
+
+/** 宿主聊天调度器里**单个环境**的事实（含被看门狗挂起的自动值守） */
+export interface ChatPatrolEnvReport {
+  profileId: string;
+  /** 这一片此刻在跑 */
+  active: boolean;
+  /** 连续失败到顶 → 已停自动拉起（要人工恢复） */
+  suspended: boolean;
+  reason: string | null;
+  lastError: string | null;
+}
+
+/** 宿主聊天调度器快照（只读事实，不产生副作用） */
+export interface ChatPatrolReport {
+  enabled: boolean;
+  /** 实际生效的并发上限（免费档恒为 1） */
+  parallelCap: number;
+  activeCount: number;
+  dueCount: number;
+  queuedCount: number;
+  blockedCount: number;
+  lastReport: string | null;
+  /** 配置里解析不了、已被丢弃的目标（**先说后跑**，不静默降级） */
+  dropped: string[];
+  envs: ChatPatrolEnvReport[];
+}
+
+/** 聊天回访节奏（用户可在「聊天设置」里调；缺省即 Sidecar 默认值） */
+export interface ChatCadenceInput {
+  followUpEnabled?: boolean;
+  followUpHours?: number;
+  followUpBackoffHours?: number[];
+  maxFollowUps?: number;
+  followUpCoolDownDays?: number;
+  followUpRevivalDays?: number;
+  quietHours?: { start: string; end: string } | null;
+  maxPerDay?: number;
+  jitterRatio?: number;
+}
+
+/** 会话流水一行（已脱敏） */
+export interface ChatThreadMessage {
+  id: string;
+  direction: "in" | "out" | string;
+  text: string;
+  ts: string | null;
+  at: string | null;
+}
+
+/** 会话列表里的一项（「要聊的对象」勾选用；身份是 `key`，展示名会变） */
+export interface ChatContactItem {
+  /** 稳定身份（站点属性 > 会话绝对地址 > 展示名指纹） */
+  key: string;
+  label: string;
+  /** 会话直链（可空：很多站点的列表项没有 href，只能按展示名点列表） */
+  url: string | null;
+  /** 只报「有没有未读」，不猜数字 */
+  unread: boolean;
+  /**
+   * 这位联系人写进设置表（`chat_mode.contactFlags` / `takeovers`）时该用的键。
+   *
+   * **由侧车算好回传**：视图勾选后只回传 `label` / `url`，引擎那侧的键要用
+   * `siteKeyOf` + `sanitizeSegment` 才算得出，前端不该有第二份实现（§0.5.3 H）。
+   * 空串 = 算不出身份（这一行不给写开关，视图据此禁用）。
+   */
+  flagKey: string;
+}
+
+/**
+ * `chat_list_contacts` 的结果（**只读**探针）。
+ *
+ * `ok:false` 时 `reason` 是**人话原因**：读不到 ≠ 列表是空的（坑族 A）。
+ * `source` 如实标注候选来自站点描述符（准）还是通用启发式（是猜的）。
+ */
+export interface ChatContactsPayload {
+  ok: boolean;
+  reason: string | null;
+  source: "descriptor" | "generic" | string;
+  /** 站点键（用于把勾选结果标成「本站点」） */
+  siteKey: string;
+  /** 读的是哪个页面（让用户能核对读的是不是那个窗口） */
+  pageUrl: string | null;
+  items: ChatContactItem[];
+}
+
+/** `chat_start` 的返回：一片值守的收尾结果 */
+export interface ChatSliceResult {
+  state: string;
+  step: number;
+  msg: string;
+  actions?: Record<string, unknown> | null;
+}
+
+/** `chat_state` 事件的载荷（独立事件，B8 / §5.7） */
+export interface ChatStateEvent {
+  profileId?: string;
+  /** 语义种类：chat_start / chat_read / chat_send / chat_patrol_yield / chat_state / chat_learn … */
+  kind?: string;
+  phase?: string;
+  msg?: string;
+  stopReason?: string;
+  threadKey?: string | null;
+  reason?: string;
+  processed?: number;
+  sent?: number;
+  skipped?: number;
+  nextWakeAt?: string | null;
+  /** 站点学习（`chat_learn` / `chat_learn_done`）：进度与终态 */
+  stage?: string;
+  round?: number;
+  ok?: boolean;
+}
+
+/* ————————————————————— 站点描述符（connector）：总览 / 学习 / 删除 ————————————————————— */
+
+/** 描述符的能力边界（视图要能如实标注「只能读、不能发」这类降级） */
+export interface ChatConnectorCapabilities {
+  send: boolean;
+  history: boolean;
+  subscribe: boolean;
+  presence: boolean;
+  threads: boolean;
+}
+
+/** 运行期健康（熔断状态活在内存里，不落盘；无记录即 null） */
+export interface ChatConnectorHealth {
+  id: string;
+  consecutiveFailures: number;
+  disabled: boolean;
+  reason: string | null;
+  lastFailureAt: string | null;
+  totalOk: number;
+  totalFail: number;
+}
+
+/** 学来的描述符的元数据（`_meta-<siteKey>.json`） */
+export interface ChatLearnMeta {
+  siteKey: string;
+  siteLabel: string;
+  savedAt: string;
+  url: string;
+  rounds: number;
+  readVerified: boolean;
+  sendVerified: boolean;
+  notes: { field: string; reason: string; confidence: number }[];
+  usage: { promptTokens: number; completionTokens: number; calls: number };
+  verifySummary: string;
+}
+
+export interface ChatConnectorItem {
+  id: string;
+  source: "builtin" | "learned";
+  version: number;
+  hostPattern: string;
+  path: string;
+  health: ChatConnectorHealth | null;
+  capabilities: ChatConnectorCapabilities;
+  /** 是不是「学来的」（内置 vs 学习成果） */
+  learned: boolean;
+  /**
+   * 学来的描述符的**文件名干**（删除时要用它；id 可能不是文件名干）。
+   * 内置项为 null；由 Sidecar 一处拆好，前端照抄（不自己拆路径）。
+   */
+  siteKey: string | null;
+  meta: ChatLearnMeta | null;
+}
+
+export interface ChatConnectorStatusPayload {
+  type: string;
+  ok?: boolean;
+  items: ChatConnectorItem[];
+  diagnostics: { code: string; path: string; reason: string }[];
+  builtinPresent: boolean;
+  learnedDir: string | null;
+  learnedDirReady: boolean;
+}
+
+export interface ChatConnectorDeletePayload {
+  type: string;
+  ok: boolean;
+  siteKey: string;
+  reason: string | null;
+  dir: string | null;
+}
+
+/** 一条逐字段自检差异（报错型与静默失败共用这一份形状） */
+export interface ChatLearnCheck {
+  field: string;
+  ok: boolean;
+  severity: "fatal" | "warning";
+  expected: string;
+  actual: string;
+  detail?: string;
+}
+
+/** 学习终态（宿主把 Sidecar 的 `chat_learn_done` 载荷原样带回） */
+export interface ChatLearnDonePayload {
+  ok: boolean;
+  outcome: "saved" | "no_dir" | "rejected" | "cancelled" | "failed";
+  siteKey: string | null;
+  descriptorId: string | null;
+  savedPaths: { descriptorPath: string; metaPath: string } | null;
+  readVerified: boolean;
+  sendVerified: boolean;
+  attempts: number;
+  usage: { calls: number; promptTokens: number; completionTokens: number; costMicroUsd: number };
+  checks: ChatLearnCheck[];
+  schemaDiagnostics: { path: string; reason: string }[];
+  learnedDir: string | null;
+}
+
 export interface CloakBinaryStatus {
   installed: boolean;
   version?: string | null;

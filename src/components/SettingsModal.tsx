@@ -1,4 +1,4 @@
-import { Bot, KeyRound, SlidersHorizontal, Server } from "lucide-react";
+import { Bot, KeyRound, MessagesSquare, SlidersHorizontal, Server } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchProxies, fetchSettings, formatInvokeError } from "../lib/tauri";
@@ -6,11 +6,12 @@ import type { AppSettings, ConnectivityStatus, Proxy } from "../types";
 import { Modal } from "./Modal";
 import { AiSettingsTab } from "./settings/AiSettingsTab";
 import { CaptchaOtpSettingsTab } from "./settings/CaptchaOtpSettingsTab";
+import { ChatModeSettingsTab } from "./settings/ChatModeSettingsTab";
 import { GeneralSettingsTab } from "./settings/GeneralSettingsTab";
 import { ProxyPoolTab } from "./settings/ProxyPoolTab";
 import type { ToastMessage } from "../lib/toast";
 
-type SettingsTab = "ai" | "captcha_otp" | "general" | "proxies";
+type SettingsTab = "ai" | "captcha_otp" | "chat_mode" | "general" | "proxies";
 
 interface SettingsModalProps {
   open: boolean;
@@ -23,7 +24,8 @@ interface SettingsModalProps {
 const TABS: Array<{ id: SettingsTab; label: string; icon: typeof Bot; hint: string }> = [
   { id: "ai", label: "AI", icon: Bot, hint: "模型与接口" },
   { id: "captcha_otp", label: "验证码与邮箱", icon: KeyRound, hint: "邮箱·短信·图形码" },
-  { id: "general", label: "浏览器", icon: SlidersHorizontal, hint: "内核与下载" },
+  { id: "chat_mode", label: "聊天", icon: MessagesSquare, hint: "总开关·回访节奏·值守·站点·静音" },
+  { id: "general", label: "浏览器", icon: SlidersHorizontal, hint: "内核·下载·聊天记忆·环境数据" },
   { id: "proxies", label: "代理", icon: Server, hint: "代理列表" },
 ];
 
@@ -137,6 +139,13 @@ export function SettingsModal({ open, onClose, onError, onToast, onEntitlementCh
             settings={settings}
             saving={saving}
             onSettingsChange={setSettings}
+            onSavingChange={setSaving}
+            onToast={onToast}
+            onError={onError}
+          />
+        ) : tab === "chat_mode" ? (
+          <ChatModeSettingsTab
+            saving={saving}
             onSavingChange={setSaving}
             onToast={onToast}
             onError={onError}

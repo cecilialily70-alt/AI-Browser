@@ -9,11 +9,26 @@ import type {
   ChatAttachmentPayload,
   CloakBinaryStatus,
   CacheCleanupReport,
+  BrowserDataEnvSummary,
+  BrowserDataScope,
+  PurgeBrowserDataReport,
+  PurgeAllBrowserDataReport,
+  ChatEnvSummary,
+  ChatCadenceInput,
+  ChatContactInput,
+  ChatSliceResult,
+  ChatPatrolReport,
+  ChatStatusPayload,
+  ChatConnectorStatusPayload,
+  ChatConnectorDeletePayload,
+  ChatContactsPayload,
+  ChatThreadMessage,
+  PurgeAllChatContextReport,
+  PurgeChatContextReport,
   KeyFileActionResult,
   LicenseEntitlement,
   CreateProfileInput,
   DynamicApiProxyInput,
-  FormTemplate,
   AgentRun,
   AgentRunBoard,
   AgentTrajectory,
@@ -325,6 +340,201 @@ export async function purgeAutomationCache(): Promise<CacheCleanupReport> {
   return invoke<CacheCleanupReport>("purge_automation_cache");
 }
 
+/**
+ * 清理聊天上下文。`siteKey` / `contactKey` 可选：
+ * 都不给 = 清该环境全部；只给 siteKey = 清该站点；两个都给 = 清该联系人。
+ * 环境正在运行时会拒绝（避免把 Sidecar 正写的目录从底下抽掉）。
+ */
+export async function purgeChatContext(
+  profileId: string,
+  options?: { siteKey?: string | null; contactKey?: string | null },
+): Promise<PurgeChatContextReport> {
+  return invoke<PurgeChatContextReport>("purge_chat_context", {
+    profileId,
+    siteKey: options?.siteKey ?? null,
+    contactKey: options?.contactKey ?? null,
+  });
+}
+
+/** 有聊天上下文的环境总览（设置里的清理入口用） */
+export async function listChatContextOverview(): Promise<ChatEnvSummary[]> {
+  return invoke<ChatEnvSummary[]>("list_chat_context_overview");
+}
+
+/** 全局清理聊天上下文（运行中的环境会逐个列出原因地跳过） */
+export async function purgeAllChatContexts(): Promise<PurgeAllChatContextReport> {
+  return invoke<PurgeAllChatContextReport>("purge_all_chat_contexts");
+}
+
+/* ————————————————————————— 环境数据清理：Host 命令面 ————————————————————————— */
+
+/** 各环境的 Cookie / 站点存储 / 缓存占用（设置页展示用，无副作用） */
+export async function listBrowserDataOverview(): Promise<BrowserDataEnvSummary[]> {
+  return invoke<BrowserDataEnvSummary[]>("list_browser_data_overview");
+}
+
+/**
+ * 清理某个环境的浏览器身份数据（Cookie / 站点存储 / 缓存）。
+ *
+ * 与「清理缓存」不同：这里清的是**仍在列表里的这个环境自己的**站点数据 ——
+ * 站点登录态坏了（例如网页版反复自我登出、二维码出不来）时用它复位。
+ * 环境正在运行时会被拒绝（浏览器持有文件锁）。
+ */
+export async function purgeBrowserData(
+  profileId: string,
+  scope: BrowserDataScope = "all",
+): Promise<PurgeBrowserDataReport> {
+  return invoke<PurgeBrowserDataReport>("purge_browser_data", { profileId, scope });
+}
+
+/** 批量清理全部环境的数据（运行中的环境会逐个列出原因地跳过） */
+export async function purgeAllBrowserData(
+  scope: BrowserDataScope = "all",
+): Promise<PurgeAllBrowserDataReport> {
+  return invoke<PurgeAllBrowserDataReport>("purge_all_browser_data", { scope });
+}
+
+/* ————————————————————————— P7 聊天模式：Host 命令面 ————————————————————————— */
+
+/**
+ * 启动**一片**聊天值守（不是长任务）。
+ *
+ * Sidecar 跑完一片就让位并把 `nextWakeAt` 写进快照；调用方（视图 / P8 调度器）按需再拉起。
+ * 环境浏览器未运行、引擎忙、没有明确目标都会被 Host 拒绝并给出可读原因。
+ */
+export async function chatStart(input: {
+  profileId: string;
+  contacts: ChatContactInput[];
+  goal?: string;
+  styleHint?: string;
+  bannedWords?: string[];
+  cadence?: ChatCadenceInput;
+  sliceMs?: number;
+  maxContactsPerSlice?: number;
+  /**
+   * 「没指定对象 → 用**当前打开的**聊天窗口」。
+   *
+   * 只在 `contacts` 为空时才有意义；Host 会照样放行到 Sidecar，
+   * 由 Sidecar 运行期判定「当前那个标签确实是聊天页」（判不出来就如实失败，不猜）。
+   */
+  useCurrentWindow?: boolean;
+  /**
+   * 人工优先（§5）：用户为**单个联系人**指定的接管模式。
+   * 键是联系人稳定身份（与快照/索引表同源）；缺省不传即全部按引擎值守。
+   */
+  takeovers?: Record<string, "engine" | "human" | "paused">;
+  /**
+   * 每联系人开关（§5.7）：`{ "<站点>|<联系人>": { autoReply?, followUp? } }`。
+   * 与 `takeovers` 同一套键；缺省不传＝两个开关都开（老行为不变）。
+   */
+  contactFlags?: Record<string, { autoReply?: boolean; followUp?: boolean }>;
+  /** 聊天角色库（原样转发；合法性由 Sidecar 解析） */
+  roles?: Array<{ id: string; name: string; prompt: string }>;
+  /** 当前选用的角色 id；`null`＝无角色 */
+  activeRoleId?: string | null;
+}): Promise<ChatSliceResult> {
+  return invoke<ChatSliceResult>("chat_start", {
+    profileId: input.profileId,
+    goal: input.goal ?? null,
+    contacts: input.contacts,
+    styleHint: input.styleHint ?? null,
+    bannedWords: input.bannedWords ?? null,
+    cadence: input.cadence ?? null,
+    takeovers: input.takeovers ?? null,
+    contactFlags: input.contactFlags ?? null,
+    roles: input.roles ?? null,
+    activeRoleId: input.activeRoleId ?? null,
+    sliceMs: input.sliceMs ?? null,
+    maxContactsPerSlice: input.maxContactsPerSlice ?? null,
+    useCurrentWindow: input.useCurrentWindow ?? false,
+  });
+}
+
+/** 停住聊天值守（即时生效，不等待） */
+export async function chatStop(profileId: string, reason?: string): Promise<void> {
+  return invoke<void>("chat_stop", { profileId, reason: reason ?? null });
+}
+
+/** 聊天模式状态（Host 事实 + 引擎快照 + 每联系人索引） */
+export async function chatStatus(profileId: string): Promise<ChatStatusPayload> {
+  return invoke<ChatStatusPayload>("chat_status", { profileId });
+}
+
+/** 某联系人会话流水尾部（已脱敏） */
+export async function getChatThreadMessages(
+  profileId: string,
+  siteKey: string,
+  contactKey: string,
+  limit?: number,
+): Promise<ChatThreadMessage[]> {
+  return invoke<ChatThreadMessage[]>("get_chat_thread_messages", {
+    profileId,
+    siteKey,
+    contactKey,
+    limit: limit ?? null,
+  });
+}
+
+/**
+ * 读当前浏览器里那个聊天页的**会话列表**（视图里勾选聊天对象的唯一入口）。
+ *
+ * 只读探针：不建会话、不改状态。环境浏览器没跑、引擎正忙或没有认得出来的聊天页时，
+ * Host 会**拒绝**并给出人话原因（`ok:false` 也带原因，绝不把「读不到」说成「你没有会话」）。
+ */
+export async function chatListContacts(profileId: string): Promise<ChatContactsPayload> {
+  return invoke<ChatContactsPayload>("chat_list_contacts", { profileId });
+}
+
+/** 宿主聊天调度器快照（含被看门狗挂起自动拉起的环境） */
+export async function chatPatrolState(): Promise<ChatPatrolReport> {
+  return invoke<ChatPatrolReport>("chat_patrol_state");
+}
+
+/* ————————————————————— 站点描述符：学习 / 查看 / 删除（P5 发现流水线） ————————————————————— */
+
+/** 列站点支持（无浏览器也可用：纯文件系统 + 权威校验器，0 token） */
+export async function chatConnectorStatus(profileId: string): Promise<ChatConnectorStatusPayload> {
+  return invoke<ChatConnectorStatusPayload>("chat_connector_status", { profileId });
+}
+
+/** 删除一个**学来的**描述符（内置的删不掉） */
+export async function chatConnectorDelete(
+  profileId: string,
+  siteKey: string,
+): Promise<ChatConnectorDeletePayload> {
+  return invoke<ChatConnectorDeletePayload>("chat_connector_delete", { profileId, siteKey });
+}
+
+/**
+ * 学习当前站点（长任务，一片完成）。
+ *
+ * `url` 留空 = 用**此刻打开的**聊天窗口（Sidecar 会判定那确实是聊天页；判不出来就如实失败）。
+ * `selfTestContact` 是写入自测对象 —— **必须是你自己的会话/收藏夹**：会给它发一条固定文案的
+ * 自检消息，再读回来逐字核对。不给就只验读、并如实标注写入未验证。
+ */
+export async function chatLearnSite(input: {
+  profileId: string;
+  url?: string | null;
+  siteLabel?: string | null;
+  selfTestContact?: { label: string; url?: string | null } | null;
+  slot?: "logic" | "fast_text";
+  maxRounds?: number;
+}): Promise<ChatSliceResult> {
+  return invoke<ChatSliceResult>("chat_learn_site", {
+    profileId: input.profileId,
+    url: input.url?.trim() || null,
+    siteLabel: input.siteLabel?.trim() || null,
+    selfTestContact: input.selfTestContact ?? null,
+    slot: input.slot ?? null,
+    maxRounds: input.maxRounds ?? null,
+  });
+}
+
+/** 人工恢复某环境被挂起的自动值守（明确意图才恢复，不自动重试） */
+export async function chatPatrolResume(profileId: string): Promise<ChatPatrolReport> {
+  return invoke<ChatPatrolReport>("chat_patrol_resume", { profileId });
+}
+
 export async function diagnoseCloakBinary(
   licenseKey?: string,
   browserVersion?: string,
@@ -437,16 +647,6 @@ export async function setProfileOtpChannel(
   });
 }
 
-/** 读取生效通道（环境优先，否则全局）；不含密钥明文 */
-export async function getOtpChannelBinding(profileId?: string | number | null): Promise<string> {
-  return invoke<string>("get_otp_channel_binding", {
-    profileId:
-      profileId === undefined || profileId === null || String(profileId).trim() === ""
-        ? null
-        : String(profileId),
-  });
-}
-
 /** 测试邮箱 OTP 通道连通性（IMAP LOGIN / 临时邮结构校验） */
 export async function testOtpChannel(
   channelJson: string,
@@ -470,25 +670,6 @@ export async function updateProfile(input: UpdateProfileInput): Promise<Profile>
   return invoke<Profile>("update_profile", { input });
 }
 
-export async function setProfileInteractiveExtract(
-  profileId: string | number,
-  enabled: boolean,
-): Promise<Profile> {
-  return invoke<Profile>("set_profile_interactive_extract", {
-    profileId: String(profileId),
-    enabled,
-  });
-}
-
-export async function setProfileAgentPanorama(
-  profileId: string | number,
-  enabled: boolean,
-): Promise<Profile> {
-  return invoke<Profile>("set_profile_agent_panorama", {
-    profileId: String(profileId),
-    enabled,
-  });
-}
 export async function requestProfileInteractiveExtract(profileId: string): Promise<void> {
   return invoke<void>("request_profile_interactive_extract", {
     profileId: String(profileId),
@@ -521,11 +702,6 @@ export async function prepareConsoleExit(keepBrowsers: boolean): Promise<void> {
 
 export async function getRunningProfileIds(): Promise<string[]> {
   return invoke<string[]>("get_running_profile_ids");
-}
-
-/** Bring the profile Chromium window to the foreground (Windows; no-op elsewhere). */
-export async function focusProfileBrowser(profileId: string): Promise<void> {
-  return invoke("focus_profile_browser", { profileId });
 }
 
 export interface CookieExportResult {
@@ -622,47 +798,6 @@ export async function runRpaFill(
   });
 }
 
-/** 暂停 RPA 流程，把控制权交回用户（人工过验证码 / 修正页面后继续） */
-export async function pauseRpaFill(profileId: string): Promise<void> {
-  return invoke("pause_rpa_fill", { profileId });
-}
-
-export async function resumeRpaFill(profileId: string): Promise<RpaRunResult> {
-  return invoke<RpaRunResult>("resume_rpa_fill", { profileId });
-}
-
-/** 页面结构变化后重新扫描：重算选择器，保留已录制动作 */
-export async function rescanRpaPage(profileId: string, rawInput?: string): Promise<RpaRunResult> {
-  return invoke<RpaRunResult>("rescan_rpa_page", {
-    profileId,
-    rawInput: rawInput ?? null,
-  });
-}
-
-/** 动作流落库为模板；返回新模板 id */
-export async function saveTemplate(
-  domain: string,
-  templateName: string,
-  actions: RpaAction[],
-  autoApply?: boolean,
-): Promise<number> {
-  return invoke<number>("save_template", {
-    domain,
-    templateName,
-    actions: JSON.stringify(actions),
-    autoApply: autoApply ?? false,
-  });
-}
-
-export async function deleteTemplate(templateId: number): Promise<void> {
-  return invoke("delete_template", { templateId });
-}
-
-/** 同域命中时是否自动套用该模板 */
-export async function toggleTemplateAutoApply(templateId: number, autoApply: boolean): Promise<void> {
-  return invoke("toggle_template_auto_apply", { templateId, autoApply });
-}
-
 export interface AgentRunResult {
   state: string;
   step: number;
@@ -752,9 +887,6 @@ export async function getProfilePageUrl(profileId: string): Promise<string> {
   return invoke<string>("get_profile_page_url", { profileId });
 }
 
-export async function fetchTemplatesByDomain(domain: string): Promise<FormTemplate[]> {
-  return invoke<FormTemplate[]>("get_templates_by_domain", { domain });
-}
 /**
  * 轨迹列表结果。
  *

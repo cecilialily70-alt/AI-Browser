@@ -1,0 +1,87 @@
+{
+  "_note": "脱敏结构化事实包（不是 HTML）：零账号、零网络、可进仓库。字段口径见 descriptor/types.ts RowFact。",
+  "ok": true,
+  "reason": null,
+  "moreAbove": true,
+  "fallbackPoll": false,
+  "rows": [
+    {
+      "rawId": "false_1a2b3c4d5e6f",
+      "text": "<我方已发>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.88,
+      "tokens": ["message-out", "bubble"],
+      "seenTs": "12:31",
+      "identity": null
+    },
+    {
+      "rawId": "true_7f8e9d0c1b2a",
+      "text": "<对方第一句>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.12,
+      "tokens": ["message-in", "bubble"],
+      "seenTs": "12:32",
+      "identity": null
+    },
+    {
+      "rawId": null,
+      "text": "系统消息不该出现",
+      "hasMedia": false,
+      "excluded": true,
+      "retracted": false,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.5,
+      "tokens": ["system-message"],
+      "seenTs": "12:33",
+      "identity": null
+    },
+    {
+      "rawId": "true_001122334455",
+      "text": "",
+      "hasMedia": true,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.1,
+      "tokens": ["message-in"],
+      "seenTs": "12:34",
+      "identity": null
+    },
+    {
+      "rawId": "true_5566778899aa",
+      "text": "",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": true,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.14,
+      "tokens": ["message-in", "recalled-message"],
+      "seenTs": "12:35",
+      "identity": null
+    },
+    {
+      "rawId": null,
+      "text": "<无稳定 id 的一句>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": "in",
+      "checkIcon": false,
+      "cxRatio": 0.5,
+      "tokens": [],
+      "seenTs": "昨天",
+      "identity": null
+    }
+  ]
+}

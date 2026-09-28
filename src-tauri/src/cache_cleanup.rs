@@ -58,7 +58,7 @@ fn is_captcha_frame(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn dir_size_approx(path: &Path) -> u64 {
+pub(crate) fn dir_size_approx(path: &Path) -> u64 {
     let mut total = 0u64;
     let walk = walkdir_shallow(path, 8);
     for p in walk {
@@ -161,7 +161,7 @@ pub fn purge_automation_cache(
     let (browser_root, scraper_root) = storage_paths::resolve_download_roots(app, connection)?;
     let agent_fs_root = ai_browser_home().join("agent_fs");
 
-    // 1) 已删环境：app_data/profile-{id}
+    // 1) 已删环境：app_data/profile-{id}（旧布局）与 browser-profiles/profile-{id}（现行）
     if let Ok(entries) = fs::read_dir(&app_data) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -172,6 +172,23 @@ pub fn purge_automation_cache(
             if let Some(id) = parse_profile_dir_id(&name) {
                 if !active.contains(&id) {
                     remove_dir_tracked(&path, &mut report);
+                }
+            }
+        }
+    }
+    let browser_profiles = app_data.join("browser-profiles");
+    if browser_profiles.is_dir() {
+        if let Ok(entries) = fs::read_dir(&browser_profiles) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(id) = parse_profile_dir_id(&name) {
+                    if !active.contains(&id) {
+                        remove_dir_tracked(&path, &mut report);
+                    }
                 }
             }
         }

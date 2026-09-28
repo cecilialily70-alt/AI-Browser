@@ -455,7 +455,10 @@ function buildFinalChromiumArgs(
 
   const extensions = extras.extensionPaths?.filter((entry) => entry.trim().length > 0) ?? [];
   if (extensions.length > 0) {
-    const joined = extensions.map((entry) => path.resolve(entry)).join(",");
+    // path.resolve 偶发也会吐出 `\\?\`；`--load-extension` 与 user-data-dir 同族，必须剥掉
+    const stripVerbatim = (value: string): string =>
+      value.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/i, "");
+    const joined = extensions.map((entry) => stripVerbatim(path.resolve(entry))).join(",");
     args.push(`--load-extension=${joined}`);
     args.push(`--disable-extensions-except=${joined}`);
   }
@@ -828,10 +831,22 @@ async function resolveProfileLaunchContext(
     });
   }
   const proxyEnv = config.proxyEnv ?? null;
-  const userDataDir = String(config.userDataDir ?? "").trim();
+  const userDataDirRaw = String(config.userDataDir ?? "").trim();
+  // Windows：Host canonicalize 会带上 `\\?\`；Chromium 用这种路径时 IndexedDB
+  // 写不进磁盘（WhatsApp 二维码区永远转圈）。这里再剥一层双保险。
+  const userDataDir = userDataDirRaw
+    .replace(/^\\\\\?\\UNC\\/i, "\\\\")
+    .replace(/^\\\\\?\\/i, "");
 
   if (!userDataDir) {
     throw new Error("userDataDir is required for launchPersistentContext (incognito bypass)");
+  }
+  if (userDataDir !== userDataDirRaw) {
+    logger.warn("user_data_dir_verbatim_prefix_stripped", {
+      profileId,
+      note: "\\\\?\\ prefix breaks Chromium IndexedDB; stripped before launch",
+    });
+    config.userDataDir = userDataDir;
   }
 
   await mkdir(userDataDir, { recursive: true });

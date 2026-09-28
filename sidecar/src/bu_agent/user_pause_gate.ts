@@ -18,18 +18,9 @@ export function clearUserPauseRequest(): void {
   pauseRequested = false;
 }
 
-export function isUserPauseRequested(): boolean {
-  return pauseRequested;
-}
-
 export function userPauseLockId(profileId?: string | null): string {
   const id = String(profileId ?? "").trim() || "default";
   return `${USER_PAUSE_LOCK_PREFIX}:${id}`;
-}
-
-export function isUserPauseLockId(lockId: unknown): boolean {
-  const id = String(lockId ?? "").trim();
-  return id.startsWith(`${USER_PAUSE_LOCK_PREFIX}:`);
 }
 
 /**

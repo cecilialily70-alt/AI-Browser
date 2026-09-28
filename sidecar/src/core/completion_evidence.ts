@@ -105,7 +105,7 @@ export type ChannelSmsOtpSlot = {
   fetchedAt: number;
 };
 
-export type GoalIntent = "outcome" | "informational" | "generic";
+export type GoalIntent = "outcome" | "informational" | "chat" | "generic";
 
 /** 购物/订票：停在支付前 vs 不得自动当成已付款 */
 export interface CommerceHaltLexicon {
@@ -123,6 +123,12 @@ export interface CompletionLexicon {
   minClaimChars: number;
   outcomeTerms: string[];
   informationalTerms: string[];
+  /**
+   * 会话型目标词表（跟人对话 / 发消息 / 回消息）。
+   * 与 outcome / informational 并列的第三种意图，但**验收标准不比 outcome 松** ——
+   * 它只额外表达「交付物不是到达某页」，用于禁止契约里臆造的 navigation 交付物。
+   */
+  chatTerms: string[];
   strongSuccessTerms: string[];
   weakSuccessTerms: string[];
   failureTerms: string[];
@@ -221,6 +227,7 @@ export function loadCompletionLexicon(): CompletionLexicon | null {
       minClaimChars: num(policy.minClaimChars, 30, 0, 500),
       outcomeTerms: sanitizeTerms(intents.outcome?.terms),
       informationalTerms: sanitizeTerms(intents.informational?.terms),
+      chatTerms: sanitizeTerms(intents.chat?.terms),
       strongSuccessTerms: sanitizeTerms(success.strong?.terms),
       weakSuccessTerms: sanitizeTerms(success.weak?.terms),
       failureTerms: sanitizeTerms(failure.terms),
@@ -610,10 +617,24 @@ const FALLBACK_OUTCOME_TERMS = [
 const FALLBACK_INFORMATIONAL_TERMS = [
   "summarize", "summary", "what is", "how much", "tell me", "find out", "explain", "compare", "list", "extract", "read", "answer",
 ];
+const FALLBACK_CHAT_TERMS = [
+  "聊天", "会话", "对话", "私信", "群聊", "回消息", "回复消息", "发消息", "发一条消息", "发个消息",
+  "聊两句", "打招呼", "跟他说", "跟她说",
+  "chat with", "chat to", "send a message", "send message", "reply to", "private message", "direct message", "instant message", "talk to", "chat room",
+];
 
+/**
+ * 目标意图分类。
+ *
+ * 顺序：**chat 先于 outcome** —— 会话型目标天然含结果动词（「发送」「send」「回」），
+ * 先判 outcome 会把它们吞掉，于是契约又给会话页塞一条 navigation 债务（P9 的病根）。
+ * chat 词表只收「跟人对话」的强短语，不含单字，因此不会误伤「注册 / 下单 / 提交表单」。
+ */
 export function classifyGoalIntent(goal: string, lexicon: CompletionLexicon | null): GoalIntent {
   const hay = normalizeHaystack(goal);
   if (!hay) return "generic";
+  const chatTerms = lexicon?.chatTerms.length ? lexicon.chatTerms : FALLBACK_CHAT_TERMS;
+  if (firstHit(hay, chatTerms)) return "chat";
   const outcomeTerms = lexicon?.outcomeTerms.length ? lexicon.outcomeTerms : FALLBACK_OUTCOME_TERMS;
   if (firstHit(hay, outcomeTerms)) return "outcome";
   const infoTerms = lexicon?.informationalTerms.length ? lexicon.informationalTerms : FALLBACK_INFORMATIONAL_TERMS;
@@ -747,16 +768,20 @@ export function evaluateCompletion(input: EvaluateCompletionInput): CompletionVe
   let acceptable = true;
   let missing = "";
 
-  if (intent === "outcome") {
-    // 结果型任务：必须有「离开原页面」或「页面明确报成功」这类外部可观测证据。
+  if (intent === "outcome" || intent === "chat") {
+    // 结果型 / 会话型任务：必须有「离开原页面」或「页面明确报成功」这类外部可观测证据。
     // 仅「填过字段 / 点过按钮」不算完成 —— 那正是本机制要拦住的自欺。
+    // 会话型（发消息）不比结果型松：光在输入框里敲了字、消息没真发出去，一律不算完成。
     const weakOk = weakSuccess && (verifiedEffect || leftBaseline);
     // 只有「动作引发了跳转」还不够（可能点错链接跳到了别处）；
     // 必须再加上「跳转后模型真的看过结果页（截图）」，才是可信的完成证据。
     const navigatedAndSeen = Boolean(navFact) && screenshotEvidence;
     acceptable = leftBaseline || strongSuccess || weakOk || navigatedAndSeen;
     if (!acceptable) {
-      missing = "「结果型任务」缺少完成证据：没有页面跳转，也没有成功提示";
+      missing =
+        intent === "chat"
+          ? "「会话型任务」缺少发送证据：没有发送成功提示，也没有可验证的发送副作用（只在输入框里敲了字不算）"
+          : "「结果型任务」缺少完成证据：没有页面跳转，也没有成功提示";
     }
   } else if (intent === "informational") {
     // 信息型任务：交付物是信息本身 → 必须有内容获取事实，或有实质正文 + 页面摘要。
@@ -779,8 +804,14 @@ export function evaluateCompletion(input: EvaluateCompletionInput): CompletionVe
     }
   }
 
-  // 结果型任务里，页面明确报错且没有任何完成迹象时不放行（避免「失败页 + 残留成功词」误判）
-  if (acceptable && intent === "outcome" && signals.failure.length > 0 && !strongSuccess && !leftBaseline) {
+  // 结果型/会话型任务里，页面明确报错且没有任何完成迹象时不放行（避免「失败页 + 残留成功词」误判）
+  if (
+    acceptable &&
+    (intent === "outcome" || intent === "chat") &&
+    signals.failure.length > 0 &&
+    !strongSuccess &&
+    !leftBaseline
+  ) {
     acceptable = false;
     missing = `页面存在失败提示：${signals.failure.join(" / ")}`;
   }
@@ -890,6 +921,10 @@ function buildGuidance(intent: GoalIntent, missing: string, counter: string[]): 
   if (intent === "outcome") {
     lines.push(
       "请勿直接结束任务。下一步按顺序排查：① 若表单仍有必填项为空/未勾选（看 state=unchecked），先补齐并回读确认；② 若提交按钮还未点过，点击它；③ 若点击后页面无变化，说明动作被拦截或失败，需重新观察并处理；④ 只有出现页面跳转或明确的完成提示（如「成功」「已提交」「欢迎」等）才算完成，届时再 done。",
+    );
+  } else if (intent === "chat") {
+    lines.push(
+      "请勿直接结束任务。下一步按顺序排查：① 确认消息**真的发出去了**（输入框已清空 / 会话里出现我方那一条 / 页面出现「已发送」等提示），只在输入框里敲了字不算；② 若发送按钮还未点过，点击它；③ 若点了没反应，说明被拦截或失败，需重新观察并处理（风控/验证码一律交人工，禁止编造）。",
     );
   } else if (intent === "informational") {
     lines.push(

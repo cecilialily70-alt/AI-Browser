@@ -16,6 +16,9 @@ import {
   type PersonaData,
 } from "./persona_engine.js";
 import { formatConstraintForInputType } from "./semantic_sniff.js";
+import { hash32 } from "./core/hash32.js";
+
+export { hash32 };
 
 export type FieldOverrideMode = "fixed" | "ai_prompt";
 
@@ -116,15 +119,7 @@ export function buildTemplateContext(
 // 变量名允许中文（列名/人设字段可能是中文）：`{{data.关键词}}` / `{{persona.姓名}}`
 const VAR_RE = /\{\{\s*([a-zA-Z_\u4e00-\u9fa5][\w.\u4e00-\u9fa5]*)\s*\}\}/g;
 
-/** FNV-1a 32 位哈希：把「运行种子 + 稳定身份 + 字段」派生成确定性种子（§5.7） */
-export function hash32(text: string): number {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash >>> 0;
-}
+/** FNV-1a 32 位哈希（实现已下沉到无依赖叶子模块 `core/hash32.ts`；此处仅对外保持原入口） */
 
 /**
  * 生成型数据的确定性种子（§5.7）：

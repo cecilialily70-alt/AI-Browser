@@ -15,11 +15,6 @@ import { fetchRawSettingsStrict, updateSetting } from "./tauri";
 
 export const AGENT_RULES_KEY = "agent_rules";
 export const AGENT_PERSONAS_KEY = "agent_personas";
-/**
- * INFO 残留：规则不再按环境预启用（只在 Agent 输入框 `@规则名` 引用时生效），
- * 因此该键**无写入方、无读取方**；保留常量只为标注 DB 里的历史键，不做迁移。
- */
-export const AGENT_RULE_SELECTION_KEY = "agent_rule_selection";
 
 /* ------------------------------------------------------------------ 规则 */
 
@@ -743,20 +738,6 @@ export function filledPersonaFields(persona: AgentPersona): AgentPersonaField[] 
  */
 export function personaEffectiveFixedFields(persona: AgentPersona): AgentPersonaField[] {
   return persona.fixedFieldsConfigured ? persona.fixedFields : filledPersonaFields(persona);
-}
-
-/** 「@人设名」在文本里的引用载荷：label + 固定字段 + 字段值（Agent 与回放共用同一口径） */
-export function personaPayload(persona: AgentPersona): {
-  label: string;
-  fields: AgentPersonaField[];
-  fixed: Record<string, string>;
-} {
-  const fields = personaEffectiveFixedFields(persona);
-  return {
-    label: persona.label,
-    fields,
-    fixed: personaFixedValues(persona, fields),
-  };
 }
 
 /**

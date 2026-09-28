@@ -320,6 +320,51 @@ export class JsonLogger {
     }
   }
 
+  /**
+   * 聊天模式进度 —— **独立事件 `chat_state`**（B8 / §5.7）。
+   *
+   * 刻意**不复用** `agentProgress`：那条路把载荷塞进 `agent_state`，而 Rust 侧
+   * `agent_state` 的转发会**丢掉 `phase` 与 `runId`**（`rpa_session.rs`）——聊天模式的
+   * 相位与线程正是视图最需要的东西。这里原样保留全部结构化字段（脱敏仍由 `writeRedacted` 兜底）。
+   *
+   * 聊天日志只记「与聊天有关的事」：不发全景/截图/控件编号（§5.7）。
+   *
+   * **顶层 `type` 恒为 `chat_state`**：调用方传进来的语义 `type`（`chat_read` / `chat_send` /
+   * `chat_patrol_yield` …）折叠进 `kind`。这样 Rust 侧只需**精确匹配**一个稳定 type 就能把
+   * 所有聊天事件转发给「聊天」视图；否则就得按 `chat_` 前缀猜（脆弱字符串匹配，§0.5.3 A）。
+   * `waitId` 若存在也原样带出：它是「这一片聊天收工了」的唯一唤醒凭据。
+   */
+  chatProgress(message: string, data?: Record<string, unknown>): void {
+    const text = String(message ?? "").trim();
+    if (!text) {
+      return;
+    }
+    this.progress(text, data);
+    const profileId =
+      (typeof data?.profileId === "string" && data.profileId.trim()) ||
+      (typeof data?.profile_id === "string" && data.profile_id.trim()) ||
+      undefined;
+    const { type: rawKind, ...rest } = data ?? {};
+    const kind = typeof rawKind === "string" && rawKind.trim() ? rawKind.trim() : "chat_note";
+    // 片终态（带 stopReason）若没显式 waitId，用本命令 bind 的那份 —— 否则 Host waiter 悬着
+    const waitId =
+      (typeof rest.waitId === "string" && rest.waitId.trim()) ||
+      (rest.stopReason != null ? getActiveCommandWaitId() : null) ||
+      undefined;
+    writeRedacted({
+      ...rest,
+      type: "chat_state",
+      kind,
+      ts: new Date().toISOString(),
+      msg: text,
+      ...(profileId ? { profileId } : {}),
+      ...(waitId ? { waitId } : {}),
+    });
+    if (waitId && rest.stopReason != null) {
+      clearActiveCommandWaitId(waitId);
+    }
+  }
+
   /** 遗留 agent_state 事件格式（IPC 致命错误兜底仍可能输出） */
   agentState(state: string, data?: Record<string, unknown>): void {
     const waitId =

@@ -69,6 +69,7 @@ import {
 import { verifyDeliverables, deniedVerdicts, uncertainVerdicts } from "../core/deliverable_verify.js";
 import {
   isUnrequestedDeliverable,
+  isUnverifiableNavigation,
   listDeliverables,
   listPendingDeliverables,
   markDeliverableSatisfied,
@@ -874,8 +875,13 @@ async function tryVisionRelocateOnInvalidIndex(
 async function guardPendingHumanCredential(ctx: ActionContext): Promise<ActionResult | null> {
   const pending = findPendingHumanCredentials(ctx.browserState.selectorMap.values());
   if (pending.length === 0) return null;
-  // 信息型/通用型任务路过一个验证码框，不代表任务要求拿到它 —— 不拦
-  if (classifyGoalIntent(ctx.goal, loadCompletionLexicon()) !== "outcome") return null;
+  /*
+   * 信息型/通用型任务路过一个验证码框，不代表任务要求拿到它 —— 不拦。
+   * 会话型（chat）必须按结果型同等对待：它天然含「发送」这类结果词，改造前就落在 outcome 分支，
+   * 一旦放宽就等于让「页面还空着验证码框」也能 done —— 那是红线的松动，不允许。
+   */
+  const intent = classifyGoalIntent(ctx.goal, loadCompletionLexicon());
+  if (intent !== "outcome" && intent !== "chat") return null;
 
   const target = pending[0]!;
   const others = pending.slice(1).map((item) => `[${item.index}] ${item.label}`);
@@ -1009,26 +1015,34 @@ async function guardPendingDeliverables(ctx: ActionContext, claim: string): Prom
   if (stillPending.length === 0) return null;
 
   /*
-   * ⓪ 无要求项豁免（**结构事实**，不必攒次数）：目标**从未要求**的交付物
-   * （信息型目标里的 navigation，见 task_contract 的 `isUnrequestedDeliverable`）
-   * 不是「还没做到」，而是契约本身多出来的一笔债 —— 它永远不会变成已达成，
-   * 拦下去只会让 done 被无限驳回、模型原地打转（用户现场：总结任务被 `[navigation#2]` 卡死）。
+   * ⓪ 无要求项豁免（**结构事实**，不必攒次数）：这类交付物不是「还没做到」，而是契约本身多出来
+   * 的一笔债 —— 它永远不会变成已达成，拦下去只会让 done 被无限驳回、模型原地打转。
+   * 两种同族情形（判据都在 `task_contract`，这里是运行期兜底）：
+   *   ① `isUnrequestedDeliverable`：目标**从未要求**该类交付
+   *      （信息型 / 会话型目标里的 navigation。用户现场：总结任务被 `[navigation#2]` 卡死；
+   *      会话目标一开始就停在会话页，同样被这条债卡死）；
+   *   ② `isUnverifiableNavigation`：该项**说不出目的地**（线索里只有「打开/访问」这类纯导航动词。
+   *      用户现场：`[navigation#1] 打开可联系 X 的页面/应用`，浏览器本来就停在会话页）。
    *
    * 这一点在拿到契约的那一刻就成立，不需要等验证器表态：
-   *   - `verifyNavigation` 对信息型目标返回「不确定」，它压根不会出现在「确定性否认」里，
+   *   - `verifyNavigation` 对信息型/会话型返回「不确定」，它压根不会出现在「确定性否认」里，
    *     所以「攒够否认次数再豁免」对这种项是无效的（会把预算烧在无意义的兜底判定上）；
    *   - 正常路径下契约生成阶段已经丢弃它，这里兜的是遗留契约 / 重规划补出来的残余。
    */
   const goalIntent = classifyGoalIntent(ctx.goal, loadCompletionLexicon());
   const waivedIds = new Set<string>();
   for (const item of stillPending) {
-    if (!isUnrequestedDeliverable(item.spec, goalIntent)) continue;
-    waiveDeliverable(ledger, item.spec.id, `目标未要求（${item.spec.kind}），不作为硬闸`, 0);
+    const unrequested = isUnrequestedDeliverable(item.spec, goalIntent);
+    const unverifiable = isUnverifiableNavigation(item.spec);
+    if (!unrequested && !unverifiable) continue;
+    waiveDeliverable(ledger, item.spec.id, `目标未要求/无从核销（${item.spec.kind}），不作为硬闸`, 0);
     waivedIds.add(item.spec.id);
     ctx.logger.agentProgress(`交付物已豁免：[${item.spec.id}] ${item.spec.text}`, {
       phase: "deliverable_gate",
       kind: item.spec.kind,
-      reason: "目标未要求该类交付（信息型目标的阅读对象即当前页），不再作为硬闸",
+      reason: unrequested
+        ? "目标未要求该类交付（信息型/会话型的对象即当前页，不需要先跳转），不再作为硬闸"
+        : "该项没有说出可核对的目的地（线索里只有导航动词），无从判定是否达成，不再作为硬闸",
     });
   }
   if (waivedIds.size > 0) {
@@ -1199,6 +1213,7 @@ async function verifyCompletionEvidence(
     minClaimChars: 30,
     outcomeTerms: [],
     informationalTerms: [],
+    chatTerms: [],
     strongSuccessTerms: [],
     weakSuccessTerms: [],
     failureTerms: [],

@@ -1,7 +1,11 @@
 pub mod ai;
 pub mod app_env;
+pub mod browser_data;
 pub mod browser_manager;
 pub mod cache_cleanup;
+pub mod chat_connector;
+pub mod chat_context;
+pub mod chat_patrol;
 pub mod clipboard;
 pub mod cloak_binary;
 pub mod commands;
@@ -59,6 +63,9 @@ use crate::commands::{
     save_template, secret_ref_exists, set_profile_agent_panorama, set_profile_interactive_extract,
     set_profile_otp_channel, test_proxy_connection,
     toggle_template_auto_apply, update_profile, update_setting, purge_automation_cache,
+    list_chat_context_overview, purge_all_chat_contexts,
+    purge_chat_context,
+    list_browser_data_overview, purge_all_browser_data, purge_browser_data,
 };
 use crate::db::init_database;
 use crate::db_write_queue::DbWriteQueue;
@@ -74,8 +81,9 @@ use crate::settings_probe::{
 };
 use crate::replay_plan::build_replay_run_plan;
 use crate::rpa_session::{
-    abort_autonomous_agent, bring_profile_to_front, cancel_agent_action, confirm_agent_action,
-    continue_agent_handover, get_profile_page_url, pause_autonomous_agent, pause_rpa_fill,
+    abort_autonomous_agent, bring_profile_to_front, cancel_agent_action, chat_list_contacts,
+    chat_start, chat_status, chat_stop, confirm_agent_action, continue_agent_handover,
+    get_chat_thread_messages, get_profile_page_url, pause_autonomous_agent, pause_rpa_fill,
     replay_agent_trajectory, reply_agent_ask, rescan_rpa_page, resume_rpa_fill, run_rpa_fill,
     start_autonomous_agent, RpaSessionManager,
 };
@@ -238,6 +246,15 @@ pub fn run() {
             app.manage(RpaSessionManager::default());
             app.manage(data_api);
 
+            // —— 聊天模式调度器 / 看门狗（P8）——
+            // 先 `manage` 再决定是否启动：命令里要用到同一个句柄（`update_setting` 切开关也要）。
+            // **默认关** —— 只有设置里显式打开才起循环；关掉即 abort（不是「起了但空转」）。
+            let chat_patrol = crate::chat_patrol::ChatPatrol::default();
+            if crate::chat_patrol::chat_mode_enabled(app.handle()).unwrap_or(false) {
+                chat_patrol.apply_enabled(app.handle(), true);
+            }
+            app.manage(chat_patrol);
+
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = webview::disable_default_browser_ui(&window) {
                     log_warn!("TianshuTai: webview hardening skipped: {error}");
@@ -285,6 +302,12 @@ pub fn run() {
             delete_profile,
             batch_delete_profiles,
             purge_automation_cache,
+            list_chat_context_overview,
+            purge_chat_context,
+            purge_all_chat_contexts,
+            list_browser_data_overview,
+            purge_browser_data,
+            purge_all_browser_data,
             test_proxy_connection,
             add_dynamic_api_proxy,
             start_profile,
@@ -308,6 +331,16 @@ pub fn run() {
             abort_autonomous_agent,
             pause_autonomous_agent,
             bring_profile_to_front,
+            chat_start,
+            chat_stop,
+            chat_status,
+            chat_list_contacts,
+            get_chat_thread_messages,
+            crate::chat_connector::chat_connector_status,
+            crate::chat_connector::chat_connector_delete,
+            crate::chat_connector::chat_learn_site,
+            crate::chat_patrol::chat_patrol_state,
+            crate::chat_patrol::chat_patrol_resume,
             replay_agent_trajectory,
             build_replay_run_plan,
             plan_batch_replay_data,

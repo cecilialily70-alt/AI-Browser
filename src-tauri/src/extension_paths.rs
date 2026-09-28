@@ -1,6 +1,38 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// 剥掉 Windows `Path::canonicalize()` 产生的 `\\?\` / `\\?\UNC\` 扩展前缀。
+///
+/// Chromium 对带此前缀的路径不友好：
+/// - `--user-data-dir=\\?\C:\...` → IndexedDB 写不进（WhatsApp 二维码永远转圈）
+/// - `--load-extension=\\?\C:\...` → 扩展可能加载失败（代理鉴权扩展失效）
+///
+/// 非 Windows 或本来就没有前缀时原样返回。
+pub fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &path;
+    }
+    path
+}
+
+/// 字符串版：合并 / 透传扩展路径时用。
+pub fn strip_windows_verbatim_prefix_str(path: &str) -> String {
+    strip_windows_verbatim_prefix(PathBuf::from(path))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// 收集可加载的解压扩展目录（目录内必须含 manifest.json）。
 /// 扫描顺序：应用旁 `extensions/` → 用户数据 `extensions/`（可放置 TWP）。
 pub fn collect_extension_paths(app_data_dir: &Path) -> Vec<String> {
@@ -52,9 +84,12 @@ pub fn collect_extension_paths(app_data_dir: &Path) -> Vec<String> {
     found
         .into_iter()
         .filter_map(|path| {
-            path.canonicalize()
-                .ok()
-                .map(|canonical| canonical.to_string_lossy().into_owned())
+            path.canonicalize().ok().map(|canonical| {
+                // canonicalize 在 Windows 会加 `\\?\`；交给 Chromium 前必须剥掉
+                strip_windows_verbatim_prefix(canonical)
+                    .to_string_lossy()
+                    .into_owned()
+            })
         })
         .collect()
 }
@@ -71,6 +106,8 @@ fn push_unique_extension(
 }
 
 /// 合并代理鉴权扩展与翻译等业务扩展，代理扩展始终排在最前。
+///
+/// 出口处再剥一遍 `\\?\`：鉴权扩展若在生成端漏剥，这里仍挡得住。
 pub fn merge_extension_paths(
     auth_extension_dir: Option<&str>,
     bundled_or_user: Vec<String>,
@@ -79,9 +116,10 @@ pub fn merge_extension_paths(
     let mut seen = std::collections::HashSet::<String>::new();
 
     if let Some(auth) = auth_extension_dir.map(str::trim).filter(|value| !value.is_empty()) {
-        let key = auth.to_ascii_lowercase();
+        let normalized = strip_windows_verbatim_prefix_str(auth);
+        let key = normalized.to_ascii_lowercase();
         if seen.insert(key) {
-            paths.push(auth.to_owned());
+            paths.push(normalized);
         }
     }
 
@@ -90,11 +128,60 @@ pub fn merge_extension_paths(
         if trimmed.is_empty() {
             continue;
         }
-        let key = trimmed.to_ascii_lowercase();
+        let normalized = strip_windows_verbatim_prefix_str(trimmed);
+        let key = normalized.to_ascii_lowercase();
         if seen.insert(key) {
-            paths.push(trimmed.to_owned());
+            paths.push(normalized);
         }
     }
 
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        merge_extension_paths, strip_windows_verbatim_prefix, strip_windows_verbatim_prefix_str,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn strip_verbatim_prefix_handles_drive_and_unc() {
+        let extended = PathBuf::from(r"\\?\C:\Users\x\ext");
+        assert_eq!(
+            strip_windows_verbatim_prefix(extended).to_string_lossy(),
+            r"C:\Users\x\ext"
+        );
+        let unc = PathBuf::from(r"\\?\UNC\server\share\ext");
+        assert_eq!(
+            strip_windows_verbatim_prefix(unc).to_string_lossy(),
+            r"\\server\share\ext"
+        );
+        let already = PathBuf::from(r"C:\Users\x\ext");
+        assert_eq!(strip_windows_verbatim_prefix(already.clone()), already);
+    }
+
+    /// 合并出口必须剥掉鉴权扩展与业务扩展上的 `\\?\`，避免 `--load-extension` 踩坑。
+    #[test]
+    fn merge_extension_paths_strips_verbatim_prefix() {
+        let merged = merge_extension_paths(
+            Some(r"\\?\C:\Temp\ai-browser-proxy-auth\1"),
+            vec![
+                r"\\?\C:\app\extensions\twp".to_owned(),
+                r"C:\app\extensions\other".to_owned(),
+            ],
+        );
+        assert_eq!(
+            merged,
+            vec![
+                r"C:\Temp\ai-browser-proxy-auth\1".to_owned(),
+                r"C:\app\extensions\twp".to_owned(),
+                r"C:\app\extensions\other".to_owned(),
+            ]
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix_str(r"\\?\D:\x"),
+            r"D:\x"
+        );
+    }
 }

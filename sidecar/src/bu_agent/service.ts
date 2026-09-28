@@ -727,7 +727,9 @@ async function runBuAutonomousAgentLoopInner(
     // 播种带期望的计划（Phase 3.2）：期望只落账、不裁决 —— 3.3 才由 Arbiter 消费
     messageManager.seedPlan(analyzed.planSteps, 0);
     const expectedSteps = analyzed.planSteps.filter((step) => step.expects).length;
-    const deliverableLedger = createDeliverableLedger(analyzed.contract);
+    // 起点即目标的预核销：目标点名了 URL/站点而浏览器本就停在那时，navigation 交付物当场核销
+    // （否则它永远是「还差一项」，done 被反复驳回 —— P9）
+    const deliverableLedger = createDeliverableLedger(analyzed.contract, startUrl);
     const artifacts: ArtifactRecord[] = [];
     /** MACRO_ANALYZE 富计划：SubTask 切换时刷新 todo；REPLAN 时同步 plan.json */
     let activeMacroPlan: MacroPlan | null = analyzed.macroPlan;

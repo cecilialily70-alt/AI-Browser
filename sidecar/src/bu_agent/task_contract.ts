@@ -176,6 +176,44 @@ export function loadDeliverableKinds(): DeliverableLexiconKinds | null {
   return cachedKinds;
 }
 
+/**
+ * 「纯导航动词」兜底表 —— 句子里只剩这些词时，交付物**说不出要去哪**。
+ * 与 `deliverable_lexicon.json → deliverableKinds.kinds.navigation.terms` 同源；缺文件时用它。
+ */
+const FALLBACK_NAVIGATION_VERBS = ["打开", "访问", "前往", "导航", "进入网站", "open", "visit", "navigate", "go to"];
+
+function navigationVerbSet(kinds: DeliverableLexiconKinds | null): Set<string> {
+  const terms = kinds?.terms.navigation?.length ? kinds.terms.navigation : FALLBACK_NAVIGATION_VERBS;
+  return new Set(terms.map((term) => normalizeHaystack(term)).filter(Boolean));
+}
+
+/**
+ * 这条 navigation 交付物**有没有可核对的目的地**？
+ *
+ * 线索里只剩「打开 / 访问 / open」这类纯导航动词时，它既没说去哪，也无法用页面文案核销 ——
+ * 这样的项一旦入账就是一条**永远达不成的债**：`verifyNavigation` 会判「页面从未离开起始地址」，
+ * done 被无限驳回、模型原地打转（用户现场：目标是「向某人推广某产品」，契约里却凭空多出
+ * `[navigation#1] 打开可联系 X 的页面/应用（如聊天、邮件等沟通渠道）`，而浏览器本来就停在会话页）。
+ *
+ * 判据与 `isPhantomNavigation` 同族、同一份纪律：**宁可不收，也不收一条注定无法核销的债务。**
+ * 与「打开图片栏目」这类不同的是：那种项的目标词（图片/栏目）会作为线索留下，能被页面文案核销。
+ */
+export function hasConcreteNavigationTarget(
+  hints: readonly string[],
+  kinds: DeliverableLexiconKinds | null = loadDeliverableKinds(),
+): boolean {
+  const verbs = navigationVerbSet(kinds);
+  return hints.some((hint) => {
+    const term = normalizeHaystack(hint);
+    return term.length > 0 && !verbs.has(term);
+  });
+}
+
+/** 运行期判据（done 闸门用）：这条 navigation 交付物无从核销 —— 它没有能说清的目的地 */
+export function isUnverifiableNavigation(spec: DeliverableSpec): boolean {
+  return spec.kind === "navigation" && !hasConcreteNavigationTarget(spec.hints);
+}
+
 /* 统一用顶部 import 的 readFileSync：契约推导发生在分析相位，同步读一次成本可忽略。 */
 
 /* 统一用顶部 import 的 readFileSync：契约推导发生在分析相位，同步读一次成本可忽略。 */
@@ -226,11 +264,13 @@ function resolveDeliverableKind(
 }
 
 /**
- * 信息型目标会不会「为了读懂而导航」？
+ * 「为了读懂而导航」的目标会不会需要 navigation 交付物？不会。
  *
- * 不会。`总结/分析/介绍这个网站` 的阅读对象就是**当前页**；除非目标里点名了要打开的
- * URL/站点（explicitNavigation），否则 navigation 交付物一定是臆造 —— 而它一旦入账，
- * `verifyNavigation` 就会永久判「未达成」，把 done 卡死在驳回循环里。
+ * - 信息型：`总结/分析/介绍这个网站` 的阅读对象就是**当前页**；
+ * - 会话型：`给某人发消息` 的交付物是「话发出去」，**就地做事**，从不需要先跳到哪一页。
+ *
+ * 除非目标里点名了要打开的 URL/站点（explicitNavigation），否则 navigation 交付物一定是臆造 ——
+ * 而它一旦入账，`verifyNavigation` 就会永久判「未达成」，把 done 卡死在驳回循环里（P9 的病根）。
  * 宁可不收，也不收一条注定无法核销的债务。
  */
 function isPhantomNavigation(
@@ -238,7 +278,8 @@ function isPhantomNavigation(
   intent: GoalIntent,
   explicitNavigation: boolean,
 ): boolean {
-  return kind === "navigation" && intent === "informational" && !explicitNavigation;
+  const localOnly = intent === "informational" || intent === "chat";
+  return kind === "navigation" && localOnly && !explicitNavigation;
 }
 
 /**
@@ -349,6 +390,9 @@ export function deriveContractFromRules(input: DeriveContractInput): TaskContrac
     if (!kind) continue;
     const effectiveKind = normalizeDeliverableKindForIntent(kind, input.intent);
     if (isPhantomNavigation(effectiveKind, input.intent, input.explicitNavigation === true)) continue;
+    const hints = collectHints(text, input.queryTerms ?? [], kinds);
+    // 说不出目的地的「打开某页」不立债务（否则 done 会被它永久卡死）
+    if (effectiveKind === "navigation" && !hasConcreteNavigationTarget(hints, kinds)) continue;
     // 结论型交付物唯一：同一任务不会要两份「用自己的话总结」
     if (effectiveKind === "answer_given" && specs.some((spec) => spec.kind === "answer_given")) {
       continue;
@@ -360,21 +404,27 @@ export function deriveContractFromRules(input: DeriveContractInput): TaskContrac
       id: specId(effectiveKind, specs.length + 1),
       kind: effectiveKind,
       text: clip(text),
-      hints: collectHints(text, input.queryTerms ?? [], kinds),
+      hints,
       required: effectiveKind === "answer_given" ? true : kinds?.required[effectiveKind] !== false,
     });
   }
 
-  // 纯搜索/打开类目标（无任何交付动作命中）也要有一项，否则契约空转
-  if (specs.length === 0 && steps.length > 0) {
+  // 纯搜索/打开类目标（无任何交付动作命中）也要有一项，否则契约空转。
+  // 会话型目标例外：它的完成判据是「话到底发出去没有」（由会话引擎 / 发送闸门把关），
+  // 不是「到达某页」。硬塞一项 navigation/submitted 只会多出一笔核销不了的债，把 done 卡进驳回循环。
+  // 同理，说不出目的地的 navigation 也不补 —— 那种项无从核销，完成与否交给证据闸门（跳转/成功提示）。
+  if (specs.length === 0 && steps.length > 0 && input.intent !== "chat") {
     const kind: DeliverableKind = input.intent === "informational" ? "answer_given" : "navigation";
-    specs.push({
-      id: specId(kind, 1),
-      kind,
-      text: clip(steps[0]!),
-      hints: collectHints(steps[0]!, input.queryTerms ?? [], kinds),
-      required: true,
-    });
+    const hints = collectHints(steps[0]!, input.queryTerms ?? [], kinds);
+    if (kind !== "navigation" || hasConcreteNavigationTarget(hints, kinds)) {
+      specs.push({
+        id: specId(kind, 1),
+        kind,
+        text: clip(steps[0]!),
+        hints,
+        required: true,
+      });
+    }
   }
 
   return { goal, intent: input.intent, deliverables: specs, source: "rule" };
@@ -415,14 +465,15 @@ export function buildTaskContract(input: NormalizeContractInput): TaskContract {
     const declared: DeliverableKind | null = (DELIVERABLE_KINDS as string[]).includes(rawKind)
       ? (rawKind as DeliverableKind)
       : null;
-    // 文本优先裁定类型；再由结构闸门拦掉「目标从未要求」的导航债务
+    // 文本优先裁定类型；再由结构闸门拦掉「目标从未要求」或「说不出目的地」的导航债务
     const kind = resolveDeliverableKind(text, declared, kinds, input.intent);
     if (isPhantomNavigation(kind, input.intent, input.explicitNavigation === true)) continue;
-    if (kind === "answer_given" && specs.some((spec) => spec.kind === "answer_given")) continue;
-    if (isDuplicateSpec(specs, kind, text)) continue;
     const hints = Array.isArray(item.hints)
       ? sanitizeTermList(item.hints)
       : collectHints(text, input.queryTerms ?? [], kinds);
+    if (kind === "navigation" && !hasConcreteNavigationTarget(hints, kinds)) continue;
+    if (kind === "answer_given" && specs.some((spec) => spec.kind === "answer_given")) continue;
+    if (isDuplicateSpec(specs, kind, text)) continue;
     specs.push({
       id: specId(kind, specs.length + 1),
       kind,
@@ -450,10 +501,43 @@ export function buildTaskContract(input: NormalizeContractInput): TaskContract {
   };
 }
 
-export function createDeliverableLedger(contract: TaskContract): DeliverableLedger {
+/** 一段 URL 是否命中这组线索（起点即目标的预核销用；大小写/空白无关） */
+function urlHitsHints(url: string, hints: readonly string[]): string | null {
+  if (hints.length === 0) return null;
+  const hay = normalizeHaystack(url);
+  if (!hay) return null;
+  for (const hint of hints) {
+    const term = normalizeHaystack(hint);
+    if (term && termHit(hay, term)) return hint;
+  }
+  return null;
+}
+
+/**
+ * 建台账。
+ *
+ * `startUrl` = 任务开始时浏览器所在的页面。传了它就能做**起点即目标的预核销**：
+ * 目标点名了 URL/站点（explicitNavigation），而浏览器**本来就停在那**（会话页、详情页、
+ * 用户已开好的后台页）时，navigation 交付物当场核销 —— 否则它永远是「还差一项」，
+ * done 会被反复驳回（P9：契约里有一条永远无法达成的导航债务）。
+ */
+export function createDeliverableLedger(contract: TaskContract, startUrl?: string | null): DeliverableLedger {
   const records = new Map<string, DeliverableRecord>();
+  const start = String(startUrl ?? "").trim();
   for (const spec of contract.deliverables) {
-    records.set(spec.id, { id: spec.id, status: "pending", evidence: "", step: -1, blocks: 0 });
+    const atTarget = start.length > 0 && spec.kind === "navigation" ? urlHitsHints(start, spec.hints) : null;
+    records.set(
+      spec.id,
+      atTarget
+        ? {
+            id: spec.id,
+            status: "satisfied",
+            evidence: `起点即目标页（起始地址命中线索「${atTarget}」）`,
+            step: 0,
+            blocks: 0,
+          }
+        : { id: spec.id, status: "pending", evidence: "", step: -1, blocks: 0 },
+    );
   }
   const raw = Number(readAppEnv("DELIVERABLE_LLM_JUDGEMENTS") ?? "");
   const judgements = Number.isFinite(raw) ? Math.max(0, Math.min(10, Math.trunc(raw))) : 3;

@@ -3,7 +3,6 @@ import {
   agentConfirmCohortKey,
   compareProfileIdAsc,
   normalizeAgentGoalKey,
-  type AgentRouteMode,
 } from "./agentGoalRouter";
 import type { AgentConfirmActionRow } from "../components/AgentConfirmModal";
 import type { HitlAiCopy } from "./hitlAiCopy";
@@ -98,22 +97,6 @@ export function groupHumanInbox(pending: PendingAgentHuman[]): PendingAgentHuman
     remaining.push(...rest);
   }
   return groups;
-}
-
-export function mergeIntoActiveCohort(
-  active: PendingAgentHuman[],
-  incoming: PendingAgentHuman,
-): PendingAgentHuman[] | null {
-  if (active.length === 0) {
-    return null;
-  }
-  if (cohortKeyOf(active[0]) !== cohortKeyOf(incoming)) {
-    return null;
-  }
-  if (active.some((item) => humanItemKey(item) === humanItemKey(incoming))) {
-    return active;
-  }
-  return [...active, incoming].sort((a, b) => compareProfileIdAsc(a.profileId, b.profileId));
 }
 
 /** Merge fill actions from two confirm payloads (same profile sequential → one form). */
@@ -214,27 +197,3 @@ export function screenshotSrc(raw: string): string {
   return `data:image/jpeg;base64,${trimmed}`;
 }
 
-export function formatAgentRouteBadge(
-  mode: AgentRouteMode | "idle",
-  batchIds: string[],
-  focusId: string | null,
-): { label: string; title: string } {
-  if (mode === "idle" || batchIds.length === 0) {
-    return {
-      label: focusId ? `当前控制 #${focusId}` : "未绑定环境",
-      title: focusId
-        ? "智能填表 / 单开回放作用于焦点环境；Agent 未点名时操作「已勾选且已打开」的环境（仅限制 AI 并行数，打开浏览器不限）"
-        : "请在左侧勾选并启动环境",
-    };
-  }
-  if (mode === "broadcast") {
-    return {
-      label: `广播 ${batchIds.length} 个`,
-      title: `未点名：已选且已打开的环境并行同一任务（#${batchIds.join("、#")}）`,
-    };
-  }
-  return {
-    label: `分派 ${batchIds.length} 个`,
-    title: `点名分派：#${batchIds.join("、#")}`,
-  };
-}

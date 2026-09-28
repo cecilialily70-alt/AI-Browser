@@ -1,5 +1,16 @@
 import { listen } from "@tauri-apps/api/event";
-import { HelpCircle, LayoutGrid, Moon, Plus, RefreshCw, Settings, Sun, TriangleAlert, X } from "lucide-react";
+import {
+  HelpCircle,
+  LayoutGrid,
+  MessageSquare,
+  Moon,
+  Plus,
+  RefreshCw,
+  Settings,
+  Sun,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -29,6 +40,7 @@ import type { Profile, ProfileIpGeo, SidecarLogPayload, TerminalLine } from "../
 import { AIFillDrawer } from "./AIFillDrawer";
 import { useAppDialog } from "./AppDialogProvider";
 import { BatchCreateModal } from "./BatchCreateModal";
+import { ChatModeModal } from "./chat/ChatModeModal";
 import { ElementExtractDebugPanel } from "./ElementExtractDebugPanel";
 import { useGlobalBanner } from "./GlobalBannerProvider";
 import { ProfileFormModal } from "./ProfileFormModal";
@@ -134,6 +146,7 @@ export function AppLayout() {
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chatModeOpen, setChatModeOpen] = useState(false);
   const [showProBadge, setShowProBadge] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [batchCreateOpen, setBatchCreateOpen] = useState(false);
@@ -604,6 +617,15 @@ export function AppLayout() {
           <button
             type="button"
             className="icon-button"
+            onClick={() => setChatModeOpen(true)}
+            title="聊天模式（独立值守，不是右侧 Ai Chat）"
+            aria-label="聊天模式"
+          >
+            <MessageSquare size={14} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
             onClick={() => handleAppLink("help")}
             title={hasAppLink("help") ? "帮助中心" : "帮助中心尚未对接"}
             aria-label="帮助"
@@ -735,6 +757,14 @@ export function AppLayout() {
         onError={handleBannerError}
         onToast={showToast}
         onEntitlementChange={() => void refreshEntitlement()}
+      />
+
+      <ChatModeModal
+        open={chatModeOpen}
+        onClose={() => setChatModeOpen(false)}
+        profiles={profiles}
+        onError={handleBannerError}
+        onToast={showToast}
       />
 
       <ProfileFormModal

@@ -64,7 +64,7 @@ export interface PageKindVerdict {
   engine: string | null;
   hasSearchBox: boolean;
   hasBlockingOverlay: boolean;
-  /** 0~1。低于 `PAGE_KIND_CONSULT_THRESHOLD` 时值得花钱问 consult */
+  /** 0~1。偏低时值得花钱问 consult（约低于 0.75） */
   confidence: number;
   /** 判定依据，逐条可审计（排查误判时看这里，不必猜） */
   evidence: string[];
@@ -80,9 +80,6 @@ export interface PageKindVerdict {
    */
   serpLike: boolean;
 }
-
-/** 低于此置信度 → 建议升级到 `askJson("classify_page")`（是否升级由 Arbiter 决定） */
-export const PAGE_KIND_CONSULT_THRESHOLD = 0.75;
 
 /**
  * URL 级结果页判定（**不需要任何页面结构**，因此可被纯 URL 调用方复用）。
@@ -326,9 +323,4 @@ export function classifyPageKind(
     confidence: a11y.available ? 0.4 : 0.3,
     evidence,
   };
-}
-
-/** 该结论是否值得花钱问 consult（纯判定，不做请求） */
-export function pageKindNeedsConsult(verdict: PageKindVerdict): boolean {
-  return verdict.confidence < PAGE_KIND_CONSULT_THRESHOLD;
 }

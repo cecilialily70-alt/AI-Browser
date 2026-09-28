@@ -79,8 +79,3 @@ export function a11yRoleOfToken(token: unknown): string | null {
   const head = colon > 0 ? raw.slice(0, colon) : raw;
   return isKnownA11yRole(head) ? normalizeA11yRole(head) : null;
 }
-
-/** 供日志/测试：当前词汇表规模 */
-export function a11yRoleVocabularySize(): number {
-  return ROLE_SET.size;
-}

@@ -1,0 +1,107 @@
+{
+  "_comment": "聊天模式站点画像（配置，不是核心硬编码；§7.2 允许）。defaults 提供通用词表/阈值，sites 仅做加分与方向消歧，缺失时启发式兜底必须独立可用。",
+  "version": 1,
+  "defaults": {
+    "chatWords": [
+      "聊天",
+      "消息",
+      "会话",
+      "发送",
+      "已读",
+      "未读",
+      "正在输入",
+      "在线",
+      "撤回",
+      "回复",
+      "对话",
+      "私信",
+      "收件箱",
+      "chat",
+      "chats",
+      "message",
+      "messages",
+      "messenger",
+      "conversation",
+      "direct message",
+      "inbox",
+      "send",
+      "typing",
+      "delivered",
+      "read receipt"
+    ],
+    "hostWords": [
+      "chat",
+      "message",
+      "messenger",
+      "im",
+      "inbox",
+      "direct",
+      "dm",
+      "talk",
+      "discuss"
+    ],
+    "inputWords": [
+      "消息",
+      "输入",
+      "发送消息",
+      "说点什么",
+      "写消息",
+      "type a message",
+      "message",
+      "send a message",
+      "write a message"
+    ],
+    "sendWords": [
+      "发送",
+      "送出",
+      "发消息",
+      "send",
+      "submit"
+    ],
+    "outTokens": [
+      "is-out",
+      "message-out",
+      "outgoing",
+      "sent",
+      "from-me",
+      "self",
+      "own",
+      "mine",
+      "reverse"
+    ],
+    "inTokens": [
+      "is-in",
+      "message-in",
+      "incoming",
+      "received",
+      "from-them",
+      "theirs"
+    ],
+    "thresholds": {
+      "chatPage": 0.55,
+      "notChatPage": 0.3
+    },
+    "limits": {
+      "maxContainers": 6,
+      "maxChildrenPerContainer": 40,
+      "maxProbeTextChars": 3000,
+      "textSampleChars": 1200,
+      "maxMessagesPerRound": 80,
+      "maxScrollRounds": 5
+    }
+  },
+  "sites": [
+    {
+      "id": "telegram-web",
+      "hostPattern": "(^|\\.)web\\.telegram\\.org$",
+      "outTokens": ["is-out"],
+      "inTokens": ["is-in"]
+    },
+    {
+      "id": "whatsapp-web",
+      "hostPattern": "(^|\\.)web\\.whatsapp\\.com$",
+      "outTokens": ["message-out"],
+      "inTokens": ["message-in"]
+    }
+  ]
+}

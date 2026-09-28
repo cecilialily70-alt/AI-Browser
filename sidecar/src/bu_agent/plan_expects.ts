@@ -14,7 +14,6 @@
  * 事实缺失时进 `skipped`（不算违反），只有拿到确定的相反事实才进 `violations`。
  */
 import { a11yRoleOfToken } from "../core/a11y_roles.js";
-import type { PageKindVerdict } from "../core/page_kind.js";
 
 /* ───────────────────────── 类型 ───────────────────────── */
 
@@ -492,17 +491,6 @@ export function a11yLabelsFrom(
     })
     .filter(Boolean);
   return labels.length ? labels : undefined;
-}
-
-/** 供日志/调试：把结论压成一行 */
-export function describePageKindVerdict(verdict: PageKindVerdict): string {
-  const parts = [`kind=${verdict.kind}`, `conf=${verdict.confidence.toFixed(2)}`];
-  if (verdict.engine) parts.push(`engine=${verdict.engine}`);
-  if (verdict.hasSearchBox) parts.push("hasSearchBox");
-  if (verdict.hasBlockingOverlay) parts.push("hasOverlay");
-  if (verdict.engineSerp) parts.push("engineSerp");
-  else if (verdict.serpLike) parts.push("serpLike");
-  return parts.join(" · ");
 }
 
 /* ───────────────────────── P0.2 soft-gate（纯函数） ───────────────────────── */

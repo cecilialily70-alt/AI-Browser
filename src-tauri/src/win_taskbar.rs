@@ -392,9 +392,9 @@ mod windows_impl {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, CreateIconIndirect, GetClassNameW, GetForegroundWindow,
-        GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, SendMessageW,
-        SetForegroundWindow, ShowWindow, HICON, ICONINFO, ICON_BIG, ICON_SMALL, SW_RESTORE,
-        SW_SHOW, WM_SETICON,
+        GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
+        SendMessageW, SetForegroundWindow, ShowWindow, HICON, ICONINFO, ICON_BIG, ICON_SMALL,
+        SW_RESTORE, SW_SHOW, WM_CLOSE, WM_SETICON,
     };
 
     const ICON_SIZES: [i32; 2] = [32, 16];
@@ -588,10 +588,91 @@ mod windows_impl {
         None
     }
 
+    /// 进程是否还活着（OpenProcess 查一下即可）。
+    fn process_alive(pid: u32) -> bool {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        unsafe {
+            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return false;
+            };
+            let _ = CloseHandle(handle);
+            true
+        }
+    }
+
+    /// 给该进程树里所有可见 Chromium 主窗发 `WM_CLOSE`，让 Chromium 自己刷盘退出。
+    ///
+    /// 强杀（`taskkill /F`）会打断 LevelDB / Cookies 的后台刷盘线程 —— 留下「目录在、文件数为 0」
+    /// 的空壳 IndexedDB，下次打开 WhatsApp 就会卡在二维码区。先礼后兵：先请它自己关。
+    fn post_close_to_chromium_windows(root_pid: u32) -> usize {
+        let allowed_pids = collect_process_tree(root_pid);
+        struct CloseState {
+            allowed_pids: HashSet<u32>,
+            posted: usize,
+        }
+        let mut state = CloseState {
+            allowed_pids,
+            posted: 0,
+        };
+        unsafe extern "system" fn close_enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let state = &mut *(lparam.0 as *mut CloseState);
+            if !IsWindowVisible(hwnd).as_bool() {
+                return TRUE;
+            }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 || !state.allowed_pids.contains(&pid) {
+                return TRUE;
+            }
+            let mut class_name = [0u16; 64];
+            let class_len = GetClassNameW(hwnd, &mut class_name);
+            if class_len == 0 {
+                return TRUE;
+            }
+            let class_str = String::from_utf16_lossy(&class_name[..class_len as usize]);
+            if class_str != "Chrome_WidgetWin_1" && class_str != "Chrome_WidgetWin_0" {
+                return TRUE;
+            }
+            // PostMessage 异步投递：不阻塞本线程，让 Chromium 消息循环自己处理关闭与刷盘
+            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            state.posted += 1;
+            TRUE
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::EnumWindows(
+                Some(close_enum_proc),
+                LPARAM(&mut state as *mut _ as isize),
+            );
+        }
+        state.posted
+    }
+
+    /// 先请 Chromium 自己关（刷盘），超时再 `taskkill /F`。
     fn kill_pid_tree(pid: u32) -> Result<(), String> {
         if pid == 0 {
             return Ok(());
         }
+        if !process_alive(pid) {
+            return Ok(());
+        }
+
+        let posted = post_close_to_chromium_windows(pid);
+        if posted > 0 {
+            // 给 LevelDB / Cookies 刷盘留预算：实测 WhatsApp IndexedDB 落盘通常 <2s，
+            // 8s 足够覆盖慢盘；仍活着再强杀兜底。
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            while std::time::Instant::now() < deadline {
+                if !process_alive(pid) {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            if !process_alive(pid) {
+                return Ok(());
+            }
+        }
+
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let status = Command::new("taskkill")
@@ -606,7 +687,9 @@ mod windows_impl {
         }
     }
 
-    /// 按 CDP 端口 / userDataDir 定位并强制关闭 CloakBrowser Chromium 进程树。
+    /// 按 CDP 端口 / userDataDir 定位并关闭 CloakBrowser Chromium 进程树。
+    ///
+    /// 先 `WM_CLOSE` 让 Chromium 刷盘，超时才强杀 —— 避免空壳 IndexedDB。
     pub fn kill_browser_for_profile(cdp_port: u16, user_data_dir: Option<&str>) -> Result<(), String> {
         let root_pid = resolve_browser_pid(cdp_port, user_data_dir)
             .ok_or_else(|| format!("browser process not found for cdp port {cdp_port}"))?;
@@ -652,14 +735,20 @@ mod windows_impl {
         killed
     }
 
+    /// 按命令行里的 `user-data-dir` 子串找 chrome 进程。
+    ///
+    /// 匹配**带边界**（`(?![a-z0-9])`）：`profile-2` 不能命中 `profile-20` 的命令行。
+    /// 忽略这一点会让「停止环境 2」把环境 20 的浏览器一起杀掉。
     fn find_chrome_pids_by_cmdline_substring(dir_key: &str) -> Vec<u32> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // PowerShell 单引号字符串：只需把 `'` 翻倍；其余交给 [regex]::Escape 处理
         let dir_esc = dir_key.replace('\'', "''");
         let script = format!(
-            "$dir='*{dir}*'; \
+            "$dir='{dir}'; \
+             $pat=[regex]::Escape($dir) + '(?![a-z0-9])'; \
              Get-CimInstance Win32_Process | Where-Object {{ \
-               $_.Name -match 'chrome|chromium' -and $_.CommandLine -and ($_.CommandLine.ToLower() -like $dir) \
+               $_.Name -match 'chrome|chromium' -and $_.CommandLine -and ($_.CommandLine.ToLower() -match $pat) \
              }} | ForEach-Object {{ $_.ProcessId }}",
             dir = dir_esc,
         );

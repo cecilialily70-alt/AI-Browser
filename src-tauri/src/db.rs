@@ -47,6 +47,29 @@ CREATE TABLE IF NOT EXISTS global_settings (
 
 CREATE INDEX IF NOT EXISTS idx_profiles_proxy_id ON profiles(proxy_id);
 CREATE INDEX IF NOT EXISTS idx_profiles_status ON profiles(status);
+
+-- 聊天模式线程索引：**镜像** Sidecar 写下的 `chat_context/{site}/{contact}/`，不是第二套状态机。
+-- 权威在文件；本表只服务 UI 列表与回访调度（P8）。环境删除走 ON DELETE CASCADE。
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    site_key TEXT NOT NULL,
+    contact_key TEXT NOT NULL,
+    contact_label TEXT NOT NULL DEFAULT '',
+    stage TEXT NOT NULL DEFAULT 'cold',
+    follow_up_index INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    last_contact_at TEXT,
+    last_reply_at TEXT,
+    next_due_at TEXT,
+    stopped INTEGER NOT NULL DEFAULT 0,
+    stop_reason TEXT,
+    last_synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(profile_id, site_key, contact_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_threads_due
+    ON chat_threads(profile_id, stopped, next_due_at);
 "#;
 
 const PROFILE_COLUMNS: &str =
@@ -1405,6 +1428,8 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "agent_personas",
     "agent_rule_selection",
     "agent_persona_selection",
+    // 聊天模式（独立执行形态的配置：总开关 + 目标 + 回访节奏 + 每环境对象）
+    "chat_mode",
 ];
 
 pub fn seed_default_settings(connection: &Connection) -> Result<(), AppError> {
@@ -1439,6 +1464,9 @@ pub fn seed_default_settings(connection: &Connection) -> Result<(), AppError> {
         ("agent_personas", "[]"),
         ("agent_rule_selection", "{}"),
         ("agent_persona_selection", "{}"),
+        // 聊天模式：默认「关」且没有任何目标。空对象即前端默认值（总开关 false），
+        // 这样读设置的人不必区分「键不存在」与「全默认」两种情形。
+        ("chat_mode", "{}"),
     ];
     for (key, value) in defaults {
         connection.execute(
@@ -3030,6 +3058,31 @@ mod tests {
                 .expect("insert id");
         }
         connection
+    }
+
+    /// 新增设置键必须同时进白名单与种子默认值：只写了前端与读取方的话，
+    /// 用户保存时会拿到 `unsupported setting key`，而读取侧一直按默认值跑
+    /// （§0.5.3 A：设置键只做了一半的表现是「保存报错，功能又半死不活」）。
+    #[test]
+    fn chat_mode_setting_key_is_allowed_and_seeded() {
+        assert!(
+            ALLOWED_SETTING_KEYS.contains(&"chat_mode"),
+            "chat_mode 必须在 ALLOWED_SETTING_KEYS 里，否则保存会被 Validation 拒绝"
+        );
+        let connection = Connection::open_in_memory().expect("open memory db");
+        connection
+            .execute_batch(
+                "CREATE TABLE global_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            )
+            .expect("create global_settings");
+        seed_default_settings(&connection).expect("seed defaults");
+        assert_eq!(
+            get_setting(&connection, "chat_mode").unwrap().as_deref(),
+            Some("{}"),
+            "chat_mode 要有种子默认值：键不存在会让读取侧与「全默认」两种情况难以区分"
+        );
+        // 白名单生效后，保存不再被拒
+        set_setting(&connection, "chat_mode", r#"{"enabled":true}"#).expect("set chat_mode");
     }
 
     #[test]

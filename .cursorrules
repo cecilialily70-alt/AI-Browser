@@ -1,13 +1,17 @@
 # 天枢台 (TianshuTai) · Cursor AI 宪法 (.cursorrules)
 
-> **效力**：本文件是仓库内 AI 编码的最高行为约束。口头讨论、历史计划、其它文档与本文件冲突时，**以本文件为准**。
-> **基线**：2026-09，按全仓库代码事实维护；面向后续**发现 / 修复 BUG** 与增量功能改动。
+> **效力**：仓库内 AI 编码的最高约束。口头讨论、历史计划、其它文档与本文件冲突时，**以本文件为准**。
+> **基线**：2026-09，**以代码事实为准**维护；改码前若宪法与代码冲突，**先改本文件**再动代码。
 > **产品目标**：可靠 L4 Web Agent（监督闭环 · 凭证三层 · 注册/购物停在支付前）。**不追求无人支付。**
 > **用户协作**：非技术用户——少问、少选择题；红线内自行决定命名 / 落点 / 方案并直接做完。**禁止擅自 `git commit` / `push`。**
-> **实现进度**：`执行计划.md`（回放 / 数据集 / 剪贴板 / 外部数据 API 的**计划 + 对外契约**，需求原文亦称 `API对接说明.md`）的 P1–P7 **已实现完成**；它**不放宽 §1 红线**——回放照旧过支付闸门与凭证闸门，预检单**不能**用来「预授权支付」，外部 API 走同一条回放链路与同一套闸门。新增坑族见 §0.5.3，落点见 §10 速查。
-> **检查伴侣**：`docs/检查提示词.MD`（若存在）供「只检查不改码」审计，条款编号（R*/B*/S*）与本文件对齐；二者冲突或伴侣缺失时**以本宪法为准**，审计按 §0.5 + §6.1 + R*/B*/S* 出报告。
+> **四种执行形态（禁止混用循环）**：Agent=`bu_agent/service.ts` · RPA=`engine.ts` · Replay=`replay_engine.ts` · Chat=`core/web_chat/engine.ts`（耐久相位机）。可共用底层原语，**禁止**互借循环 / `ActionContext` / `EvidenceLedger`。
+> **已落地**：`执行计划.md` P1–P7（回放/数据集/剪贴板/外部 API）**已完成**，不放宽 §1 红线。聊天模式与站点描述符（加站=加 JSON，不写核心）见 §0.4 / §1.6 / R8；未命中或熔断 → 回落通用模式（`config/chat_sites.json` + `site_detect.ts`，永不删）。
+> **检查**：`docs/检查提示词.MD`（可缺）条款号与本文件对齐；冲突或缺文件时以本宪法为准，按 §0.5.5 出报告。
+> **维护纪律**：参数数字（如 `LIVE_REPLY_*`）只写**常量名 + 现行值**，改代码常量后同步改本节；禁止宪法内两套互相打架的产品口径。
 
-**导航**：§0 工作模式与排障 · §1 产品红线 · §2 不可回退 · §3 产品面地图 · §4 改动落点 · §5 UI 纪律 · §6 改码行为与自检 · §7 架构纪律 · §8 Agent 能力约束 · §9 代码健康 · §10 关键路径速查 · §11 总纲
+**怎么用（30 秒）**：修 BUG → §0.5 · 加功能 → §3–§4 对号 · 碰红线 → §1 · 自检 → §6.1 · 找文件 → §10
+
+**导航**：§0 工作模式与排障 · §1 红线 · §2 不可回退 · §3 产品面 · §4 落点 · §5 UI · §6 改码 · §7 架构 · §8 Agent · §9 健康 · §10 路径 · §11 总纲
 
 ---
 
@@ -51,6 +55,22 @@ React (src/) → Tauri 2 / Rust (src-tauri/) → Node Sidecar (sidecar/) → Clo
 - Sidecar：无状态执行；stdin JSON / stdout JSONL；上报本地 IPC。  
 - `playwright-core` 仅作现有 CDP 连接库；**禁止**再引入 Puppeteer、Selenium 或第二浏览器启动栈。禁止因「文件里有 playwright」就拆掉 CDP。
 
+**四种执行形态（落点固定，禁止互相借道）**：
+
+| 形态 | 引擎落点 | 范式 | 禁止 |
+|------|----------|------|------|
+| Agent | `bu_agent/service.ts` | ReAct 步进（观察→决策→动作） | 把聊天塞进本循环 |
+| RPA / 填表 | `engine.ts` · `rpa_state_machine` | 动作状态机 | 站点选择器进核心 |
+| 轨迹回放 | `replay_engine.ts` | 机械重放 | 回放里跑自由 Agent |
+| **聊天模式** | `core/web_chat/engine.ts` | **耐久相位状态机 + 事件驱动唤醒** | 改用步进循环；复用 `ActionContext` / `registerAction`；用截图当等待手段 |
+| 聊天页面原语 / 会话装配 | `bu_agent/chat_actions.ts` · `chat_session*.ts` · `core/web_chat/chat_prompt.ts` · `turn_intent.ts` | 页面动作与接线；**决策在 engine + 纯函数**（含意图闸） | 把「发不发/发几次」塞进原语或提示词 |
+| **站点描述符 / 通用页内运行时**（聊天模式的选站层） | `sidecar/connectors/<id>.json`（builtin，随仓库发版，只读）· **该环境自己的** `<userDataDir>/connectors/_learned/<siteKey>.json`（AI 生成，随环境删除一并清掉）· `core/web_chat/descriptor/`（registry 选站 / manifest 校验 / dom_connector 解释执行 / composer 出站闸门 / page_agent 页内哨兵 / health 熔断 / facts · map_rows · paths · threads 纯函数） | **纯声明驱动**：选择器 / 属性 / 正则 / 固定枚举，由通用运行时解释执行 | 描述符里写脚本或表达式；运行时用 `eval` / `new Function`；为某站改引擎；出站绕输入框 |
+
+**三层优先级（缺一层就会踩 §0.5.3 G）**：`learned` > `builtin` > **通用模式**（`config/chat_sites.json` + `site_detect.ts`，即现有启发式选站，**永不删** —— 描述符未命中或被熔断时回落它，不是「什么都做不了」）。
+
+聊天模式**只复用底层原语**：LLM client / router / retry / cost、`resolveGateway`、`solveCaptcha`、HITL emitters 与 resolvers、`engine_mutex`、CDP page resolve、`replay_tabs` 标签模式、`page_url_watcher` 的 `addInitScript` + `exposeFunction` 桥。
+聊天模式**不复用**：`bu_agent` 步进循环、`AgentLoopDeps`、`ActionContext`、`agentMonitorView` 文本分组。
+
 ---
 
 ## 0.5 发现与修复 BUG — 操作手册（优先阅读）
@@ -90,6 +110,34 @@ React (src/) → Tauri 2 / Rust (src-tauri/) → Node Sidecar (sidecar/) → Clo
 | HITL 双弹窗抢焦点 | `InterventionCenter*` | 禁止第二收件箱（§5.6） |
 | consult/AI 答错后无法复盘 | `service.ts` consult 路径、`json-logger` `agentProgress`、轨迹写入 | 拒绝原因与原始答案必须留痕 |
 | 设置开关与运行时行为不一致 | 对应 `settings/*Tab.tsx` + Sidecar 读取处 | 密钥只经 `secret_store` |
+| 聊天模式像填表一样频繁截图 / 频繁空转 | `core/web_chat/engine.ts`（静音相位） | 核对是否误开 `panoramaEnabled`、是否走了 `prepareObservation`；等待必须是页内事件驱动 |
+| 聊天只重复同一句话、不读消息 | `core/web_chat/conversation_extract.ts` · `chat_memory.ts` · `dedupe.ts` | 消息气泡不是可交互控件；必须走会话读取器 + 已发台账 + 去重硬拦 |
+| 连发盖住对方追问 / 对方骂骗子却继续推销 | `engine.ts`（`peekNovelUnanswered` · `collectInboundBurst`）· `turn_intent.ts` · `chat_prompt.ts` | 每句发送前重读；有新未回复即打断并清空 `pendingTexts`；信任攻击/问价/纠错硬闸（先答后推）；`moreAbove` 禁止冷开场推销 |
+| 聊天**永远发不出去**（`发送未确认 verify_mismatch:equals`、健康度提示「请修描述符」） | `core/web_chat/descriptor/composer.ts`（写入兜底链 + 结构化诊断）· `sidecar/connectors/*.json` 的 `composer.input.method` | `chat_session.ts` 的 `chat_composer_method_fallback` / `chat_send_unconfirmed`（诊断含选择器与每种写法的读回长度/指纹）。**禁止**为「能发出去」放宽 fail-closed |
+| 对同一个人重复发同一句 | `core/web_chat/outbox.ts` + `dedupe.ts` | 幂等 `effectId` + 语义去重拒绝 |
+| 重启后对所有人重发（回访风暴） | `core/web_chat/state.ts` · `visit.json` | `nextDueAt` 必须持久化；恢复前先对账 `outbox` |
+| 聊天不启动 / 其他模式被拖慢 / 聊天视图永远空的 | 设置键 `chat_mode`（`enabled`）与顶栏「聊天」入口 · `ChatModeModal.tsx` · Host `chat_start`/`chat_status` | 聊天必须显式触发；`enabled=false` 时不得注册任何定时器；事件为空先查 `chatProgress` 的顶层 `type` 是否被语义 `type` 顶掉 |
+| 发完一条就收尾 / 对方秒回没人接 / 回访要等两天 | `core/web_chat/engine.ts`（`handleContact` 片内多轮 · `refreshReplyWatch` · `computeNextWakeAt`） | `chat_session.ts` 的 `replyWaitMs` / `coldReplyWaitMs` / `maxTurnsPerContact`；`cadence.ts` 的 `liveReplyRecheckAt` |
+| 网站还没打开就开始读/说、读到空会话 | `bu_agent/chat_actions.ts`（`waitForChatReady`）· `core/web_chat/site_detect.ts`（`decideChatReady`） | `chat_session.waitPageReady` 三态；**禁止**改用 `networkidle` |
+| 没指定聊天对象就跑不起来（或反过来乱猜对象） | 设置键 `chat_mode.useCurrentWindow` · `bu_agent/chat_actions.ts`（`resolveCurrentConversation`）· `chat_session.resolveTargets` | `ChatModeModal` 目标留空即走当前窗口；Host `chat_patrol.candidate_env_ids` 要把在跑的环境纳入候选 |
+| 聊天与用户抢输入 / 抢标签 | `engine.ts`（人工优先 + 专用标签） | 检测用户最近输入即让位；不劫持用户当前标签 |
+| 卡片显示「我接管」但日志说引擎还在发 / 点「引擎值守」没反应 | `src-tauri/src/chat_context.rs`（takeover overlay 的 `thread_key_of` 清洗）· `bu_agent/chat_session_config.ts`（`takeoverKeyOf` / `takeoverOverrideOf`） | 两边必须过同一套 `sanitize_segment`；视图只许调 `takeoverKeyOf` |
+| 「读取会话列表」读不到却说没有会话 / 读回一堆不相干的链接 | `bu_agent/chat_contacts.ts`（`listPageThreads` 三态）· `chat_list_contacts`（Host）· `ChatModeModal.tsx` | 读不到必须是 `ok:false` + 人话原因；只认描述符 / 站点画像 / 判定为聊天页的页面；来源如实标注 |
+| 关掉「自动聊天」没用，或升级后引擎突然不说话 | `bu_agent/chat_session_config.ts`（`parseContactFlags` / `contactFlagsOf`，未设置＝开）· `engine.ts`（`autoReplyOf`）· 设置键 `chat_mode.contactFlags` | 与接管同一套键、同一份来源；坏值必须回报，不许静默当「关」；**主动追发已下线**，勿再指望「定时回访」开关 |
+| 选了人、点了开始，一秒就结束（`chat_off`） | `engine.ts`（`decideWhetherToSpeak` 的**开场**分支 · `cadence.ts::isColdOpening`） | 开场只认「自动聊天」；关掉＝`chat_off`，日志要写清去卡片上打开；对方没回时只盯守不催（主动追发已下线） |
+| 同一昵称在两个站点互相覆盖聊天记忆 | `core/web_chat/site_detect.ts`（`siteKeyOf(url, profileId)`）· `bu_agent/chat_session.ts`（`settleSeedSiteKey` 旧目录沿用） | 派生为主，旧 `unknown/<联系人>` 目录在读旧写旧时沿用并记 `chat_context_legacy_dir` |
+| 对方最新一条其实是**整份联系人名单** / 引擎回一句「你这条像误粘了通讯录」 | `core/web_chat/site_detect.ts`（`probeChatDom` 的同栏水平重叠 + `scoreChatPage` 在候选之间取最高分） | 左侧会话列表栏被当成会话正文；判据只在候选容器上比，**禁止**盲取 `containers[0]`（§0.5.3 H） |
+| 聊天刚跑就「一片结束」（瞬间收尾，日志停在「打开会话 · not_chat_page」） | `core/web_chat/site_detect.ts`（`decideChatReady` 与 `CHAT_BLOCK_CONFIRM_MS`）· `bu_agent/chat_actions.ts`（`waitForChatReady` 的 `reprobeMs`） | 导航成功即算打开成功；结论只由就绪门禁在公平观察窗后下，「还没跑成」不许报成「不是聊天页」（§0.5.3 A/H） |
+| 点了「引擎值守」联系人仍显示「我接管 / 引擎只记账、不开口」 | `bu_agent/chat_session_config.ts`（`takeoverKeyOf` / `takeoverOverrideOf`，键的**唯一**产生与比对处）· `src-tauri/src/chat_context.rs`（overlay 两侧同一套 `sanitize_segment`）· `ChatModeModal.tsx` | 接管键的两种写法必须互通；跳过日志要带 `reason` + `hint`（§0.5.3 H） |
+| 清理联系人记忆后状态没归零（阶段/回访轮次/接管还在） | `src-tauri/src/chat_context.rs`（`forget_snapshot_contacts`） | 只删目录不摘快照＝名不副实的「从零开始」（§0.5.3 H） |
+| 某聊天站点读不到消息 / 读到空会话（别的站正常） | `core/web_chat/descriptor/registry.ts` · `health.ts` · builtin `sidecar/connectors/<id>.json` | 描述符未命中或已熔断 → 先看视图的「已回落通用模式」标注；**禁止**为该站去改核心引擎（R4） |
+| 开了聊天模式后**自己手动打字发不出去** | `core/web_chat/descriptor/page_agent.ts`（capture 出站闸门） | 闸门只许对**引擎发起的那一次**发送生效；非引擎回车必须原样放行（R8 / 坑族 J） |
+| 消息发出去了但内容不对 / 发出了未校验内容 | `core/web_chat/descriptor/composer.ts`（写入等值校验）· `chat_session.ts`（`gateSend`） | fail-closed：等值校验不过**即取消发送**；不许信 `execCommand` 返回值 |
+| 同一条消息发了两遍 | 出站派发路径（`keydown`/`click`） | 只派发**一次** + 发送锁 + 延迟释放；禁三重派发 |
+| 对方回了图片/语音，却被当成「没回」并去催 | `core/web_chat/conversation_extract.ts` · 描述符 `rows` 声明 | 「有新消息行但无文本」也算 inbound；**绝不取内容、绝不用附件图取码**（R2 / B7） |
+| 版式改版后描述符失效 / 静默返回错字段 | `core/web_chat/descriptor/health.ts` | 先结构重映射，仍失败即停用并回落通用模式 + 视图明示；**不做后台自动重学习** |
+| 装了便携包后聊天「变笨了」（开发机正常） | 便携包 `sidecar/connectors/` 是否存在 | 打包漏拷描述符目录（坑族 G/J）→ 静默降级成通用模式；打包脚本必须连 `connectors` 一起拷 |
+| 分析站点时与 Agent / 回放抢浏览器 | `src-tauri/src/chat_connector.rs` · `core/web_chat/discovery/` | 学习/采集必须占同一把 `engine_mutex`（S5），且要求「有运行中环境且已登录目标站」 |
 
 ### 0.5.3 已踩坑族 — 修同类问题时禁止再犯
 
@@ -101,6 +149,10 @@ React (src/) → Tauri 2 / Rust (src-tauri/) → Node Sidecar (sidecar/) → Clo
 - **瞬时回读当真** — 错误做法：`fill` 不抛错就假定 DOM 已落值，立刻纠正「空/丢尾」；正确做法：受控组件要延迟/稳态回读，纠正策略勿过激（见 `fill_verify`）。
 - **DOM 已卸仍算** — 错误做法：忽略 `isConnected` / 已关闭 Page；正确做法：操作前校验连接与存活页。
 - **校验失败谎报为未命中** — 错误做法：判定**没跑成**（选择器语法错、页面文本被截断、视觉模型返回垃圾/不可用）却输出「界面未出现」，用户按假失败去改本来正确的规则；正确做法：判定改三态 `matched / not_matched / inconclusive`，只有**真正跑完**才记 `evaluated`，`inconclusive` 一律 fail-closed 拦下收尾并落 `phase: "task_rule_inconclusive"`（带 `ruleId` 与底层原因），禁止把异常吞成 `null`/`false`。
+- **说不出目的地的导航债务** — 错误做法：把「打开可联系 X 的页面/应用（如聊天、邮件等沟通渠道）」这类**只有导航动词、没有任何具体目的地**的项立成 `navigation` 交付物（用户现场：目标「向某人推广某产品」，浏览器本来就停在会话页，`verifyNavigation` 判「页面从未离开起始地址」→ done 被无限驳回、模型原地重规划）；正确做法：契约生成阶段用 `hasConcreteNavigationTarget`（`bu_agent/task_contract.ts`，线索里只剩「打开/访问/open」这类纯导航动词就是不收）**直接不立这笔债**，done 闸门再用 `isUnverifiableNavigation` 豁免遗留契约 / 重规划补出来的残余 —— 与 `isPhantomNavigation` 同一份纪律：宁可不收，也不收一条注定无法核销的债（注意与「打开图片栏目」区分：后者带目标词、能被页面文案核销，照旧保留）。
+- **新设置键只写了前端和读取方，漏了 Host 白名单/种子** — 错误做法：新增设置键（如 `chat_mode`）后只在前端 `updateSetting` 与读取侧（`chat_patrol::chat_mode_enabled`）接线，忘了 `src-tauri/src/db.rs` 的 `ALLOWED_SETTING_KEYS` 与 `seed_default_settings` → 用户点保存只看到 `Validation: unsupported setting key: xxx`，而**读取侧一直按默认值跑**（表现是「保存报错，但功能又好像半死不活」）；正确做法：新增设置键必须同时补三处 —— `ALLOWED_SETTING_KEYS`、`seed_default_settings` 默认值、以及前端「写盘失败就退回真实状态」（`persistSettings` 的乐观更新必须在 `catch` 里回滚，否则界面显示的是一份并没落盘的假状态）。
+- **契约臆造「永远核销不了的债务」** — 错误做法：目标根本没要求先跳转（会话页发消息、详情页操作、用户已开好的后台页），模型却给一项 `kind=navigation` 交付物 → `verifyNavigation` 判「页面从未离开起始地址，未到达目标页」，`done` 被无限驳回、任务原地打转（信息型「总结这个网站」与**会话型「给某人发消息」**是同一个病）；正确做法（三道闸一起上，缺一不可）：① 意图分类新增 `chat`（**先于** `outcome` 判，否则「发送/send」会把会话吞成结果型），且 `chat` 的验收标准**不比 outcome 松**（只在输入框敲字不算发送）；② 契约生成端对 `informational` / `chat` 且未点名 URL 的目标**不收** navigation（`isPhantomNavigation` 唯一来源，模型自述的 `kind` 也要过这道结构闸门），兜底分支也不再给会话型硬塞一项；③ 运行期 `verifyNavigation` 认「起点即目标」（`ledger.startUrl` 命中线索即成立），`createDeliverableLedger(contract, startUrl)` 在**开工那一刻**预核销 navigation，`isUnrequestedDeliverable` 在 done 闸门再豁免一次残留。回归锁在 `sidecar/tests/task-contract.mjs`。
+- **为过闸门而放宽红线** — 错误做法：为了让会话型/信息型任务不再被驳回，顺手把凭证闸门（`guardPendingHumanCredential`）也放给非 `outcome` 意图 → 页面上还空着验证码框也能 `done`；正确做法：意图分类放宽**只用于「不臆造交付物」**，红线闸门必须把新意图与 `outcome` **同等对待**（`intent !== "outcome" && intent !== "chat"` 才放行），且 `evaluateCompletion` 里新意图走**同一段**（更不许更松的）验收逻辑。
 
 **B · 红线与用户规则**
 
@@ -144,6 +196,105 @@ React (src/) → Tauri 2 / Rust (src-tauri/) → Node Sidecar (sidecar/) → Clo
 
 - **打包漏运行时数据目录** — 错误做法：便携包只拷 `sidecar/dist` + `node_modules`，漏 `sidecar/config`、`sidecar/agent_skills`，运行时**静默降级**（HITL 退回英文兜底词典 → 中文目标不再覆盖、Skill 全找不到）；正确做法：打包脚本必须连 `config` / `agent_skills` 一起拷，改完抽查便携包 `sidecar\` 目录结构。
 - **弹窗挂进 `pointer-events-none`** — 错误做法：模态框挂在 `pointer-events-none` 容器（如介入收件箱）里，overlay 未显式取回指针事件 → 弹窗可见却点不动、输不了字；正确做法：模态 overlay 显式 `pointer-events-auto`，或把弹窗移出该容器。
+- **组件层复合选择器吃掉工具类** — 错误做法：`@layer components` 里写 `.data-table thead th`（0-1-2）、`.data-table tbody tr:nth-child(even)`（0-2-1）这类「类+元素/伪类」选择器，特异性高于放在 `<th>` / `<tr>` 上的 Tailwind 工具类（0-1-0）→ `text-center` 的表头实际左对齐、内容居中（表头与内容对不齐），选中行的 `bg-primary/10` 被斑马纹盖住（偶数行看不出被选中）；正确做法：这类全局基础样式一律套 `:where(...)` 把特异性压到 0（`:where(.data-table thead th)`），让元素上的工具类永远说了算；改完用「表头文字中心 vs 列中心」「选中行 computed background」两条量测核对（本地 harness 挂 `dist/assets/*.css` 复现真实表格即可）。
+
+**H · 聊天模式（Chat）**
+
+- **复读不拦** — 错误做法：只靠提示词要求「不要重复」；正确做法：`dedupe.ts` 语义去重（中文 2/3-gram Jaccard ≥ 阈值 或 开头 8 字相同）在发送前**硬拒**，并把已发原句回传强制重写。
+- **出站连发不重读 = 盖话** — 错误做法：一次起草多句后连发，句间不重读会话；`pendingTexts` 有货就优先倒完，对方中途追问「骗子吗/机器人吗」被盖过去（Anne 现场）；正确做法：`deliverAndRecord` **每句前** `peekNovelUnanswered`，有新未回复立即停发并清空剩余/`pendingTexts`（`chat_send_interrupted`）；入站合批静默窗后再起草（`collectInboundBurst`）；`turn_intent.ts` 对信任攻击/未答问题硬闸，提示词默认单句、先答后推；`moreAbove` 时禁止冷开场推销。回归锁 `chat-engine.mjs` / `chat-turn-intent.mjs` / `chat-prompt.mjs`。
+- **虚拟列表当「读完了」** — 错误做法：`querySelectorAll` 拿到几条就宣称读了历史；正确做法：主动驱动滚动 + 稳定 id 增量累积，拿不到标 `moreAbove=true`，绝不假装读完。
+- **聊天复用通用观测导致狂截图** — 错误做法：聊天走 `prepareObservation`（`panoramaEnabled` 恒真 → 每步全景 + SoM + a11y）；正确做法：聊天走静音相位，不设 `panoramaEnabled`、不做全景/SoM/a11y/控件树/`safePageDigest`/例行巡检/影子模型。
+- **用截图或 Node 轮询当等待手段** — 错误做法：每秒截图或轮询判断有无新消息；正确做法：页内 `MutationObserver`（Promise resolve）为首选，轮询仅兜底且如实标注 `chat_wait_fallback_poll`。
+- **重启后回访风暴** — 错误做法：`nextDueAt` 只在内存；正确做法：持久化到 `visit.json`，恢复时先读到期时间。
+- **崩溃窗口重复发** — 错误做法：重试直接重发；正确做法：`effectId` 幂等 + `outbox` 对账 + 页面回读；`unconfirmed` **不自动重发**，交人工。**页面回读探针抛错也算「没跑成」**：禁止 `catch { seenInPage = false }` 把「判定没跑成」当成「没发过」→ 一律标 `unconfirmed`（`chat_outbox_unconfirmed`）交人工，fail-closed。
+- **看门狗读心跳时间戳** — 错误做法：只看 `heartbeatAt`（等 LLM 时同样被更新，分不清卡死与慢）；正确做法：读**相位 + 单调 `progressCounter`**，`waiting/paused/handover` 相位不计时。
+- **上下文落一次性码** — 错误做法：把 OTP/验证码/token 写进 `thread.jsonl`；正确做法：同一套脱敏，绝不落盘（叠加 R2 / §1.3）。
+- **席位静默丢弃** — 错误做法：超出并发上限的环境悄悄跳过；正确做法：排队/轮转并如实上报队列长度。
+- **聊天模式偷跑** — 错误做法：`enabled=false` 仍注册定时器或后台唤醒；正确做法：显式入口 + 不启动即不存在。
+- **引擎无法从自己的快照续跑** — 错误做法：片末把相位写成 `waiting`（或退出留 `stopped`），下一片却直接 `enter("booting")`，而 `waiting → booting` / `stopped → booting` 不在转移表里 → `assertTransition` 抛错，每片都异常退出、**永远跑不起来**（实测踩到）；正确做法：会话开始是一次受控重置，`canTransition` 里 `to === "booting"` 一律放行，且必须有一条「从 waiting/paused/handover/stopped 起片都能照常工作」的回归测试。
+- **让位落点选错相位** — 错误做法：没拿到席位也往 `yielding` 走；正确做法：`yielding` 只表示「拿到席位后中途让出」，没拿到席位时正确落点是 `waiting`（本来就没有东西要让出）。
+- **拿「任意数字串」当验证码拦** — 错误做法：`\d{4,8}` 见数字就拦 → 「报价 5999」「库存 1200」全被误杀；正确做法：一次性码必须**带上下文**（验证码/口令/code/otp/pin 与数字相邻）才判，支付/证件走显式词表（`转账|付款|卡号|cvv|身份证|护照…`），宁可少拦也不要天天误拦。
+- **拿原位 `updatedAt` 猜上次联系时间** — 错误做法：引擎用 `contact.updatedAt` 当 `lastContactAt` 去算回访，猜错即回访风暴或永不再访；正确做法：回访状态由宿主从 `visit.json` 提供（`followUpState` 依赖注入），引擎不猜。
+- **未读标记不消费** — 错误做法：读完不回写 `lastIncomingHash=null` → 同一未读每轮都把该联系人推回队列，空转；正确做法：读完即消费标记，靠 `nextDueAt` 驱动后续。
+- **假护栏：空转的运行时断言** — 错误做法：把「聊天不截图」写成 `assertSilent("chat_open_contact")` 这类运行时断言，而传进去的名字**都不在**禁用清单里 → 永远不抛，看着像保护、实际什么都没做（还给了「已经防住了」的错觉）；正确做法：这种「不许调用某些观测 API」的纪律改成**源码级回归测试**（扫 `core/web_chat/**` 与 `bu_agent/chat_*.ts`，断言不出现截图 / 全景 / SoM / a11y 全树 / `safePageDigest` / 影子模型调用），断言**事实**而不是一个空转的函数调用。
+- **假设置：界面有开关、运行时零效果** — 错误做法：设置面板给了「定时回访 / 追发间隔」等控件，而引擎生产路径**零调用**（主动追发已下线）→ 用户调了没有任何变化。正确做法：**删掉或灰掉假开关**（本仓库已下线主动追发 UI），只保留真正驱动行为的项（「自动聊天」、夜间静默、短复查）；字段两侧区间仍用源码级断言锁住。
+- **唤醒时间只看内存、不看磁盘** — 错误做法：`computeNextWakeAt` / `dueContacts` 只看快照里的 `nextDueAt`，而权威在 `visit.json` → 重启后 `nextDueAt` 为 null 时直接退化成「48 小时后再来」（现场表现就是「发完一条就结束了」）；正确做法：**片首用 `visit.json` 水合快照**（`followUpIndex` / `nextDueAt` / `lastContactAt` / `lastReplyAt` / `stopped`），调度与回访都以水合后的值为准。
+- **首次读数被当成用户接管（永久锁死该联系人）** — 错误做法：`detectStrangerOutgoing` 在没有历史基线时，把会话里本来就有的历史出站消息判成「用户在手动聊」→ 该联系人被永久判成 `human`，之后再也不会开口；正确做法：读取时带 `baselineKnown`，**没有历史基线只建立基线、不判接管**，并如实记一条（`chat_takeover_baseline_unknown`）；只有用户自己设定的接管才立即生效。
+- **页面装饰混进正文 → 自己刚发的那条被当成「陌生人」，判成用户接管后永久停手** — 错误做法：描述符只按 `textSelectors` 取正文容器的 `textContent`，而站点把**显示时间 / 已读勾渲染在正文容器内部**（Telegram Web K 的 `.message` 里嵌着 `.time`）→ 读出来的我方消息是 `…聊聊吧。02:20 02:20`（时间还成对出现），与草稿原文的指纹**永远对不上**，于是下一片把「自己 02:20:56 刚发的那条」当成「不是我方发件的出站消息」→ `检测到你接管 · 引擎停手`（用户观感：「只发一条，对方回了也不回」「重启后检查聊天记录还是上次那些，不会自动回复」）；正确做法三层一起上：① 描述符新增 `rows.timeSelectors`（把时间/勾整块**摘出正文**，`facts.textOf` 在页内先摘引用块再摘装饰）；② 取数后在 Node 侧再过一遍**同一套**去装饰口径 `stripDecorationTail`（尾部连续 ≥2 个 `HH:MM`/勾才剥，单个尾部时间不误伤，「明天 10:30 见」不动），并把装饰剥掉再进台账；③ 判定端除指纹全等外再加一道**归一化包含比对**（`looksLikeOwnSentText`，两侧都 ≥8 字才允许包含），指纹对不上也还认得出是自己发的。
+- **同一事实两套指纹（耐久证据变假护栏）** — 错误做法：发件箱流水 `outbox.jsonl` 落的是 `chat_redaction.fingerprint`（`trim+lowercase`），而引擎判「这条是不是我发的」用的是 `outbox.hashText`（去空白/标点/emoji）→ 两套**永远不可能相等**，于是「我方确实发过」的耐久证据形同虚设（快照一丢就把自己发的那条当陌生人 → 判接管 → 永久停手，与上一条叠加放大）；正确做法：指纹只有一个来源（`hashText`），装配层写流水时用它，并加一条**源码级断言**（`tests/chat-context.mjs`）锁住「流水用的就是 `hashText`、不得再引入第二套」。
+- **只认「本片新增」→ 已读到却没回成的消息永远没人回** — 错误做法：`hasNewIncoming = read.newIncoming.length > 0`，而「新增」是相对台账的 diff；上一片把对方消息读进台账、却在回复前被中断（看门狗 / 手动停 / 判成接管 / 片预算用尽）之后，下一片再读时它们**不再是新增** → 引擎以为「对方没说话」，于是（尤其重启后）**永远不回复**（用户原话：「重启机器后检查聊天记录还是上次那些，不会自动回复」）；正确做法：由**页面顺序**推导「对方还在等回话」——`unansweredIncoming(messages)`＝最后一条我方消息之后的全部对方消息（撤回不算、附件算），跨片、跨重启都成立；`newIncoming` 只留作诊断对账，不再当「要不要回」的判据。对方一口气发多条时，这批未回复的消息**整批**进提示词，并在提示里明确要求「合起来理解、只回一条」（不是逐条回）。
+- **事件标签用子串猜色调** — 错误做法：`kind.includes("failed")` 判红 → 新事件只要名字含 failed 就自动变红，而真正该让人看见的 `chat_takeover_skipped` / `chat_turn_limit` / `chat_page_not_ready` 全是灰的（与 A 组「脆弱字符串匹配」同源）；正确做法：kind → 标签 + 色调收敛成**一张完备表**（`src/components/chat/chatEventLabels.ts`），表里没有的 kind 一律中性**不猜**，并有测试断言「发射的 kind 集合 ⊆ 表键集合」。
+- **接管键有多种拼法（同一事实两个来源）** — 错误做法：键的产生散在三处（视图写 `<site>|<目录名>`、快照存原始键、`chat_threads.contact_key` 是清洗后的目录名），Rust overlay 直接 join 两者又**不做清洗** → 永远匹配不上，卡片显示默认值而引擎实际在停手（「卡片与日志口径不一致」）；正确做法：键的产生与比对收进**一个函数**（`bu_agent/chat_session_config.ts` 的 `takeoverKeyOf` / `takeoverOverrideOf`），Rust overlay 与 `forget_snapshot_contacts` 用**同一套** `sanitize_segment`，只留一个迁移读。
+- **两侧默认值/区间靠人肉对齐** — 错误做法：同一组默认值与区间在 `cadence.ts` / `chatModeSettings.ts` / `index.ts` / `rpa_session.rs` / `chat_patrol.rs` 各写一份字面量，靠注释提醒「记得同步」→ 迟早分叉（真实分叉过：`useCurrentWindow` 三处两套默认值，「设置里显示开、自动值守按关跑」）；正确做法：默认值只有一处权威、其余引用它；两侧区间用**源码级对齐断言测试**锁住（沿用仓库既有的手法）。
+- **回话不重置回访额度** — 错误做法：对方回话后仍把 `followUpIndex + 1` 累加 → 正常来回聊天把回访额度耗光，之后再也不会主动找话；正确做法：`delivered === "sent"` 且本轮是「对方有回话」时序列**归零**重新计，只有「对方没理我而主动回访」才递增。
+- **只在带 `type` 的事件上转发，忘了新事件类型** — 错误做法：新增 `chat_state` 等顶层 `type` 事件后不在 Host 白名单里转发，宿主侧**静默忽略**（不报错也不显示，排查时像「什么都没发生」）；正确做法：新增协议事件必须同时补 Host 转发与前端订阅，并确认未知 `type` 是「安全忽略」而非异常。
+- **聊天命令被长任务堵住停不下来** — 错误做法：`chat_stop` / `chat_status` 走串行命令队列，而前面正跑着一整片聊天值守 → 点停没反应；正确做法：停止/查询类命令进 `IMMEDIATE_COMMANDS` 绕过串行队列（与 `agent_pause` / `agent_abort` 同待遇），且停止要「**先摘忙标记**再限期等收尾」（见下条，`await done` 不能挡在清理前面）。
+- **聊天占用不进互斥** — 错误做法：聊天引擎自己跑，`engineBusySnapshot` 不认它 → Agent 与聊天同时踩同一台浏览器（S5）；正确做法：`chatRunning` 登记进同一个 `EngineBusyState`，`chat_start` 先查互斥。
+- **清洗后变空 → 清错目录范围** — 错误做法：路径段清洗（`sanitizeSegment`）只挡 `../`，不处理「清洗后变成空串」（`" . "`、`"   "`）→ 路径少一段，`{site}/` 直接等于站点目录，「清一个联系人」变成「清整个站点」（fail-open 的删数据事故）；正确做法：清洗结果为空一律回退到 fallback，且**两侧镜像**（TS + Rust）都要有测试锁住该边界。
+- **把引擎算好的状态在本层再算一遍** — 错误做法：引擎已经算出 `followUpIndex` / `nextDueAt`，落盘层又按自己的规则重算一次「回访序号怎么变」→ 两套规则分叉，表现为回访风暴或永不再访；正确做法：状态推进的**唯一权威在引擎**，持久化层只负责「记录」，签名里接受权威值而不是自己推导。
+- **上下文放在全局目录（可跨环境串号）** — 错误做法：每联系人上下文写进 `%APPDATA%` 全局目录 → 环境删除后新建一个撞上同一 ID 的环境，**继承上一个环境的聊天记忆**（真实的串号事故）；正确做法：落在该环境自己的 `userDataDir`（`browser-profiles/profile-{id}/chat_context/`）之内，随环境删除一并清掉。
+- **脱敏正则各写一份** — 错误做法：发送闸门与落盘脱敏各写一套正则，一边放宽一边收紧 → 「发不出去却已写进磁盘」；正确做法：一次性码/支付语义的口径集中在一个模块（`chat_redaction.ts`），闸门与脱敏共用。
+- **暂停写入却仍在清理** — 错误做法：清理上下文时不检查引擎是否在跑，把正在写的目录从底下抽掉 → 半截落盘 + DB 幽灵线程；**另一极端**：拿「浏览器开着」当闸门 → 空闲也删不了、关掉浏览器又看不见联系人（鸡肋）。正确做法：Host 侧只拦「引擎正忙」（与 `chat_status.running` / 互斥 waiter 同一口径），浏览器开着但空闲必须能清；清理后同步删除 `chat_threads` 索引；视图对「已保存目标但浏览器已停」的环境仍要列出（可查看 / 清记忆，不可开值守）。
+- **聊天视图只列 running → 关掉就「没人了」** — 错误做法：左栏环境只滤 `status===running`，关掉浏览器后联系人卡片整栏消失、没法删记忆；正确做法：运行中 + **已配置过要聊的人**的停机环境一并列出，徽章标明「已停」，值守按钮在浏览器未开时禁用。
+- **摘要无限递归退化** — 错误做法：把「上一版摘要 + 新消息」反复喂给模型总结，几轮后细节被磨平、只剩「双方在友好交流」这类废话，且每轮都在丢信息；正确做法（三条硬规则，`chat_memory.ts` 有测试锁住）：① 压缩输入**必须含未被覆盖的原始消息**，没有就**不压缩**（禁止「拿摘要总结摘要」）；② 稳定事实存独立 `facts.json`、只追加去重、**不参与压缩**，摘要裁剪时事实一条不丢；③ 压缩**代数到顶后不再压缩**，只推进覆盖位置。
+- **覆盖点会回退** — 错误做法：直接用模型回吐的覆盖位置 → 已覆盖内容重新变成未覆盖，同一批消息被反复总结、摘要被反复磨平；正确做法：`coveredUpToId` **只能前进**。
+- **重复角度污染角度库** — 错误做法：模型每轮都给角度，重复的也记进 `angles.json` → 之后每轮去重提示都带重复项，越用越乱；正确做法：入库前归一化比较（去标点/前缀）再判重，重复角度**只丢角度不丢消息**。
+- **记忆维护失败拖垮一轮聊天** — 错误做法：摘要/事实写失败直接把这一轮抛出 → 消息发不出去；正确做法：记忆维护包在独立 try/catch 里，**失败不打断发送**，但必须留 `chat_memory_failed`（不许静默）。
+- **协议事件的顶层 `type` 被语义 `type` 顶掉** — 错误做法：`chatProgress(msg, { type: "chat_read", … })` 里把 `data` 展开在 `type` **之后** → 顶层 `type` 变成 `chat_read`，宿主按 `"chat_state"` 精确匹配收不到任何聊天事件（表现是「聊天视图永远空的」，且不报错）；正确做法：顶层 `type` **恒为 `chat_state`**，调用方的语义 `type` 折叠进 `kind`，宿主**精确匹配**而非按 `chat_` 前缀猜（脆弱字符串匹配），`sidecar/tests/chat-protocol.mjs` 锁死该契约。
+- **把片内相位更新当成片终态唤醒调用方** — 错误做法：宿主对所有 `chat_state` 行都 `notify_waiters` → 一次切片里每变一个相位就被判「已经收工」，`chat_start` 提前返回、后续进展无人知晓；正确做法：**只有带 `waitId` 的那一行**是片终态（`waitId` 是 `send_and_wait` 的唯一唤醒凭据），其余原样转发给视图而不唤醒。
+- **`chat_status` 必须能在没有会话时答** — 错误做法：状态只问 Sidecar（它只在活着时记得相位）→ 用户刚打开视图或聊天早已收工就查不到任何事实；正确做法：运行态以**快照文件**（`chat_context/state.json`）为权威，Host 读文件 + `chat_threads` 索引拼出状态，`running` 另由 Host 的 waiter 判定。
+- **发完一条就当收尾** — 错误做法：一片只跑一轮，发出去就把下次唤醒排到 48h 后（或只等几秒就放弃）→ 对方秒回没人接。正确做法三层（`cadence.ts` + `engine.ts`，锁 `chat-cadence.mjs` / `chat-engine.mjs`）：① 片内来回（`maxTurnsPerContact`）；② 发出后守片剩余时间（`watchMs`，页内 `MutationObserver` 续挂，零轮询零截图）；③ 片末短复查：热窗口 `LIVE_REPLY_HOT_MINUTES`＝**60** 内固定 `LIVE_REPLY_HOT_STEP_MS`＝**5s**；冷阶梯 `LIVE_REPLY_COOL_LADDER_MINUTES`＝`[1,2,5,10,15]`；窗口 `LIVE_REPLY_WINDOW_MINUTES`＝**1440**（24h）——只来看、没话不发；片尽记 `chat_turn_limit`，剩余 `pendingTexts` 跨片续发（不许默默丢）。
+- **片末恰好错过对方那句被丢到 48h 后** — 错误做法：`lastReplyAt > lastContactAt` 就返回 `null` → 掉进 48h 回访。正确做法：`liveReplyRecheckAt` 走 `PENDING_REPLY_LADDER_SECONDS`＝`[15,30,60,120,300]`（锚对方回话时间；追不上也不许 `null`，落回冷阶梯）。
+- **宿主 tick 把秒级复查拖过去** — 错误做法：Sidecar 排了 5s 复查，宿主仍按 60s 节拍睡。正确做法：`chat_patrol` 把 `nextWakeAt` 落在 `IMMINENT_WAKE_MS`（60s）内的环境算「马上要做」，节拍升到 `PATROL_TICK_ACTIVE`（20s）。
+- **导航一发就算页面打开** — 错误做法：`openContact` 返回成功就读会话（SPA + WebSocket 站点首屏之后还要几秒才渲染容器与输入框）→ 读到空会话、把「还没渲染」当成「对方什么都没说」，再照臆想发一条；正确做法：`waitForChatReady` + `decideChatReady` 的**四要素门禁**（HTML `complete` + 容器可见 + 输入框就绪 + 渲染规模稳定）三态判定，未就绪本轮**不读不说**；明确 `not_chat_page` 才交人工；**禁止**用 `networkidle` 当就绪信号（聊天站常驻 WebSocket，它基本永远不到）。
+- **刚发完导航就下「不是聊天页」的结论** — 错误做法：`openContact` 里 `page.goto` 之后顺手探一次，几百毫秒时打分自然低（首屏还没注入容器）→ 立刻返回 `ok:false, reason:"not_chat_page"`；引擎据此「跳过该联系人」，现场表现是**整片一瞬间收尾**（日志 `打开会话（not_chat_page）→ 值守片结束：slice_complete`，用户以为「聊天模式坏了」）；正确做法：导航成功即算打开成功（容器可以暂时为空），**结论只由就绪门禁在公平观察窗之后下** —— `decideChatReady` 的 `not_chat_page` 先过 `CHAT_BLOCK_CONFIRM_MS`（6s）且要求 `htmlLoaded`，窗口内一律 `pending`，并靠 `waitForChatReady` 的 `reprobeMs`（3s）重探刷新结论；等不到只能是 `timeout`（如实说「未就绪」），**禁止**把「还没跑成」报成「不是聊天页」（与 A 组「校验失败谎报为未命中」同源）。
+- **「同一账号里换个会话」被当成「已经在目标会话上」→ 发错人** — 错误做法：`openContact` 用「剥掉 hash」的 URL 归一化（`url.hash = ""`）比较当前地址与目标地址。SPA 上同一账号的不同会话常常**只有 hash 不同**（`…/k/#@Alyssa` vs `…/k/#@Bob`，正是「联系都是一个账户里面的」那种形态）→ 两者判等 → **跳过导航**，我们以为切到了 Bob，实际还在 Alyssa 的会话里读、甚至发（`conversationKeyOf` 早就写明「很多站点把会话 id 放在 hash 里」，两处口径分叉）。正确做法：归一化只忽略末尾斜杠，**hash 必须参与比较**；hash 不同的切换走一次同文档导航（hashchange），SPA 自己会切会话；回归锁在 `sidecar/tests/chat-mode.mjs`（`#@Alyssa` → `#@Bob` 必须导航）。
+- **「没写对象」既不许拒绝得没道理、也不许猜** — 错误做法 A：目标为空就一律拒绝启动（用户对着已打开的会话说「聊吧」被判无效）；错误做法 B：为空就随手挑一个标签聊；正确做法：显式开关 `useCurrentWindow`（设置「聊天」→「聊天对象」，默认开，Host 与 Sidecar 都只转发/读取这一个口径）+ 运行期 `resolveCurrentConversation` **只认「已经开着、且判定为聊天页」的标签**（身份用 `conversationKeyOf` 由 URL 派生），**优先用户自己的标签**；实在没有可用窗口时才退回「我们自己上次留下、此刻正开着的那个聊天标签」（`ownTab: true`，日志如实写明）—— 明明开着聊天窗口却报「没有可用窗口」才是真的费解，只读会话、只往输入框打字，**不新开 / 不导航 / 不关标签**；判不出来即如实失败（`no_open_chat_window`）。
+- **「每次都新开一个窗口」= 自开标签认不出来**（同一账号被堆成一排标签）— 错误做法：用 `page.evaluate` 给自开标签打标记（`__tst_chat_tab`）。该标记只活在**当前文档**里，`page.goto` 到某个会话（next document）就没了 → ① `resolveCurrentConversation` 排除不掉自己，可能绑到自开的空标签；② sidecar 重启（看门狗 T2 / 应用重开 / 手动收工）后内存缓存（`WeakMap`）丢失、又认不出页面上那个标签，只能**再开一个** → 用户看到「每次都开一个新窗口」，而目标往往都是**同一个账号**里的不同会话，标签越堆越多。正确做法：标记用**页级** `page.addInitScript` 打（只对本标签生效，不像 context 级会把用户标签也标成我们的），并让 `ensureChatPage` 在缓存未命中时**跨进程认领**自己上次留下的标签（`findOwnChatTab`：只认带标记的、绝不劫持用户窗口）；一个环境**只有一个聊天标签**，同一账号的多个会话在这个标签里按会话导航切换，`ensureChatPage` 的 `adopted` 要进日志（让用户能审计）。正常片收尾**不关**标签（下一片直接复用），只有 `chat_stop` 才关。
+- **停止先等收尾再摘忙标记** — 错误做法：`handleChatStop` 先 `await handle.done` 才清 `chatRunning` / `chatSession`，而 `done` 可能永远不 settle（卡在 LLM 或页内等待）→ 该环境被**永久**判成「正忙」，之后 Agent / 回放 / 填表全被拒，UI 无任何手段自愈；正确做法：**先摘忙标记与会话**（`abort` 之后立刻清），再用**限期**（`Promise.race` + `CHAT_STOP_SETTLE_MS`）等收尾，超时即补发一条带 `waitId` 的 `force_stopped` 终态行（不许让宿主 waiter 悬着），并如实留痕；会话在跑时 `chat_stop` 也要绕开串行队列。
+- **老引擎迟到收尾抹掉新会话** — 错误做法：`done.finally()` 里无条件 `chatSession = null; chatRunning = false` → 被强制摘除后新起的一片刚登记就被老引擎的迟到收尾清掉（两片互相覆盖，谁也不干活）；正确做法：收尾清理**带身份校验**（`chatSession?.engine === engine` 才清）。
+- **调度器热循环（片被杀 → 反复立刻重拉）** — 错误做法：调度器只看 `nextWakeAt`，而片被看门狗杀掉时**根本没人写新的** `nextWakeAt`（旧值早已过期）→ 下一个 tick 立刻重拉，卡住的片被无限重试；正确做法：失败必须**退避**（5min 起、翻倍、封顶 30min），连续失败到顶即**挂起自动拉起**并如实上报原因，等用户显式恢复（手动点「开始值守一片」也解除挂起）。
+- **把正常竞争记成失败** — 错误做法：`engine_busy`（别人正占着）/ `seat_lost`（没抢到席位）/ `browser_closed`（用户关了浏览器）/ 用户主动 `chat_stop` 都算引擎失败 → 正常的并发竞争会很快把环境「挂起」；正确做法：这些一律 excusable（清失败计数），只有 `exception` / `start_failed` / `force_stopped` / **非用户意图的** `aborted` 才算硬失败（用户意图由 `chat_stop` 命令显式登记，且只在**确实有片在跑**时登记，避免宽容标记漏到下一次真崩）。
+- **让 `nextWakeAt` 的格式在地狱里对不上** — 错误做法：Rust 侧为了比时间又引一套时区库或猜字符串格式（`2026-09-26T14:26:00.000Z` / 带 `±HH:MM`）→ 时区算错一天、要么永不唤醒要么回访风暴；正确做法：自持一个最小 `parse_iso_millis`（含 `days_from_civil` 与偏移折算），**看不懂就返回 `None`**，调用方按「从没跑过」处理（宁可早唤醒一次），并有单测锁住闰日与时区偏移。
+- **再次发明「并发上限」或对聊天开后门** — 错误做法：调度器要么不限并发（一次拉起一堆环境烧 LLM 额度），要么把免费档也放开；正确做法：与 Agent 同一条口径 —— 免费档**恒为 1**，Pro 用用户配置但受硬顶（4）约束，且生效上限要在设置与视图里**显示出来**（不许偷偷夹）。
+- **Host 端重写一份设置校验器** — 错误做法：Rust 为了拉起一片，把前端的 `parseChatModeSettings` 又实现一遍（默认值/夹取各写一套）→ 两边口径分叉；正确做法：Host 只做**只读转发**（拿 `enabled` 与 `targetsByEnv` 等必要字段，其余原样透传，合法区间交给 Sidecar 的权威解析器），能被解析坏的目标进报告**先说后跑**（不静默丢弃）。
+- **出站写入方式写死一种（描述符猜错＝永远发不出去）** — 错误做法：`composer.input.method` 只试声明的那一种（合成 `beforeinput`），站点版本一变它就整个落不进去 → 表现是「草稿生成了、相位一路走到 `sending`、然后永远 `发送未确认（verify_mismatch:equals）`，健康度提示『请修描述符』」，用户看到的就是「引擎死活不发消息」（实测踩到）；正确做法：`core/web_chat/descriptor/composer.ts` 的**写入兜底链** —— 声明写法优先（健康度据它的失败原因提示修描述符），失败后按可靠度依次换 `typeKeys`（**真实按键逐字**，最像人、富文本编辑器一律接受）→ `selectAllBeforeInput` → `insertText` → `fill` → `execCommand`，每种都过**同一条读回等值校验**，fail-closed 不放宽（不相等就清空、绝不提交，仍「最多提交一次」）；描述符里声明的写法本身要选真实按键，而不是赌站点监听合成事件。
+- **逐键输入的草稿带换行** — 错误做法：把多行文本直接交给 `pressSequentially` → `\n` 被当成**真实回车**打进聊天框，站点当场把半句话发出去（一次调用变成两次提交）；正确做法：按键路径先把换行折成空格（读回校验本来就折叠空白，语义不丢），只有非按键路径才允许原样保留换行。
+- **出站失败只留一个代码（排查靠猜）** — 错误做法：写入失败只回 `verify_mismatch`，不说命中哪条选择器、试过哪些写法、读回了多少 → 下次还得从零猜（实测：为这一个字符串耗掉两天）；正确做法：出站返回**结构化诊断**（命中的选择器 + 每种写法的 `readLength` / 哈希指纹，**绝不含消息正文**），上层原样落 `chat_send_unconfirmed`（失败）与 `chat_composer_method_fallback`（靠兜底写法才成功，等于提醒「请修描述符」），并用 `chat-settings-parity.mjs` 锁住「新事件 kind 必须进前端标签表」。
+- **读数落错栏：把左侧会话列表当成会话正文** — 错误做法：容器只认页内机械预排名第一（`containers[0]`，按“重复子结构 + 文本量 + 面积”排，左侧列表天然更符合）→ 读到的「对方最新一条」其实是**整份联系人名单**，引擎还照它回一句「你这条像误粘了通讯录」，现场（Telegram Web）联系人当场懵（「什么通讯录？」）；正确做法（两条一起）：① 容器相关的那部分分**在候选之间逐一比、取最高**（方向分居 / 同栏输入框 / 面积滚动这些判据都在容器上，比一比就知道谁是真会话）；② 「下方有输入框」必须过**同栏水平重叠**门槛（`COMPOSER_OVERLAP_MIN`，页内函数不能引模块常量，阈值只能写在页内），只按「下方 + 左右各放宽 40px」会把列表栏也算成会话容器。回归锁在 `sidecar/tests/chat-mode.mjs`（含源码级防退化断言）。
+- **人工接管的键与引擎的键对不上（一键交还变成摆设）** — 错误做法：视图把接管写进设置表时用**清洗过的目录名**（`unknown_Anne`，来自 `chat_context\{site}\{contact}` 的目录名），引擎却按未清洗的会话键（`unknown|Anne`）查表 → 用户点「引擎值守」毫无反应，被误判成接管的联系人**永久锁死**（视图显示「已由用户接管、引擎不开口」，日志只写「已由用户接管」不说原因，用户无从下手）；正确做法：引擎侧 `takeoverOverrideOf` **兼容视图写入的写法**（权威＝会话键 `<site>|<名>`，兼容 `<site>|<清洗后键>` 与早期的 `<清洗后键>`），视图改写 `<site>|<联系人目录名>`（两者合起来不跨站点撞名），跳过的日志必须带上 `reason`（判定原因）与 `hint`（怎么交还），视图卡片也要把原因**摆在明面上**。（收敛后：键只有 `chat_session_config.ts::takeoverKeyOf` 一种拼法 `<site>|<清洗后联系人>`，`takeoverOverrideOf` 只留一个迁移读；Rust overlay 与 `forget_snapshot_contacts` 用同一套 `sanitize_segment`。）
+- **自动检测出来的接管被当成用户意图、永久生效** — 错误做法：拿「会话里出现不是我方发件的出站消息」这一条**启发式**直接写死 `takeover: "human"`，且不区分是谁定的 → 发件箱缺记录（快照没恢复、读错栏）时误判一次就永久停手；正确做法：保留「人工优先一律停手」的红线，但把**判定原因**落进快照（`takeoverReason`）并在视图与日志里说清（用户自己定的用共享常量 `USER_TAKEOVER_REASON` 区分），一键交还必须真的能生效；根治仍在两条源头（快照续跑 + 读数不落错栏）。
+- **清理上下文没摘引擎快照（“从零开始”名不副实）** — 错误做法：`purge_chat_context` 只删 `chat_context\{site}\{contact}` 目录与 `chat_threads` 索引，留着 `state.json` 里的 `stage` / `followUpIndex` / **`takeover`** → 用户点了「清理该联系人记忆」（对话框写着「聊天将从零开始」），视图却继续显示「已由用户接管、引擎不开口」；正确做法：按联系人/按站点清理时把被清掉的联系人从快照里一并摘掉（`forget_snapshot_contacts`，段名按清洗后的目录名比对，tmp + rename 原子写；整环境清理本来就删掉 `state.json`），这是 Host 对该文件**唯一**的写点，且调用方已拒绝「环境在跑」（聊天跑必须有活浏览器，此刻没有引擎在写）。
+
+- **每联系人开关另起一套键、或把「没设置」当「关」** — 错误做法：给「自动聊天」再造键空间，并把缺失当成 `false` → 升级后引擎突然不说话。正确做法：与接管同一套键（`contactFlagsOf`），**未设置＝开**，坏值进 `diagnostics`；`followUp` 字段可兼容读入但引擎不读（主动追发已下线）。
+- **「短复查」只写在文档里** — 错误做法：说明写秒级复查，代码却只按 48h 排下一次。正确做法：唯一权威是 `cadence.ts::liveReplyRecheckAt`（热窗 60min / 步长 5s / 冷阶梯 `[1,2,5,10,15]` min / 窗 1440min；超窗 `null`）；回归锁 `chat-cadence.mjs`。改常量后**同步改本宪法数字**。
+- **读会话列表把「读不到」说成「你没有会话」** — 错误做法：只读探针一失败就回空列表 → 用户以为站点里没人可聊，转头去手抄昵称（而真实原因是页面还没渲染 / 没开聊天页 / 认不出站点）；同族还有「把任意页面的链接都当联系人」；正确做法：`listPageThreads` 三态——**读不到 `ok:false` + 人话原因**（「没找到认得出来的聊天页面」≠「列表是空的」），只认「有描述符 / 命中聊天站点画像 / 判定为聊天页」的页面，且如实标注来源 `descriptor`（站点自己说了怎么读）/ `generic`（通用启发式，是猜的，视图据此提示用户核对）；候选按「描述符声明了 `threads` > 命中站点画像 > 命中任意描述符 > 兜底判定」排序，逐个试并把失败原因汇总进 `reason`。
+- **站点键永远写 `unknown`** — 错误做法：手动填的目标一律 `siteKey: "unknown"` → 同一昵称在**两个站点**撞进同一个目录（`unknown/Anne`），两段对话的记忆互相覆盖，且永远匹配不上站点画像；正确做法：`site_detect.ts::siteKeyOf(url, profileId)` 画像 id 优先、否则从 URL 派生（去掉子域与公共后缀、只留 `[a-z0-9]`，取不到老实回 `unknown`，**不编假站点键**）。但派生会让**老用户目录**对不上 → 换目录前先问 `hasContactDir("unknown", 旧键)`：旧目录在就**沿用 `unknown` 与旧键**（读旧写旧）并记一条 `chat_context_legacy_dir`，绝不静默换目录把同一个人当新对象重新开场（R7 刷屏）。
+- **「写了设置但界面不读设置」→ 按钮看着点不动** — 错误做法：联系人卡片的接管与两个开关只显示引擎快照（`chat_status`），而设置是**片启动时**才读进引擎的 —— 用户点「引擎值守 / 自动回复」写进设置后界面一动不动（快照要等下一片跑完才改写），现场判定就是「这三个按钮点了没用」；正确做法：视图把设置**叠在快照之上**（`effectiveContacts`：`settings.takeovers[key] ?? row.takeover`），与引擎侧「用户设置优先于自动检测」是同一条口径；点完必须**立刻看得见**变化。
+- **把「开场」和「回访」并成一条通道（选了人却永远不说话）** — 错误做法：首次开口也走 `planFollowUp`，关掉回访＝从没聊过的人不被搭话。正确做法：开场由 `isColdOpening` 单独判定，**只认「自动聊天」**（`autoReplyOf`）；主动追发已下线（对方没回时只盯守、不催）。回归锁 `chat-engine.mjs`。
+- **拿「未指定对象」的兜底去管「有目标」的情况** — 错误做法：`useCurrentWindow`（绑用户当前窗口、只读、不导航、不新开）被当成全局开关，有显式目标时也照用 → 用户指定的人打不开（`container_missing`）、又不自开标签，页面停在会话列表（Telegram 首屏就是列表）时整片只会「一秒结束」（现场：`chat_site_without_conversation` → `no_targets`）；正确做法：这条纪律**只对没指定对象成立**（设置项原话就是「未指定对象时…」），判定收敛在 `chat_session_config.ts::useCurrentWindowMode(useCurrentWindow, targetCount)` 一处；有目标时走**聊天专用标签**并由引擎导航过去（目标就是目的地，不劫持用户正在看的标签）。
+- **身份定稿后键变了，却拿定稿键去原始名单里找** — 错误做法：`openContact` 用 `contacts.find(c => c.key === contact.key)` 找目标的会话直链，而站点键从 `unknown` 派生之后两者**不再是同一个串** → 永远找不到 → 直链被丢掉，退化成一堆「按昵称去列表里点」，点不中就报「打不开会话」（表现是「什么都没发生」）；正确做法：`resolveTargets` 把**解析后的名单**留一份（`resolvedSeeds`），`openContact` 先在它里面找。
+- **要把目标名单摆出来，却把用户往一个文本输入框里赶** — 错误做法：「要聊的对象」是一张裸文本框，读会话列表的按钮埋在它下面，保存还要再点一次「保存配置」（两步）→ 用户既看不懂也走不到；正确做法：会话列表是**主路径**（打开视图就自动读一次，勾选 + 每行两个开关 + 「保存为要聊的人」一次落盘），已保存的名单以徽章列出来，手填降级为折叠的「手动填写（高级）」。
+
+**J · 站点描述符 / 页内运行时（聊天选站层）**
+
+- **把 HTML 原文喂给模型** — 错误做法：采集阶段把整页 HTML 交给 LLM 推断选择器；同一任务同一模型，结构化事实输入 F1 ≈ **0.9567**（幻觉 3%），瘦身后 HTML 输入 F1 ≈ **0.1014**（幻觉 **91%**）—— 差约 9.5 倍，产出「看着合理实际全错」；正确做法：先归一化成**结构化事实**（属性名 / 路径 / 候选签名 / 扁平 JSON）再进模型，HTML 只作离线排查。
+- **位置型选择器静默返回错字段** — 错误做法：验证只对比「有没有结果」（公开基准里位置型选择器在 **11/32** 个未见过的页面上**不报错但值是错的**，比报错危险得多）；正确做法：逐字段核对**内容**，且验证样本必须是**采集阶段没喂给模型**的那一批（否则是自我确认）。
+- **描述符里夹脚本 / 用 `eval` 解释** — 错误做法：为省事让描述符带表达式、或 `new Function` 现场编译；正确做法：只允许**选择器 / 属性名 / 正则 / 固定枚举 / 数字**，运行时**零动态求值**（R8、§0.5.3 B）。
+- **出站绕输入框** — 错误做法：页内直调站点内部发送函数、或自建网络请求发消息（更快更稳）；正确做法：只走 composer **真实事件链**（R8）—— 否则绕过等值校验 / 脱敏 / 只发一次三道闸门。
+- **出站闸门吞掉用户自己的回车** — 错误做法：capture 阶段无条件 `preventDefault` → 开了聊天模式用户手动打字按回车**发不出去**（表现为「开了聊天模式我就发不了消息」）；正确做法：闸门只对**引擎发起的那一次**发送生效（一次性 token），监听器只绑 composer、片结束即解绑，并有「非引擎回车原样放行」的回归断言。
+- **信 `execCommand` 的返回值** — 错误做法：`insertText` / `execCommand` 返回 `true` 就认为写好了（WhatsApp 的 Lexical 在内容超过 2 个字符时**静默忽略但仍返回 true**，表现为「短句能发、稍长就发不出去」）；正确做法：派发 `beforeinput` → **等异步重渲染** → **逐字等值校验** → 不过重试 ≤3 → 仍不过**取消发送**（fail-closed）。
+- **发送派发多次** — 错误做法：`keydown`/`keypress`/`keyup` 三重派发或点两次发送 → **双发**；正确做法：只派发一次 + 发送锁 + 延迟释放。
+- **DOM 隔代变异只认一代 id** — 错误做法：只认 `true_/false_` 前缀；新版是纯十六进制 id，于是**一条都匹配不到**（历史快照、批量补翻全空）；正确做法：描述符声明**多个 id 形态 + 多级回退**（属性 → 尾部图标 → 勾号图标）。
+- **把系统消息当聊天内容** — 错误做法：不排除端到端加密提示 / 日期分隔符 / 安全码变更提示；正确做法：描述符声明 `exclude`，系统消息一律跳过。
+- **附件回图当成「对方没回」** — 错误做法：只抽文本，图片/语音/文件的文本为空即跳过 → 对方回了图，我们记成「对方没回」，接着走回访阶梯去催（明确的逻辑性缺陷）；正确做法：**存在新消息行但无文本**也算 inbound 事件（只记「回了」+ 类型）；边界：**绝不取内容、绝不用附件图取码**（R2 / B7）。
+- **显示时间戳当真** — 错误做法：解析站点渲染的「12:30 / 昨天 / 刚刚」去算回访；它是本地渲染且不可靠；正确做法：一律不信，只用**我方观测时间**（`lastContactAt` / `lastReplyAt`），否则学习被污染、`nextDueAt` 算错。
+- **编辑 / 撤回 / 引用当成新消息** — 错误做法：去重只认 id（编辑改了文本被漏掉；撤回后仍拿旧文本当记忆；引用块把被引原文混进正文 → 重复计数 + 污染上下文）；正确做法：**id 为主键 + 内容版本**（编辑 = 更新、撤回 = 标记移除、引用块 = 排除）。
+- **观察器不成对销毁 / 容器换了不重绑** — 错误做法：`subscribe()` 只解绑一部分观察器，或会话容器被整块重渲染后不重新绑定；正确做法：全部 `MutationObserver`/`IntersectionObserver`/`addEventListener` 在 `destroy()` 里解绑，容器换了跟着换，并有「销毁后不再有任何上报」的回归。
+- **描述符目录没进打包** — 错误做法：只拷 `sidecar/dist`，漏 `sidecar/connectors`（与 G 族同源）→ 运行时找不到描述符、**静默降级成通用模式**（「开发机上好好的、给用户就变笨」）；正确做法：打包连 `connectors` 一起拷，并抽查便携包结构。
+- **学习 / 采集不占互斥** — 错误做法：AI 分析页面时另开一条不受 `engine_mutex` 约束的通路（S5）→ 与 Agent / 回放并行踩同一 CDP；正确做法：与值守**同一把锁**，且前置条件（有运行中环境、已登录目标站）不满足即**如实失败**、清理半成品草案（不静默、不留「学了一半」的描述符）。
+- **`learned` 描述符落错目录** — 错误做法：把「站点知识」与「每联系人聊天记忆」的位置混为一谈（或反过来把 per-contact 记忆放进全局目录 → **串号**，§0.5.3 J 真实事故）；正确做法：**学来的描述符落在该环境自己的 `<userDataDir>/connectors/_learned/` 内**（随环境删除一并清掉，不带给新建环境）；**per-contact 聊天记忆同样只在该环境的 `userDataDir` 内**；跨环境复用不靠「偷偷共享文件」，而是 `exportAsBuiltinCandidate` **导出 → 复核 → 随包发版成 builtin**（两级目录来源由 `registry.ts` 决定，文件里写的 `source` 不算数）。
+- **让视图自己拼/拆描述符文件名** — 错误做法：删除学来的描述符时拿**描述符 id** 当文件名干（`whatsapp-web` 的文件其实叫 `whatsapp.com.json`）→ 用户点「删除」只得到一个看起来像 BUG 的「没删掉」；正确做法：文件名约定只在 `discovery/learn.ts` 一处拆（`descriptorFileName` / `siteKeyFromFileName`），总览把 `siteKey` 一起下发、视图照抄；且 siteKey 参与拼路径，形状不合（含 `../`、空白、以点开头）一律 **fail-closed** 拒绝——删不到目录外、也写不到目录外。
 
 ### 0.5.4 证据从哪来（定位顺序）
 
@@ -169,16 +320,17 @@ React (src/) → Tauri 2 / Rust (src-tauri/) → Node Sidecar (sidecar/) → Clo
 
 ## 1. 产品红线 — 不可破坏
 
-### 1.1 禁止实现（R1–R6）
+### 1.1 禁止实现（R1–R6 + R8）
 
 | ID | 禁止项 | 说明 |
 |----|--------|------|
 | **R1** | **无人支付 / 自动扣款 / 自动提交支付** | 支付、转账、改密、删号等 critical 必须 HITL（确认或 handover）。Commerce/Booking 合法终态：`stop_before_pay` → `awaiting_human_payment`。禁止 `done(success=true)` 冒充已付款。契约：`AUTO_PAYMENT_ALLOWED=false`。 |
 | **R2** | **编造短信码 / TOTP / 验证码 token** | 值不在站内；禁止猜测；禁止用视觉「读」短信/邮箱界面代替用户；禁止编造 Turnstile / reCAPTCHA / hCaptcha token。**Chat 附件图同禁**：不得当 Layer 2 自动取码依据。 |
-| **R3** | **为过检测而改指纹 / 注入绕过脚本** | 禁止改 navigator/WebGL 等「骗过」人机。过码走 captcha 策略层；不过则 HITL。 |
-| **R4** | **站点定制脚本写入核心引擎** | 禁止在 `bu_agent/service.ts`、`actions.ts` 等核心循环为某电商/邮箱写死 URL、选择器、文案。差异走 config / Skill / 适配器。 |
+| **R3** | **为过检测而改指纹 / 注入绕过脚本** | 禁止改 navigator/WebGL 等「骗过」人机。过码走 captcha 策略层；不过则 HITL。**边界**：允许在页内**读**站点自己写出来的数据（DOM 属性、`localStorage` 里的本账号身份键）并**走站点自己的事件链**（真实输入/回车/点击）；**绝对禁止**改指纹、绕风控、编造验证码 token、伪造设备特征。 |
+| **R4** | **站点定制脚本写入核心引擎** | 禁止在 `bu_agent/service.ts`、`actions.ts`、`core/web_chat/engine.ts` 等核心循环为某电商/邮箱写死 URL、选择器、文案。差异走 config / Skill / 适配器 / **站点描述符**（§0.4）。**判据**：核心引擎里出现任何站点字面量即违规（用源码级断言锁住）。 |
 | **R5** | **网页邮箱 UI 作为默认取码主路径** | Gmail/QQ/Outlook 网页翻信仅可作**显式启用**的非默认适配器。默认必须是 IMAP / 临时邮 API；不得偷偷开启。 |
 | **R6** | **环境人设接回自动填表** | 环境人设（`profiles.persona_data`）已**下线**（无常规读写方）；用户人设走「规则」窗口的**人设库**（Host `global_settings.agent_personas`），**不绑定环境**。Agent / 智能填表 / 自动注册**不得**读取 `profiles.persona_data`。人设只在被 `@人设名` 引用时生效（**`@` 是唯一开关**）；勾选「固定」的字段为权威值，未勾选的必填项现生成。详见 §1.4（回放 `{{persona.*}}` 以被 @ 引用的人设整套字段为源）。 |
+| **R8** | **聊天站点对接越权（描述符 / 页内运行时）** | ① 描述符**只允许声明**（选择器 / 属性名 / 正则 / 固定枚举 / 数字），**禁止脚本**（无 `eval` / `new Function` / 字符串拼函数）。② 出站**只走输入框**（真实 composer 写入 → 等重渲染等值校验 → 真实回车/发送按钮），**禁止**页内直调站点内部发送函数，**禁止**自建网络请求把消息发出去（页内全局对象只许在采集阶段当 oracle 读，不进运行时/schema）。③ 页内代理的观察器与监听器**成对销毁**（片结束即解绑，不得常驻拦截全站键盘 —— 尤其**不得吞掉用户自己敲的回车**）。④ 出站 **fail-closed**：写入等值校验不过即取消发送，绝不把未校验内容发出去。⑤ 描述符能力**机器自检**（读对 DOM 真值逐字段比对；写在**自己的对话/收藏夹**发送后读回逐字核对），**不设人工确认关卡**（用户在差异清单上驱动「重学一轮」，而不是批准一份没验过的草案）。⑥ **无每日回复上限**；不做花费自动停机（停止由用户点）。 |
 
 ### 1.2 验证码与凭证三层（必须遵守）
 
@@ -224,6 +376,21 @@ Layer 3 — 人工确认
 - 禁止在提示词 / Nudge / Skill 写「步数过 75% 就收尾」「最后一步必须 done」「聊满 N 句结束」。  
 - **Chat 与 Agent 步数无关**；禁止在 `chat_engine` 内再造半自动 Agent 循环。
 
+### 1.6 聊天模式红线（R7）
+
+| 禁止 / 必须 | 说明 |
+|------|------|
+| **把聊天做成通用 Agent 的别名** | 独立入口 / 引擎 / 相位状态机；不得塞进 `bu_agent` 步进循环，也不得在 `chat_engine.ts` 再造半套 Agent（与 B2 同源）。 |
+| **复读、盖话、答非所问** | `dedupe` 硬拦同句；连发时**每句前** `peekNovelUnanswered`，有新未回复立即打断并清空 `pendingTexts`；`turn_intent` 对信任攻击 / 问价 / 纠错 / 提问硬闸（先答后推）；`moreAbove` 时禁止冷开场推销。 |
+| **对方回复 / 异议 / 退订 ≠ 强制停手** | 态度进提示词由角色决定怎么继续（可含推销）；**支付 / OTP / 证件语义**仍走 R1/R2，立即停并 HITL。 |
+| **总开关开着须持续值守** | `enabled=true` 且浏览器在跑：调度持续拉片；未回复**立刻回**（回信路径零节奏拖延）；热窗内秒级短复查；片预算不够则 `pendingTexts` 跨片续发，**禁止默默截断**。电脑休眠 / 退出应用 / 关浏览器无法回复（物理边界，UI 须明示）。 |
+| **未读 / 新会话可发现** | 片内可自动扫描会话列表，未读与新 peer **不必须**预先勾进「要聊的人」也能回；勾选名单是优先/主动开口，不是唯一可聊对象。 |
+| **高频无意义动作** | 禁全景截图、例行控件树、影子模型、滚动刷屏；等待走页内事件驱动（零截图）。 |
+| **与用户抢操作** | 检测到用户最近输入即本片让位；不劫持用户当前标签。用户设定的接管（`takeover=human/paused`）立即停口；**接管键只有 `takeoverKeyOf` 一种拼法**（见坑族 H）。未指定对象且开了「当前窗口」时：只读会话 + 只打字，不导航/不新开/不关标签。 |
+| **OTP / 支付进上下文** | `chat_context` 禁止落 OTP/token/卡号/CVV（叠 R2）；出现支付/转账/证件语义即停并 HITL（叠 R1）。 |
+| **绕过席位** | 与 Agent 同一口径（免费档恒 1，Pro 有硬顶）；`chat_patrol::parallel_cap`，不得为聊天开不受限通道。 |
+| **主动追发已下线** | 短复查与持续值守是唯一唤醒主路径；对方没回时不催。开场/回话只认「自动聊天」。勿再加假的「定时回访」UI。 |
+
 ---
 
 ## 2. 已落地行为 — 禁止回退
@@ -239,6 +406,7 @@ Layer 3 — 人工确认
 | **B5** | Ai Chat **不挂** RPA 模板 UI | 禁止模板下拉、同域套用、保存/删除入口、Tab RPA 角标；`RpaTemplatePanel`/`SaveTemplateModal` 文件可留，**不得挂回**。 |
 | **B6** | 环境列表无提取/全景开关列 | 无「元素提取」「全景截图」产品开关列；「元素提取测试窗」可作次要调试入口。 |
 | **B7** | 聊天附件主路径保留且不取码 | 附件 → vision/摘要可用；**不得**用附件图自动取短信/邮箱码。 |
+| **B8** | 聊天模式的独立性 | 独立入口 / 引擎 / 相位状态机 / 存储 / 命令族 / 日志 / 视图；`enabled=false` 时不存在；禁止并入 Agent 或 Ai Chat 的循环与日志 |
 
 ### 2.1 决策自主（少打扰）
 
@@ -281,13 +449,14 @@ AppLayout
 | **环境列表** | 浏览器环境管理 | 不要堆 Agent 状态徽章到侧栏顶栏 |
 | **介入中心** | HITL 单一收件箱 | 禁止第二套互抢确认的弹窗队列 |
 
-### 3.3 设置面（SettingsModal 四 Tab）
+### 3.3 设置面（SettingsModal 五 Tab）
 
 | Tab | 职责 | 落点 |
 |-----|------|------|
 | AI 设置 | 模型槽、API、连通性 | `settings/AiSettingsTab.tsx` |
 | 验证码与邮箱 | OTP / 远程 solver / 通道开关 | `settings/CaptchaOtpSettingsTab.tsx` |
-| 常规设置 | 内核、下载、调试类全局项 | `settings/GeneralSettingsTab.tsx` |
+| 聊天 | 总开关（默认关）· 聊天对象（当前窗口）· 回访节奏（可选，默认关）· 单次/自动值守 · **站点支持（描述符）** · 静音与红线（只读） | `ChatModeSettingsTab.tsx` + `ChatSiteSupportSection.tsx` · 键 `chat_mode` |
+| 常规设置 | 内核、下载、调试类全局项 + 聊天上下文清理 | `settings/GeneralSettingsTab.tsx` |
 | 代理池 | 代理 CRUD | `settings/ProxyPoolTab.tsx` |
 
 密钥进 Host `secret_store`；禁止明文进仓库或日志。设置项须与 Sidecar 运行时读取一致；无「关了提取就全站不能观察」的诱导文案。
@@ -300,8 +469,22 @@ AppLayout
 | `profiles.persona_data` | **无写入方**（`set_profile_persona_data` 命令、Sidecar 上报、DB 写队列项均已移除；列保留避免迁移风险） | **无读取方**（回放与 data_planner 已改读规则库人设） | **忽略** | INFO 残留；禁止接回自动注册/智能填表数据源；用户人设走规则库 |
 | 规则库人设（`global_settings.agent_personas`，含 `fixedFields` / `fixedFieldsConfigured`） | 「规则」窗口（`AgentRulesModal` → Host `update_setting`）；「固定」直接写人设自身 | Agent 任务（`AIFillDrawer` 输入框 `@人设名`）、回放（`BatchReplaySandbox` / 单环境回放目标 `@人设名`）**仅在有 @ 时读取** | 无 @ 即不下传（未配置则现生成）；人设不绑定环境 | 口径见 §1.4；未勾选字段现生成；禁止写回 `profiles.persona_data`；禁止恢复「点圆圈指定给浏览器」「应用于全部浏览器」 |
 | `agent_persona_selection`（旧：profile → 人设 + 固定字段） | **无写入方**（前端迁移时写一次 `{}` 后不再写） | **仅兼容回落**：`db::resolve_agent_persona_for_profile`（回放 / data_planner 在没拿到 `@人设` 载荷时查它） | 一次性迁移把字段并进人设 `fixedFields` 后清空 | INFO 残留；禁止新增读取方，禁止用它当「人设生效开关」 |
+| 聊天模式总开关 | `global_settings.chat_mode`（JSON，`enabled` 默认 false） | 设置「聊天」Tab 写；Host `chat_start` **运行时校验**（关掉就真的拒绝启动，不只是置灰按钮） | 默认关 | 禁止在 `enabled=false` 时注册定时器 / 自动拉起；禁止只在 UI 拦、运行时放行 |
 | `RpaTemplatePanel.tsx` / `SaveTemplateModal.tsx` | —（未挂载） | 无 Ai Chat 引用 | **INFO 残留** | 引擎/DB 模板表可留；禁止挂回 Ai Chat；删文件前须全仓零引用 |
 | `Agent` 命令上的 `taskRules` / `taskPersona` / `attachments` | 前端 `tauri.ts` → `rpa_session.rs` → Sidecar | Sidecar `core/task_rules.ts` 归一化后注入提示词 + done 闸门 | 缺省即不改变原行为 | 规则里的「代码」只支持选择器/文本，**禁止执行用户脚本**；附件禁止取 OTP |
+
+### 3.5 聊天模式面（独立产品面，不属于右栏工作区）
+
+| 组成 | 内容 | 禁止 |
+|------|------|------|
+| 入口 | 顶栏「聊天」→ `ChatModeModal`；总开关 `chat_mode.enabled`（默认关，Host 运行时校验，关即停调度、不留定时器）；状态带同一键一键开关 | 默认启动；混进右栏；只在 UI 拦运行时放行；在 Agent/Ai Chat 输入框塞「去用聊天模式」 |
+| 联系人 | 勾选会话列表为主路径（自动读一次 → 勾选 →「保存为要聊的人」）；手填降级为折叠高级项。片内还可**自动发现未读/新人**并入（勾选名单≠唯一可聊对象）。没指定对象且开了「当前窗口」：只用已开着的聊天标签（只读+只打字） | 猜点；未指定且未开当前窗口就启动；把任意链接当联系人 |
+| 多环境 | `targetsByEnv`；视图列**运行中 + 已配置过目标的已停环境**（已停可查看/清记忆，不可开值守）；勾选＝保存/值守范围 | 只列 running 导致关浏览器后「没人了」；静默丢停掉的环境 |
+| 上下文 | `browser-profiles/profile-{id}/chat_context/{site}/{contact}/`（随环境删） | 落 OTP；与 `agent_fs` 混用；放全局目录串号 |
+| 节奏 | **主路径**=短复查持续值守 + 「自动聊天」开场/回话；对方没回时**只盯守不催**（主动追发已下线）。夜间静默可配。开场只认 `autoReply`（`isColdOpening`） | 假设置（界面还有追发开关）；把开场并进已下线的回访通道 |
+| 视图 | 状态带 → 左设定 / 右运行；联系人卡：阶段、接管、「自动聊天」、收发、流水、续盯；设置**叠在快照之上**（点完立刻可见） | 复用 Agent 监视分组；OTP 明文；藏排队/挂起；假追发开关 |
+| 事件 | 顶层 `type` 恒为 `chat_state`，语义进 `kind` | 语义 `type` 顶掉顶层；按 `chat_` 前缀猜 |
+| 清理 | `purge_chat_context`（全/环境/联系人）；清联系人须同步摘快照 `takeover`/stage | 只清全部；跑着还清 |
 
 ---
 
@@ -310,12 +493,13 @@ AppLayout
 ### 4.1 选型顺序（强制）
 
 1. **配置** `sidecar/config/*.json`（词表、风险、策略阈值、HITL 模板）  
-2. **Skill** `sidecar/agent_skills/*/SKILL.md`（领域阶段、流程手册）  
-3. **适配器**（如 `otp/` 新 provider、captcha 策略项）  
-4. **薄封装模块**（`core/`、`page_pipeline/`、独立 `*_engine.ts`）  
-5. **最后才动** `bu_agent/service.ts` 主循环 / Host 会话内核  
+2. **站点描述符** `sidecar/connectors/<id>.json`（聊天选站层；新站点一律先走这里，见 §0.4 / §4.2）  
+3. **Skill** `sidecar/agent_skills/*/SKILL.md`（领域阶段、流程手册）  
+4. **适配器**（如 `otp/` 新 provider、captcha 策略项、`descriptor/composer.ts` / `manifest.ts` 里新增的**固定枚举**原语）  
+5. **薄封装模块**（`core/`、`page_pipeline/`、独立 `*_engine.ts`）  
+6. **最后才动** `bu_agent/service.ts` 主循环 / Host 会话内核  
 
-能不改主循环就不改。新增站点或流程 = 配置 + Skill + 适配器，**不是**核心 `if (site === …)`。
+能不改主循环就不改。新增站点或流程 = 配置 + **描述符** + Skill + 适配器，**不是**核心 `if (site === …)`。
 
 ### 4.2 需求 → 落点
 
@@ -340,6 +524,12 @@ AppLayout
 | 外部程序传数据（Python/JSON） | `src-tauri/src/data_api.rs`（独立 token + 回环 + Host 校验 + `deny_unknown_fields`）→ `fill_sidecar::execute_external_fill` → Sidecar `external_fill`（字段名闸门 `core/external_fill_gate.ts`） | 接受动作/脚本/命令；开读接口；让外部程序灌支付或一次性凭证字段（R1/R2）；默认开 |
 | 内核/指纹/代理/启停 | CloakBrowser + `browser_manager` / `browser_launcher` / CDP | 引入 Puppeteer/Selenium/第二启动栈 |
 | 引擎互斥 | `engine_mutex` + Host `RpaSessionManager` | 新命令绕过互斥 |
+| 聊天值守 / 会话 / 节奏 / 先听后说 | `core/web_chat/`（engine · cadence · turn_intent · wait · …）· `bu_agent/chat_*.ts` | 在 `chat_engine` / `bu_agent` 步进里再造；截图当等待；盖话不重读 |
+| **聊天站点对接（加站点 = 加描述符，不写代码）** | builtin `sidecar/connectors/<id>.json` · learned **该环境自己的** `<userDataDir>/connectors/_learned/<siteKey>.json` + `_meta-<siteKey>.json`（随环境删除一并清掉）· 运行时 `core/web_chat/descriptor/`（registry 选站 + manifest 严格校验 + health 熔断 + dom_connector 解释执行 + composer 出站闸门 + page_agent 页内哨兵）· 发现流水线 `core/web_chat/discovery/`（capture → infer → verify → 修正回路 → 落盘 / decision / spend）· Host `src-tauri/src/chat_connector.rs`（`chat_connector_status` / `chat_connector_delete` / `chat_learn_site`）· 一次性 CLI `sidecar/src/chat_connector_cli.ts`（无浏览器、0 token）· 设置「聊天」Tab「站点支持」区块 | 为某站改核心引擎（R4）；描述符里写脚本 / 用 `eval` / `new Function`（R8）；出站绕输入框（R8）；把 HTML 原文喂模型（坑族 J）；分析与采集不占 `engine_mutex`（S5）；宿主自己解析描述符 / 拼文件名（坑族 J）；删掉通用模式兜底 |
+| 聊天页面就绪门禁 / 未指定对象用当前窗口 | `core/web_chat/site_detect.ts`（`decideChatReady`）· `bu_agent/chat_actions.ts`（`waitForChatReady` · `resolveCurrentConversation`）· `chat_session.ts`（`waitPageReady` · `resolveTargets`）· 设置键 `chat_mode.useCurrentWindow` | 用 `networkidle` 当就绪信号；目标为空就一律拒绝启动，或反过来随手挑一个标签；导航/新开/关掉用户的标签 |
+| 聊天专用标签（一个环境一个 · 跨 sidecar 重启认领） | `bu_agent/chat_actions.ts`（`ensureChatPage` · `findOwnChatTab` · `markOwnChatTab`＝页级 `addInitScript`）· `isOwnChatTab` 只用于认领/降权，不硬排除 | 劫持用户当前标签；用 `evaluate` 打持久标记；每片新开一个窗口 |
+| 聊天日志与视图 | `chat_state` 事件 · `src/components/ChatMonitorView.tsx` | 复用 `agentMonitorView` 文本分组 |
+| 聊天缓存清理 | `src-tauri/src/chat_context.rs` · `purge_chat_context` | 只清全部、无法按联系人 |
 
 ### 4.3 Sidecar 命令边界（Host ↔ Sidecar）
 
@@ -391,6 +581,14 @@ AppLayout
 - **唯一收件箱**：`InterventionCenterProvider` + Panel/Modal。  
 - 新增人工确认类型：接入同一 inbox（confirm / ask / handover），禁止另起一套全局弹窗抢焦点。
 
+### 5.7 聊天模式 UI 铁律
+
+- 独立入口与视图；不挂右栏日志流，不复用 Agent 监视分组。
+- 日志只记聊天相关事（读/发/阶段/打断/意图闸/回访/看门狗）；禁全景、控件编号、验证码细节。
+- 每联系人一卡：阶段 / 接管 / 两开关 / 收发 / 流水；设置叠在快照上（点完立刻可见）。
+- 清理是一等按钮（全局 + 每联系人）；删前确认。
+- 不显示 OTP 明文；静音项可审计。
+
 ---
 
 ## 6. AI 改码行为 — 每次强制
@@ -410,9 +608,10 @@ AppLayout
 至少自检：
 
 - [ ] §1 红线（支付前停、不编造码/token、不改指纹过检、核心无站点脚本、网页邮箱非默认、人设不接回自动填表）  
+- [ ] R8（描述符**只声明不脚本**、出站**只走输入框**、等值校验失败**即取消**、页内代理**成对销毁**且**不吞用户回车**、机器自检**无人工确认关卡**、**无每日回复上限**、不做花费自动停机）  
 - [ ] §2 回退（Ai Chat 主名、无 RPA 面板、无提取/全景开关列、附件不取码、Arbiter 可拦截）  
 - [ ] §5 UI 铁律（词典、HITL 单收件箱、采集在 Ai Chat 可见）  
-- [ ] §0.5.3 同类坑未复发（字符串匹配、瞬时回读、失败编造、借 BUG 重构）
+- [ ] §0.5.3 同类坑未复发（字符串匹配、瞬时回读、失败编造、借 BUG 重构、**坑族 J：HTML 喂模型 / 描述符夹脚本 / 出站绕输入框 / 闸门吞回车 / 系统消息与附件误判 / 打包漏 connectors / 分析不占互斥**）
 
 推荐 Grep（可直接复制）：
 
@@ -423,7 +622,9 @@ RpaTemplatePanel|SaveTemplateModal|智能填表|Ai Chat|元素提取|全景截�
 arbiter|plan_expects|completion_evidence|deliverable_verify|maxSteps|done\(success
 puppeteer|selenium|webdriver|AllPagesClosedError|fill_verify|isConnected
 results\.md|secret_store|DPAPI|err\.message\.includes
-```
+eval\(|new Function|page_fn|connectors/_learned|connectors/|descriptor/composer|descriptor/registry|page_agent|chat_connector
+maxPerDay|minSendInterval|readDelay|每日上限|autoStop|costHardStop
+turn_intent|peekNovelUnanswered|pendingTexts|LIVE_REPLY_```
 
 ---
 
@@ -446,6 +647,13 @@ results\.md|secret_store|DPAPI|err\.message\.includes
 - 考虑端口池、席位/License、资源竞争、取消与销毁。  
 - 对外 Type/IPC 契约保持兼容；内部可优化。  
 - 免费内核 AI 受限等策略跟现有 `kernelPolicy` / License，不要另写一套互相打架的提示。
+
+### 7.4 四种执行形态的边界（对应 §0.4）
+
+1. 每种形态有自己的引擎文件与循环；**禁止跨形态借用循环**（Agent 循环、回放循环、聊天相位机互不调用）。
+2. 跨形态只允许复用**底层原语**（§0.4 列表）。新增共享能力应下沉为原语，而不是让一种形态调用另一种形态的引擎。
+3. 需要 bu_agent 的 `ActionContext` / `EvidenceLedger` / deliverable 账本才能用的能力，**不得**被非 Agent 形态强行借用；应改为直接调用其底层函数（如 `resolveGateway` / `solveCaptcha` / HITL emitters）。
+4. 同一环境仍受同一互斥约束（S5）：聊天模式必须登记进 `engine_mutex`（`chatRunning`），不得无锁并行。
 
 ---
 
@@ -485,59 +693,49 @@ results\.md|secret_store|DPAPI|err\.message\.includes
 
 ## 10. 关键路径速查
 
+> 细节行为以 §0.5 / §1 / §3–§5 为准；本表只指路，不复述纪律。
+
 | 主题 | 路径 |
 |------|------|
-| 本宪法 | `.cursorrules` |
-| 检查提示词（只读审计） | `docs/检查提示词.MD`（可缺失；缺失时用 §0.5.5） |
-| 升级计划（仅对照） | `docs/L4-AGENT-UPGRADE-PLAN.md` |
-| 回放 / 数据集 / 剪贴板 / 外部 API（**计划 + 契约，已实现 P1–P7**） | `执行计划.md`（§4.6 预检单 · §7 API 契约 · §9 阶段 · §11 验收；需求原文亦称 `API对接说明.md`） |
-| 数据集解析 / 变量映射 / 逐轮目标替换 | `src/lib/replayDataset.ts` · `sidecar/src/core/dataset_parse.ts` · `ReplayDatasetEditor.tsx` · `replay_job.rs`（`interpolate_plan_row_goal`） |
-| Agent 主循环 / 活页 | `sidecar/src/bu_agent/service.ts`（`pickLivePage`、`AllPagesClosedError`） |
-| 系统提示词 | `sidecar/src/bu_agent/system_prompt_text.ts` |
+| 本宪法 / 检查 / 升级计划 / 回放契约 | `.cursorrules` · `docs/检查提示词.MD` · `docs/L4-AGENT-UPGRADE-PLAN.md` · `执行计划.md` |
+| 数据集解析 | `src/lib/replayDataset.ts` · `sidecar/src/core/dataset_parse.ts` · `replay_job.rs` |
+| Agent 主循环 / 提示词 / 动作闸门 | `bu_agent/service.ts` · `system_prompt_text.ts` · `actions.ts` |
 | Arbiter / Expects | `arbiter.ts` · `plan_expects.ts` · `expects_soft_gate_policy.ts` |
-| 动作与闸门 | `bu_agent/actions.ts` |
-| 填值与回读 | `core/action_gateway.ts` · `core/fill_verify.ts` · `fill_interactions.ts` |
-| 验证码 | `bu_agent/captcha_*.ts` · `slider_captcha.ts` · `animated_captcha.ts` · `point_select/` |
-| OTP / 邮箱短信 | `sidecar/src/otp/` |
-| 人工凭证 / HITL 策略 | `core/human_credential.ts` · `hitl_policy.ts` · `hitl_copy*.ts` |
-| 完成证据 | `core/completion_evidence.ts` · `deliverable_verify.ts` |
-| 进度/日志 | `json-logger.ts`（`agentProgress`） |
-| Skills | `sidecar/agent_skills/*/SKILL.md` |
-| 配置词表 | `sidecar/config/*.json` |
-| Chat | `chat_engine.ts` · `chat_intent_router.ts` |
-| 人设现生成 | `persona_engine.ts` |
-| 页面管线 | `page_pipeline/` · `interactive_elements.ts` |
-| 引擎互斥 | `engine_mutex.ts` |
-| 侧栏壳 | `src/components/AIFillDrawer.tsx` |
-| Ai Chat UI | `AIChatPanel.tsx` |
-| 采集面板 | `ScraperDataPanel.tsx` |
-| 「规则」窗口（规则 + 人设）/ 规则库数据层 | `AgentRulesModal.tsx` · `lib/agentRules.ts`（`fixedFields` / `personaEffectiveFixedFields` / `personaTemplateValues` / `resolveGoalMentions`） · Host `global_settings.agent_personas` |
-| 回放 @人设 / @规则（目标编辑 → 载荷 → 硬校验） | `BatchReplaySandbox.tsx`（可编辑目标 + @菜单） · `tauri.ts`（`taskRules` / `taskPersona` / `personaData`） · `src-tauri/src/rpa_session.rs` · `sidecar/src/index.ts`（`handleTrajectoryReplay`） · `core/task_rules.ts` |
-| 规则运行时（归一化 / brief / DOM·视觉校验 / 命中态 / 硬约束闸门） | `sidecar/src/core/task_rules.ts` |
-| 规则回归测试（三态 / 诊断 / 点击台账 / 钉值 / hitl） | `sidecar/tests/task-rules.mjs` · `sidecar/tests/task-roles.mjs` |
-| Agent 输入框附件（与 Ai Chat 共用） | `ChatComposerAttachments.tsx` |
-| 轨迹记忆 | `TrajectoryMemoryPanel.tsx` · `BatchReplaySandbox.tsx` · `ReplayDatasetEditor.tsx` · `AgentRunHistoryPanel.tsx` |
-| RPA 模板面板（勿挂回 Ai Chat） | `RpaTemplatePanel.tsx` |
-| 环境列表 | `ProfileTable.tsx` |
-| 外部数据 API（Python/JSON，只传数据） | `data_api.rs` · `fill_sidecar::execute_external_fill` · `sidecar/src/core/external_fill_gate.ts` · `docs/外部数据API.md` · 设置「常规设置」Tab |
-| 环境编辑（已无人设栏） | `ProfileFormModal.tsx` |
-| HITL UI | `InterventionCenter*.tsx` · `Agent*Modal.tsx` |
-| 设置 | `SettingsModal.tsx` · `settings/*` |
-| 样式 | `src/styles/globals.css` |
-| 前端桥接 / 队列 | `src/lib/agentGoalRouter.ts` · `agentHumanQueue.ts` · `tauri.ts` |
-| Host 密钥 / DB / 会话 | `secret_store.rs` · `db.rs` · `rpa_session.rs` · `browser_manager.rs` |
+| 填值回读 | `core/action_gateway.ts` · `fill_verify.ts` · `fill_interactions.ts` |
+| 验证码 | `bu_agent/captcha_*.ts` · `slider_captcha.ts` · `point_select/` |
+| OTP / 凭证 / HITL | `otp/` · `human_credential.ts` · `hitl_policy.ts` · `hitl_copy*.ts` |
+| 完成证据 / 任务契约 | `completion_evidence.ts` · `deliverable_verify.ts` · `task_contract.ts` · `tests/task-contract.mjs` |
+| 规则 / 人设 | `core/task_rules.ts` · `persona_engine.ts` · `AgentRulesModal.tsx` · `lib/agentRules.ts` |
+| 回放 @人设/@规则 | `BatchReplaySandbox.tsx` · `rpa_session.rs` · `index.ts`（`handleTrajectoryReplay`） |
+| Skills / 词表 / 互斥 / 日志 | `agent_skills/*/` · `config/*.json` · `engine_mutex.ts` · `json-logger.ts` |
+| Ai Chat / 采集 / 桥接 | `AIChatPanel.tsx` · `ScraperDataPanel.tsx` · `agentGoalRouter.ts` · `chat_engine.ts` |
+| 侧栏 / 环境 / HITL UI / 设置 / 样式 | `AIFillDrawer.tsx` · `ProfileTable.tsx` · `InterventionCenter*` · `SettingsModal.tsx` · `globals.css` |
+| 外部数据 API | `data_api.rs` · `external_fill_gate.ts` · `docs/外部数据API.md` |
+| Host 内核 | `secret_store.rs` · `db.rs` · `rpa_session.rs` · `browser_manager.rs` · `tauri.ts` |
+| **聊天引擎** | `core/web_chat/`：`engine` · `engine_types` · `phases` · `state` · `outbox` · `cadence` · `turn_intent` · `pacing` · `slice_limits` · `wait` · `site_detect` · `conversation_extract` · `chat_memory` · `chat_prompt` · `chat_redaction` · `dedupe` · `context_store` · `hash32` |
+| **聊天装配 / 原语** | `bu_agent/chat_session.ts`（只装配）· `chat_session_config.ts`（`takeoverKeyOf` 唯一）· `chat_session_descriptor.ts` · `chat_session_context.ts` · `chat_actions.ts` · `chat_contacts.ts` · `chat_learn.ts` |
+| **聊天描述符** | builtin `sidecar/connectors/<id>.json` · learned `<userDataDir>/connectors/_learned/` · `descriptor/{registry,manifest,composer,dom_connector,page_agent,facts,map_rows,threads,health,types}` · `discovery/*` · Host `chat_connector.rs` · CLI `chat_connector_cli.ts` · UI `ChatSiteSupportSection.tsx` |
+| **聊天通用兜底** | `config/chat_sites.json` · `site_detect.ts`（永不删） |
+| **聊天视图 / 设置** | `chat/ChatModeModal.tsx` · `contactCard.tsx` · `chatEventLabels.ts` · `ChatModeSettingsTab.tsx` · `lib/chatModeSettings.ts` · Host `db.rs`（`ALLOWED_SETTING_KEYS` + seed） |
+| **聊天 Host** | 命令 `chat_start/stop/status` · `chat_list_contacts` · `get_chat_thread_messages` · 调度 `chat_patrol.rs` · 上下文 `chat_context.rs`（含 `forget_snapshot_contacts`） |
+| **聊天短复查（现行常量）** | `cadence.ts`：`LIVE_REPLY_HOT_MINUTES=60` · `LIVE_REPLY_HOT_STEP_MS=5s` · `LIVE_REPLY_COOL_LADDER_MINUTES=[1,2,5,10,15]` · `LIVE_REPLY_WINDOW_MINUTES=1440` · `PENDING_REPLY_LADDER_SECONDS` · `liveReplyRecheckAt` |
+| **聊天先听后说** | `turn_intent.ts` · `engine.ts`（`peekNovelUnanswered` / `collectInboundBurst` / `pendingTexts`）· 测试 `chat-turn-intent.mjs` · `chat-engine.mjs` |
+| **聊天回归** | `tests/chat-{mode,state,cadence,engine,prompt,turn-intent,context,memory,protocol,settings-parity,connector,descriptor,pacing}.mjs` |
+| **聊天技能** | `agent_skills/web-chat/SKILL.md` |
 
 ---
 
-## 11. 总纲 — 十条铁律
+## 11. 总纲 — 铁律（12 条）
 
-1. **先定位再动刀**：修 BUG 走 §0.5 症状表 → 根因 → 最小 diff；一次只动一类问题。
-2. **用 CloakBrowser 做浏览器**：不引 Puppeteer / Selenium / 第二启动栈。
-3. **站点差异走配置 + Skill + 适配器**：核心循环不写死站点。
-4. **三层过验证码**：Layer 1 内置求解 → Layer 2 已配置通道 → Layer 3 HITL；失败禁止编造坐标 / token / OTP。
-5. **用 Arbiter / Plan Expects 纠偏**：监督层必须能拦截，不是仅日志。
-6. **HITL 守两处**：支付与拿不到的码；**永远不要无人支付**，不冒充已付。
-7. **人设每轮现生成**：用户「规则」的人设自持「固定」字段；Agent 任务与回放只在写 `@人设名` 时生效，回放目标还能 `@规则名` 让收尾按规则硬校验。
-8. **步数只是保险丝**（默认 200 / 硬顶 400）：不是完成配额。
-9. **右栏中 Tab 是 Ai Chat**（可附件、可分析采集、底栏可选填表、**不挂 RPA 模板**）；**浏览器 Agent** 可输入附件、底部「规则」窗口管完成条件 / 提醒 / 人工介入与人设。
-10. **规则由机器硬校验**：但不执行用户脚本、不越过支付与凭证红线；**提取与全景默认开且无开关**；禁止失败编造与脆弱字符串匹配。
+1. **先定位再动刀**：修 BUG 走 §0.5 → 根因 → 最小 diff；一次一类问题。
+2. **用 CloakBrowser**：不引 Puppeteer / Selenium / 第二启动栈。
+3. **站点差异走配置 + 描述符 + Skill + 适配器**：核心不写死站点；**加站 = 加声明 JSON**（R8）。
+4. **三层过验证码**：L1 内置 → L2 已配置通道 → L3 HITL；失败禁止编造坐标 / token / OTP。
+5. **Arbiter / Expects 可拦截**，不是仅日志。
+6. **HITL 守支付与拿不到的码**；永远不要无人支付，不冒充已付。
+7. **人设**：规则库自持「固定」字段；只在 `@人设名` 时生效；回放可再 `@规则名` 硬校验收尾。
+8. **步数只是保险丝**（默认 200 / 硬顶 400），不是完成配额。
+9. **右栏中 Tab = Ai Chat**（可附件、可采集、底栏可选填表、**不挂 RPA 模板**）；Agent 底部「规则」管完成条件与人设。
+10. **规则机器硬校验**：不执行用户脚本、不越过支付/凭证红线；提取/全景恒开无开关；禁止失败编造与脆弱字符串匹配。
+11. **聊天 = 第四种执行形态**：显式开关；相位机 + 事件驱动；静音零截图；独立入口/视图/`chat_state`；占用进互斥；停止先摘忙标记。持续值守 + 秒级短复查（现行：热 60min/5s，冷 `[1,2,5,10,15]` min，窗 24h）；先听后说（连发可打断、`turn_intent` 硬闸、`pendingTexts` 跨片续发）；未读可自动发现；异议不强制停手（支付/OTP 除外）；开场 ≠ 回访；站点未就绪不读不说；没指定对象才用当前聊天窗。
+12. **描述符只声明不脚本**（R8）：出站只走输入框、等值校验 fail-closed、页内代理成对销毁且不吞用户回车、机器自检无人工关卡、AI 只吃结构化事实、失败回落通用模式、学习与值守共一把锁。

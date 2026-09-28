@@ -7,7 +7,13 @@
  * 红线：附件图片只用于 vision/摘要，**禁止**当短信/邮箱 OTP 取码依据（B7 / R2）。
  */
 import { X } from "lucide-react";
-import { useRef, type ChangeEvent, type ClipboardEvent } from "react";
+import {
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent as ReactDragEvent,
+} from "react";
 
 import type { ChatAttachmentPayload } from "../types";
 
@@ -142,8 +148,12 @@ export function ChatAttachmentChips({
 }
 
 /**
- * 附件选择器：返回隐藏 file input 的 ref 与现成的 onChange / onPaste 处理器。
+ * 附件选择器：返回隐藏 file input 的 ref、现成的 onChange / onPaste 处理器，
+ * 以及「把文件拖进输入区」所需的 drop 处理器与高亮态。
  * 调用方只负责把 attachments 与 onAttachmentsChange 传进来。
+ *
+ * 注意：桌面端要能收到 HTML5 拖放事件，Tauri 窗口必须设 `dragDropEnabled: false`
+ * （见 src-tauri/tauri.conf.json）——默认的宿主级文件拖放会在 WebView 之前拦掉事件。
  */
 export function useChatAttachmentPicker(input: {
   attachments: ChatAttachmentPayload[];
@@ -152,6 +162,9 @@ export function useChatAttachmentPicker(input: {
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { attachments, onAttachmentsChange, onAttachError } = input;
+  const [dropActive, setDropActive] = useState(false);
+  // dragenter/leave 会随着子元素反复触发，用计数抵消，否则高亮会闪。
+  const dragDepthRef = useRef(0);
 
   const pushAttachments = async (files: FileList | File[]) => {
     if (!onAttachmentsChange) {
@@ -164,9 +177,11 @@ export function useChatAttachmentPicker(input: {
   };
 
   const onFilePicked = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
+    // 必须先快照成数组：Chromium 里 `input.value = ""` 会清空**同一个** FileList 对象，
+    // 直接传 event.target.files 会拿到空列表，表现为「选完文件后没有任何反应」。
+    const files = event.target.files ? Array.from(event.target.files) : [];
     event.target.value = "";
-    if (files) {
+    if (files.length > 0) {
       void pushAttachments(files);
     }
   };
@@ -191,5 +206,48 @@ export function useChatAttachmentPicker(input: {
     }
   };
 
-  return { fileInputRef, onFilePicked, onPaste };
+  // 只接管「拖文件」；拖文本 / 拖选区一律放行，避免抢掉页面自身的拖放行为。
+  const dragHasFiles = (event: ReactDragEvent<HTMLElement>) =>
+    Array.from(event.dataTransfer?.types ?? []).includes("Files");
+
+  const dropHandlers = {
+    onDragEnter: (event: ReactDragEvent<HTMLElement>) => {
+      if (!onAttachmentsChange || !dragHasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setDropActive(true);
+    },
+    onDragOver: (event: ReactDragEvent<HTMLElement>) => {
+      if (!onAttachmentsChange || !dragHasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    },
+    onDragLeave: (event: ReactDragEvent<HTMLElement>) => {
+      if (!onAttachmentsChange || !dragHasFiles(event)) {
+        return;
+      }
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) {
+        setDropActive(false);
+      }
+    },
+    onDrop: (event: ReactDragEvent<HTMLElement>) => {
+      if (!onAttachmentsChange) {
+        return;
+      }
+      dragDepthRef.current = 0;
+      setDropActive(false);
+      const files = event.dataTransfer?.files;
+      if (files && files.length > 0) {
+        event.preventDefault();
+        void pushAttachments(files);
+      }
+    },
+  };
+
+  return { fileInputRef, onFilePicked, onPaste, dropActive, dropHandlers };
 }

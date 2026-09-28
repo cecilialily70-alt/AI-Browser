@@ -1,0 +1,155 @@
+{
+  "id": "telegram-web-k",
+  "version": 1,
+  "source": "builtin",
+  "match": {
+    "hostPattern": "^web\\.telegram\\.org$",
+    "pathPattern": "^/k(?:/|$)"
+  },
+  "ready": {
+    "allOf": [
+      "#column-center",
+      "#column-left"
+    ],
+    "absent": [
+      "#auth-pages",
+      ".auth-pages",
+      ".qr-container"
+    ]
+  },
+  "peer": {
+    "fromAttribute": {
+      "attr": "data-peer-id",
+      "pattern": "^(-?\\d{4,20})$",
+      "group": 1
+    },
+    "fallbackAttrs": [
+      "data-peer-id",
+      "data-chat-id"
+    ],
+    "fallbackHeader": {
+      "selectors": [
+        "#column-center .peer-title",
+        "#column-center .chat-info .peer-title",
+        "#column-center header .peer-title"
+      ],
+      "digitsOnly": false
+    }
+  },
+  "rows": {
+    "selector": ".bubble[data-mid], .bubbles [data-mid]",
+    "id": {
+      "attr": "data-mid",
+      "accept": [
+        "^-?\\d{1,20}$"
+      ]
+    },
+    "idPrefixDirection": null,
+    "thenTailIcons": {
+      "out": [
+        ".bubble.is-out",
+        ".is-out"
+      ],
+      "in": [
+        ".bubble.is-in",
+        ".is-in"
+      ]
+    },
+    "thenCheckIcons": {
+      "out": [
+        ".bubble.can-have-tail.is-out"
+      ]
+    },
+    "exclude": [
+      ".service-msg",
+      ".bubble.service",
+      ".bubble.is-date"
+    ],
+    "textSelectors": [
+      ".message",
+      ".translatable-message",
+      ".text-content"
+    ],
+    "attachmentSelectors": [
+      ".media-container",
+      ".video-time",
+      ".audio",
+      ".document",
+      ".sticker",
+      ".voice-message"
+    ],
+    "quotedReplySelectors": [
+      ".reply",
+      ".reply-markup",
+      ".bubble-quote"
+    ],
+    "timeSelectors": [
+      ".time",
+      ".time-inner",
+      ".message-time",
+      ".bubble-time",
+      "time"
+    ],
+    "retractedSelectors": [
+      ".bubble.is-deleted",
+      ".service-msg.is-deleted"
+    ],
+    "tokenAttrs": [
+      "class"
+    ],
+    "insertedAtTopMeansOlder": false
+  },
+  "composer": {
+    "selectors": [
+      ".new-message-wrapper div.input-message-input[contenteditable=\"true\"]",
+      "#column-center div.input-message-input[contenteditable=\"true\"]",
+      "#column-center div[contenteditable=\"true\"][role=\"textbox\"]"
+    ],
+    "input": {
+      "method": "typeKeys",
+      "verify": "equals",
+      "retries": 2,
+      "failClosed": true
+    },
+    "send": {
+      "selectors": [
+        "button.btn-send",
+        ".btn-send",
+        "button[aria-label*=\"send\" i]"
+      ],
+      "method": "enterOnce",
+      "elseClick": true
+    }
+  },
+  "history": {
+    "scrollRoot": [
+      "#column-center .bubbles",
+      "#column-center .scrollable",
+      "#column-center"
+    ],
+    "batchLimit": 80,
+    "concurrency": 4
+  },
+  "threads": {
+    "itemSelectors": [
+      "#column-left .chatlist-chat[data-peer-id]",
+      "#column-left .chatlist a[data-peer-id]",
+      "#column-left [data-peer-id]"
+    ],
+    "keyAttr": "data-peer-id",
+    "hrefAttr": "href",
+    "labelSelectors": [
+      ".peer-title",
+      ".user-title",
+      "span[dir=\"auto\"]"
+    ],
+    "unreadSelectors": [
+      "[class*=\"unread\"]",
+      ".badge"
+    ],
+    "limit": 60
+  },
+  "presence": {
+    "typing": []
+  }
+}

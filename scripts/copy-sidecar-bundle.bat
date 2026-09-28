@@ -46,5 +46,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM - connectors\ : 站点描述符（内置站点的声明式配置；缺了它所有站点都会退回通用读法，
+REM   而且「一个内置目录都不存在」会在设置里被如实标红 —— 典型症状是「聊天读得到但总读错」）
+echo [Pack] copying sidecar connectors...
+xcopy /E /I /Y "%SRC%\connectors" "%TARGET%\connectors\" >nul
+if errorlevel 1 (
+  echo [ERROR] failed to copy sidecar\connectors
+  exit /b 1
+)
+
 echo [OK] sidecar bundle copied to %TARGET%
 exit /b 0

@@ -1,0 +1,30 @@
+{
+  "id": "sample-bad-keys",
+  "version": 1,
+  "note": "这个字段不在白名单里：必须报未知字段，而不是被静默忽略",
+  "match": { "hostPattern": "(^|\\.)bad-keys\\.example$", "pathPattern": null },
+  "ready": { "allOf": ["#panel"], "absent": [] },
+  "peer": { "fromAttribute": null, "fallbackAttrs": [], "fallbackHeader": null },
+  "rows": {
+    "selector": "#panel [data-row]",
+    "id": null,
+    "idPrefixDirection": null,
+    "thenTailIcons": null,
+    "thenCheckIcons": null,
+    "exclude": [],
+    "textSelectors": ["[data-text]"],
+    "attachmentSelectors": [],
+    "quotedReplySelectors": [],
+    "retractedSelectors": [],
+    "tokenAttrs": [],
+    "insertedAtTopMeansOlder": true,
+    "postProcess": "runSendHook"
+  },
+  "composer": {
+    "selectors": ["#composer"],
+    "input": { "method": "selectAllBeforeInput", "verify": "equals", "retries": 3, "failClosed": true },
+    "send": { "selectors": [], "method": "enterOnce", "elseClick": true }
+  },
+  "history": { "scrollRoot": [], "batchLimit": 40, "concurrency": 2 },
+  "presence": { "typing": [] }
+}

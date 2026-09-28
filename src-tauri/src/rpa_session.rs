@@ -32,6 +32,8 @@ pub const AGENT_HANDOVER_EVENT: &str = "agent-handover-required";
 pub const AGENT_TASK_BLOCKED_EVENT: &str = "agent-task-blocked";
 pub const AGENT_TASK_RESUMED_EVENT: &str = "agent-task-resumed";
 pub const AGENT_STATE_EVENT: &str = "agent-state";
+/// P7：聊天模式进度 —— **独立事件**（B8 / §5.7），刻意不走 `agent-state`
+pub const CHAT_STATE_EVENT: &str = "chat-state";
 /// P4.4：Agent 运行中 Open Tabs 只读快照
 pub const AGENT_OPEN_TABS_EVENT: &str = "agent-open-tabs";
 pub const AGENT_TRAJECTORY_EVENT: &str = "agent-trajectory-saved";
@@ -41,6 +43,17 @@ pub const SCRAPER_DATA_EVENT: &str = "scraper-data-collected";
 const SIDECAR_RECV_TIMEOUT: Duration = Duration::from_secs(60);
 /// Agent 循环可能较长（含人工确认），单独放宽
 const AGENT_RECV_TIMEOUT: Duration = Duration::from_secs(600);
+/// 聊天一片的时长区间与结算宽限。
+///
+/// **单片上限 30 分钟**：长对话 + 慢站点（页内等待、LLM 起草、回读对账）本来就可能跑很久，
+/// 10 分钟会把正常但慢的片判成超时。上限只防「永不收工」的片，靠看门狗兜底。
+pub const CHAT_SLICE_MIN_MS: u64 = 15_000;
+pub const CHAT_SLICE_MAX_MS: u64 = 1_800_000;
+/// 单片默认时长（与前端 `DEFAULT_CHAT_MODE_SETTINGS.sliceMs` 一致）
+pub const CHAT_SLICE_DEFAULT_MS: u64 = 90_000;
+/// 收尾宽限：时间盒之外还允许引擎把「落盘 / 回读对账 / 写快照」收干净。
+/// 等待上限必须**由这一片的真实盒长算出来** —— 写死一个比盒长还短的值会把正常片判成超时。
+const CHAT_SLICE_SETTLE_GRACE: Duration = Duration::from_secs(180);
 /// kill 之后收尸的宽限期：正常会立即返回，仅防 kill 失败时把调用方挂死
 const SIDECAR_EXIT_GRACE: Duration = Duration::from_secs(5);
 
@@ -468,6 +481,99 @@ fn spawn_stdout_pump(
                                     .to_owned(),
                                 actions: None,
                                 wait_id,
+                            },
+                        );
+                    }
+                    continue;
+                }
+                if event_type == Some("chat_state") {
+                    /*
+                     * P7：聊天模式进度 → 前端「聊天」视图（独立事件，B8 / §5.7）。
+                     *
+                     * 唤醒规则：**只有带 `waitId` 的那一行**才结束 `chat_start` 的 send_and_wait。
+                     * 同片内的相位更新（`kind: chat_phase` / `chat_read` …）没有 waitId，必须原样
+                     * 转发给视图而**不能**唤醒调用方 —— 否则一次切片会被误判成「已经收工」。
+                     */
+                    let wait_id = value
+                        .get("waitId")
+                        .or_else(|| value.get("wait_id"))
+                        .and_then(|entry| entry.as_str())
+                        .map(str::to_owned)
+                        .filter(|id| !id.trim().is_empty());
+
+                    let mut payload = value.clone();
+                    if let Some(object) = payload.as_object_mut() {
+                        object.insert("profileId".to_owned(), json!(profile_for_stdout));
+                    }
+                    let _ = app_stdout.emit(CHAT_STATE_EVENT, payload);
+
+                    if let Some(wait_id) = wait_id {
+                        // 这几种 stopReason 是「没跑成」而不是「跑完一片」，如实标 failed。
+                        //
+                        // `no_targets`（本次没有可聊对象：没勾选、也没打开聊天窗口）也标 failed ——
+                        // **理由与其它几种不同**：它不是引擎坏了，而是「这次没活可干」，
+                        // 标 failed 只为让视图把片终态的 `msg`（人话原因 + 该做什么）弹给用户，
+                        // 不然用户看到的是「开始值守 → 一秒结束」而无从下手。
+                        // 调度器侧（`chat_patrol.rs`）把它算 **excusable**（不进失败计数、不挂起），
+                        // 两边口径一致：给用户看得见，但不当故障。
+                        let stop_reason = value
+                            .get("stopReason")
+                            .or_else(|| value.get("stop_reason"))
+                            .and_then(|entry| entry.as_str())
+                            .unwrap_or("")
+                            .to_owned();
+                        let failed = matches!(
+                            stop_reason.as_str(),
+                            "exception" | "engine_busy" | "no_contacts" | "no_user_data_dir" | "no_targets"
+                        );
+                        notify_waiters(
+                            &session_for_stdout,
+                            RpaRunResult {
+                                state: if failed { "failed" } else { "complete" }.to_owned(),
+                                step: value
+                                    .get("processed")
+                                    .and_then(|entry| entry.as_u64())
+                                    .unwrap_or(0) as u32,
+                                msg: value
+                                    .get("msg")
+                                    .and_then(|entry| entry.as_str())
+                                    .unwrap_or("")
+                                    .to_owned(),
+                                actions: Some(value.clone()),
+                                wait_id: Some(wait_id),
+                            },
+                        );
+                    }
+                    continue;
+                }
+                if event_type == Some("chat_contacts_list") {
+                    /*
+                     * 「读会话列表」的一次性应答（只读探针，不是值守进度）。
+                     *
+                     * 它是**协议事件**：宿主按顶层 `type` 精确匹配（不按 `chat_` 前缀猜），
+                     * 载荷即 `RpaRunResult.actions`，由 `chat_list_contacts` 命令原样交给前端。
+                     * 仍然只认带 `waitId` 的那一行 —— 唤醒凭据只有一个（§0.5.3 E）。
+                     */
+                    let wait_id = value
+                        .get("waitId")
+                        .or_else(|| value.get("wait_id"))
+                        .and_then(|entry| entry.as_str())
+                        .map(str::to_owned)
+                        .filter(|id| !id.trim().is_empty());
+                    if let Some(wait_id) = wait_id {
+                        let ok = value.get("ok").and_then(|entry| entry.as_bool()).unwrap_or(false);
+                        notify_waiters(
+                            &session_for_stdout,
+                            RpaRunResult {
+                                state: if ok { "complete" } else { "failed" }.to_owned(),
+                                step: 0,
+                                msg: value
+                                    .get("reason")
+                                    .and_then(|entry| entry.as_str())
+                                    .unwrap_or("")
+                                    .to_owned(),
+                                actions: Some(value.clone()),
+                                wait_id: Some(wait_id),
                             },
                         );
                     }
@@ -1781,12 +1887,19 @@ fn handle_agent_host_request(
                 }
             }
             match crate::db::delete_profile(&connection, target_id) {
-                Ok(()) => json!({
-                    "command": "agent_host_response",
-                    "requestId": request_id,
-                    "ok": true,
-                    "data": { "profileId": raw_id },
-                }),
+                Ok(()) => {
+                    let _ = crate::chat_context::forget_profile_chat_on_delete(
+                        app, &connection, &raw_id,
+                    );
+                    drop(connection);
+                    crate::fill_sidecar::purge_profile_user_data_dir(app, &raw_id);
+                    json!({
+                        "command": "agent_host_response",
+                        "requestId": request_id,
+                        "ok": true,
+                        "data": { "profileId": raw_id },
+                    })
+                }
                 Err(error) => fail(format!("删除环境失败：{error}")),
             }
         }
@@ -2016,6 +2129,451 @@ pub async fn abort_autonomous_agent(
         }),
     );
     Ok(())
+}
+
+/* ————————————————————————— P7 聊天模式 ————————————————————————— */
+
+/// 一个聊天目标（联系人）。Host 只**转发**用户明确给出的目标，不替用户猜「要跟谁聊」。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatContactInput {
+    pub label: String,
+    /// 会话 URL（可选）
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 列表 index（可选；与 url 至少给一个更可靠）
+    #[serde(default)]
+    pub index: Option<i64>,
+    /// 站点 key（可选；缺省由 Sidecar 的站点识别决定）
+    #[serde(default)]
+    pub site_key: Option<String>,
+}
+
+/// 「聊天」视图的一次性状态快照（不产生副作用，也不依赖 Sidecar 活着）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStatusPayload {
+    pub profile_id: String,
+    /// Host 侧是否有挂起的聊天切片（`send_and_wait` 的 waiter）
+    pub running: bool,
+    /// 浏览器环境在跑（聊天必须有活浏览器）
+    pub browser_running: bool,
+    /// 引擎快照（`chat_context/state.json`）；从没跑过则为 null
+    pub snapshot: Option<crate::chat_context::ChatRuntimeStatus>,
+    /// 每联系人索引（由磁盘上下文同步而来）
+    pub contacts: Vec<crate::chat_context::ChatThreadRow>,
+}
+
+/// 一次聊天值守片的请求（手动启动与宿主调度器**共用**同一条闸门链）。
+pub struct ChatSliceRequest {
+    pub profile_id: String,
+    pub goal: String,
+    /// 已归一化的联系人种子（`{label, siteKey, url, index}`）
+    pub seeds: Vec<Value>,
+    pub style_hint: Option<String>,
+    pub banned_words: Vec<String>,
+    pub cadence: Option<Value>,
+    /// 发送节奏护栏（同线程最小间隔 / 阅读延迟 / 抖动）。
+    /// **只读转发**：合法区间由 Sidecar 的权威解析器（`parsePacingConfig`）决定，Host 不重写一套。
+    pub pacing: Option<Value>,
+    /// 人工优先：用户在设置里为单个联系人选定的模式（原样转发，Sidecar 权威解析）
+    pub takeovers: Option<Value>,
+    /// 每联系人开关（自动回复 / 定时回访）原样转发；合法性与默认值由 Sidecar 权威解析
+    pub contact_flags: Option<Value>,
+    /// 聊天角色库（原样转发；合法性由 Sidecar 权威解析）
+    pub roles: Option<Value>,
+    /// 当前选用的角色 id（原样转发；空＝无角色）
+    pub active_role_id: Option<String>,
+    pub slice_ms: Option<u64>,
+    pub max_contacts_per_slice: Option<u32>,
+    /// 「没指定对象 → 用**当前打开的**聊天窗口」（用户显式勾选；没有它就仍然拒绝启动）
+    pub use_current_window: bool,
+}
+
+/// 把前端传来的目标归一化成 Sidecar 认识的种子（空目标即丢弃，不猜）。
+pub fn normalize_chat_contacts(contacts: Vec<ChatContactInput>) -> Vec<Value> {
+    contacts
+        .into_iter()
+        .filter_map(|contact| {
+            let label = contact.label.trim().to_owned();
+            let site_key = contact
+                .site_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .unwrap_or("unknown")
+                .to_owned();
+            let url = contact
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned);
+            if label.is_empty() && url.is_none() {
+                return None;
+            }
+            Some(json!({
+                "label": if label.is_empty() { url.clone().unwrap_or_default() } else { label },
+                "siteKey": site_key,
+                "url": url,
+                "index": contact.index,
+            }))
+        })
+        .collect()
+}
+
+/// 启动一片聊天值守的**唯一入口**（手动点击与宿主调度器共用）。
+///
+/// 闸门顺序刻意固定，且**调度器也只能走这里**，因此无法绕过任何一条：
+/// ① 目标非空（不猜对象）② 互斥（S5）③ 总开关**运行时**校验 ④ 浏览器在跑
+/// ⑤ 内核 AI 授权（免费档不给聊天开后门）⑥ 必须有可用的 AI Key 与 userDataDir。
+///
+/// **不是长任务**：Sidecar 跑完一片（默认 90s 时间盒）就让位，把 `nextWakeAt` 写进快照，
+/// 由宿主调度器（[`crate::chat_patrol`]）决定何时再拉起。
+pub async fn run_chat_slice(
+    app: &AppHandle,
+    request: ChatSliceRequest,
+) -> Result<RpaRunResult, AppError> {
+    let profile_id = request.profile_id.clone();
+    parse_profile_id(&profile_id)?;
+    let db_state = app.state::<AppState>();
+    let manager = app.state::<RpaSessionManager>();
+    let browser_manager = app.state::<crate::browser_manager::BrowserManager>();
+
+    // 没有明确目标就**不启动**：聊天模式不猜对象（§3.5「禁止猜测性点击」）。
+    // 例外：用户显式要求「没指定就用当前打开的聊天窗口」——这时由 Sidecar 在运行期
+    // 判定「当前这个标签确实是聊天页」；判不出来就如实失败，不会乱猜。
+    if request.seeds.is_empty() && !request.use_current_window {
+        return Err(AppError::Validation(
+            "聊天模式需要至少一个明确的目标（昵称 / 会话 URL），或勾选「未指定时使用当前打开的聊天窗口」"
+                .to_owned(),
+        ));
+    }
+
+    // 互斥（S5）：Agent / 回放 / 填表 / 另一次聊天在跑一律拒绝
+    if manager.is_engine_busy(&profile_id) {
+        return Err(AppError::Validation(format!(
+            "环境 #{profile_id} 正在运行 Agent / 轨迹回放 / 填表或聊天，请先让它结束（Host 级 CDP 互斥）"
+        )));
+    }
+
+    // 总开关是**运行时**闸门，不只是把按钮置灰：关掉就必须真的跑不起来（§0.5.2 / §3.5）。
+    // 解析口只有一个（`chat_patrol::chat_mode_enabled`），前端写的那份什么样，这里就读成什么样。
+    if !crate::chat_patrol::chat_mode_enabled(app)? {
+        return Err(AppError::Validation(
+            "聊天模式总开关是关闭的：请先到「设置 → 聊天」打开「启用聊天模式」".to_owned(),
+        ));
+    }
+
+    // 聊天要活浏览器才能读写会话；没有就明确说清，而不是让 Sidecar 抛个看不懂的错
+    if !browser_manager.is_running(&profile_id) {
+        return Err(AppError::Validation(
+            "聊天模式需要该环境的浏览器正在运行，请先启动环境".to_owned(),
+        ));
+    }
+
+    // 免费内核 + 151-pro 指纹：与 Agent 同一条限制（禁止成为绕过 AI 授权的后门）
+    {
+        let entitlement = crate::key_file::resolve_license_entitlement(&db_state).await?;
+        let browser_version = {
+            let connection = db_state
+                .database
+                .lock()
+                .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+            let numeric_id = parse_profile_id(&profile_id)?;
+            db::get_profile(&connection, numeric_id)?.browser_version
+        };
+        crate::kernel_policy::assert_ai_allowed_for_browser_version(
+            entitlement.is_pro,
+            &browser_version,
+        )?;
+    }
+
+    let bundle = load_rpa_runtime_bundle(&db_state, &profile_id, "{}", true, None).await?;
+    let ai = bundle.ai_settings.ok_or_else(|| {
+        AppError::Validation("AI API key is not configured in global settings".to_owned())
+    })?;
+
+    let mut command = json!({
+        "command": "chat_start",
+        "profileId": profile_id,
+        "ai": ai,
+        "contacts": request.seeds,
+        "goal": request.goal.trim(),
+        "useCurrentWindow": request.use_current_window,
+    });
+    // 每联系人上下文必须落在该环境的 userDataDir 里（环境删除才能一并清掉）。
+    // 拿不到就**在这里失败**，而不是让 Sidecar 报一个更晚、更难懂的错（禁止静默降级）。
+    let user_data_dir = crate::fill_sidecar::resolve_profile_user_data_dir(app, &profile_id)?;
+    command["userDataDir"] = json!(user_data_dir.to_string_lossy());
+    if let Some(hint) = request.style_hint {
+        let hint = hint.trim();
+        if !hint.is_empty() {
+            command["styleHint"] = json!(hint);
+        }
+    }
+    let banned: Vec<Value> = request
+        .banned_words
+        .into_iter()
+        .map(|word| word.trim().to_owned())
+        .filter(|word| !word.is_empty())
+        .map(Value::String)
+        .collect();
+    attach_non_empty_array(&mut command, "bannedWords", Some(json!(banned)));
+    if let Some(cadence) = request.cadence {
+        if cadence.is_object() {
+            command["cadence"] = cadence;
+        }
+    }
+    // 节奏护栏原样转发（不在这里重写一套默认值/区间，避免两套口径分叉）
+    if let Some(pacing) = request.pacing {
+        if pacing.is_object() {
+            command["pacing"] = pacing;
+        }
+    }
+    // 人工接管模式（按联系人）原样转发；合法性交给 Sidecar 的权威解析器
+    if let Some(takeovers) = request.takeovers {
+        if takeovers.is_object() {
+            command["takeovers"] = takeovers;
+        }
+    }
+    // 每联系人开关（自动回复 / 定时回访）原样转发；缺省＝开的口径只在 Sidecar 一处
+    if let Some(flags) = request.contact_flags {
+        if flags.is_object() {
+            command["contactFlags"] = flags;
+        }
+    }
+    // 角色库 + 当前角色原样转发；坏条目由 Sidecar 跳过并记诊断
+    if let Some(roles) = request.roles {
+        if roles.is_array() {
+            command["roles"] = roles;
+        }
+    }
+    if let Some(role_id) = request.active_role_id {
+        let role_id = role_id.trim();
+        if !role_id.is_empty() {
+            command["activeRoleId"] = json!(role_id);
+        }
+    }
+    let slice_ms = request
+        .slice_ms
+        .map(|value| value.clamp(CHAT_SLICE_MIN_MS, CHAT_SLICE_MAX_MS));
+    if let Some(slice_ms) = slice_ms {
+        command["sliceMs"] = json!(slice_ms);
+    }
+    if let Some(max_contacts) = request.max_contacts_per_slice {
+        command["maxContactsPerSlice"] = json!(max_contacts.clamp(1, 50));
+    }
+
+    // 等待上限跟着这一片的盒长走：盒长 + 结算宽限（不再写死一个可能比盒长还短的值，
+    // 否则用户把「单次值守时长」调到 5 分钟，正常的一片会被宿主提前判成超时）。
+    let recv_timeout =
+        Duration::from_millis(slice_ms.unwrap_or(CHAT_SLICE_DEFAULT_MS)) + CHAT_SLICE_SETTLE_GRACE;
+
+    manager
+        .send_and_wait_with_timeout(
+            app,
+            &db_state,
+            &profile_id,
+            command,
+            true,
+            recv_timeout,
+        )
+        .await?
+        .ok_or_else(|| AppError::Sidecar("chat slice finished without terminal state".to_owned()))
+}
+
+/// 启动聊天模式的一片值守（slice）— 手动入口（「聊天」视图的「开始值守一片」）。
+#[tauri::command]
+pub async fn chat_start(
+    app: AppHandle,
+    profile_id: String,
+    goal: Option<String>,
+    contacts: Vec<ChatContactInput>,
+    style_hint: Option<String>,
+    banned_words: Option<Vec<String>>,
+    cadence: Option<Value>,
+    pacing: Option<Value>,
+    takeovers: Option<Value>,
+    contact_flags: Option<Value>,
+    roles: Option<Value>,
+    active_role_id: Option<String>,
+    slice_ms: Option<u64>,
+    max_contacts_per_slice: Option<u32>,
+    use_current_window: Option<bool>,
+) -> Result<RpaRunResult, AppError> {
+    // 用户显式点过 = 明确意图：解除该环境被看门狗挂起的自动值守（§0.5.3 H「超限即停」要能人工恢复）
+    if let Some(patrol) = app
+        .try_state::<crate::chat_patrol::ChatPatrol>()
+        .map(|state| state.inner().clone())
+    {
+        patrol.clear_suspension(&profile_id);
+    }
+
+    run_chat_slice(
+        &app,
+        ChatSliceRequest {
+            profile_id,
+            goal: goal.unwrap_or_default(),
+            seeds: normalize_chat_contacts(contacts),
+            style_hint,
+            banned_words: banned_words.unwrap_or_default(),
+            cadence,
+            pacing,
+            takeovers,
+            contact_flags,
+            roles,
+            active_role_id,
+            slice_ms,
+            max_contacts_per_slice,
+            // 默认开：「没指定对象 → 用当前打开的聊天窗口」是设置里的默认口径（§3.5）。
+            // 这里若默认 false，就会出现「设置里显示开、手动起一片却按关跑」的两套口径。
+            use_current_window: use_current_window.unwrap_or(true),
+        },
+    )
+    .await
+}
+
+/// 停住聊天值守：中止当前片 + 令 Sidecar 关掉自己开的聊天标签。
+///
+/// **不等待**：停止必须即时生效，不能被一个卡住的 LLM 调用挂住（与 `agent_abort` 同口径）。
+#[tauri::command]
+pub async fn chat_stop(
+    app: AppHandle,
+    manager: State<'_, RpaSessionManager>,
+    profile_id: String,
+    reason: Option<String>,
+) -> Result<(), AppError> {
+    parse_profile_id(&profile_id)?;
+    let reason = reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("user_stop")
+        .to_owned();
+    // 「人叫停」不是「引擎坏了」：告诉调度器别把它算成失败（否则连停 3 次就被挂起）。
+    if let Some(patrol) = app
+        .try_state::<crate::chat_patrol::ChatPatrol>()
+        .map(|state| state.inner().clone())
+    {
+        patrol.note_user_stop(&profile_id);
+    }
+    manager.write_session_command(
+        &profile_id,
+        json!({ "command": "chat_stop", "reason": reason }),
+    )?;
+    let _ = app.emit(
+        CHAT_STATE_EVENT,
+        json!({
+            "profileId": profile_id,
+            "kind": "chat_stop_requested",
+            "phase": "stopping",
+            "msg": "已请求停止聊天值守",
+            "reason": reason,
+        }),
+    );
+    Ok(())
+}
+
+/// 查询聊天模式状态（Host 侧事实 + 引擎快照 + 每联系人索引）。
+#[tauri::command]
+pub fn chat_status(
+    app: AppHandle,
+    db_state: State<'_, AppState>,
+    manager: State<'_, RpaSessionManager>,
+    browser_manager: State<'_, crate::browser_manager::BrowserManager>,
+    profile_id: String,
+) -> Result<ChatStatusPayload, AppError> {
+    parse_profile_id(&profile_id)?;
+    let snapshot = crate::chat_context::read_chat_runtime_status(&app, &profile_id)?;
+    let contacts = {
+        let connection = db_state
+            .database
+            .lock()
+            .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+        crate::chat_context::list_chat_threads(&app, &connection, &profile_id)?
+    };
+    Ok(ChatStatusPayload {
+        running: manager.is_engine_busy(&profile_id),
+        browser_running: browser_manager.is_running(&profile_id),
+        profile_id,
+        snapshot,
+        contacts,
+    })
+}
+
+/// 读某联系人的会话流水尾部（视图展开用；文本**已脱敏**，不落 OTP —— R2 / §1.3）。
+#[tauri::command]
+pub fn get_chat_thread_messages(
+    app: AppHandle,
+    profile_id: String,
+    site_key: String,
+    contact_key: String,
+    limit: Option<i64>,
+) -> Result<Vec<crate::chat_context::ChatThreadMessage>, AppError> {
+    parse_profile_id(&profile_id)?;
+    crate::chat_context::read_chat_thread_messages(
+        &app,
+        &profile_id,
+        &site_key,
+        &contact_key,
+        limit.unwrap_or(80),
+    )
+}
+
+/// 读当前浏览器里那个聊天页的**会话列表**（视图里勾选聊天对象的唯一入口）。
+///
+/// 纪律：
+///   - **只读探针**，不建会话、不改状态，因此**不要求**总开关打开、也不占 `engine_mutex`；
+///   - 引擎忙时**先拒**（并发读页只会让两边都读不准，且 Sidecar 的串行队列会把它拖到超时）；
+///   - 返回 Sidecar 的原始载荷（`ok` / `reason` / `items` / `source`）；失败也带人话原因，
+///     前端据此如实提示，**不把「读不到」显示成「你没有会话」**。
+#[tauri::command]
+pub async fn chat_list_contacts(
+    app: AppHandle,
+    manager: State<'_, RpaSessionManager>,
+    profile_id: String,
+) -> Result<Value, AppError> {
+    parse_profile_id(&profile_id)?;
+    let db_state = app.state::<AppState>();
+    let browser_manager = app.state::<crate::browser_manager::BrowserManager>();
+    if manager.is_engine_busy(&profile_id) {
+        return Err(AppError::Validation(format!(
+            "环境 #{profile_id} 正在跑 Agent / 轨迹回放 / 填表或聊天值守：等它结束再读会话列表（同时读页会让两边都读不准）"
+        )));
+    }
+    if !browser_manager.is_running(&profile_id) {
+        return Err(AppError::Validation(
+            "读会话列表需要该环境的浏览器正在运行，并且把要读的聊天页打开".to_owned(),
+        ));
+    }
+    let user_data_dir = crate::fill_sidecar::resolve_profile_user_data_dir(&app, &profile_id)?;
+    let result = manager
+        .send_and_wait(
+            &app,
+            &db_state,
+            &profile_id,
+            json!({
+                "command": "chat_list_contacts",
+                "profileId": profile_id,
+                "userDataDir": user_data_dir.to_string_lossy(),
+            }),
+            true,
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::Sidecar("chat_list_contacts finished without terminal state".to_owned())
+        })?;
+    Ok(result.actions.unwrap_or_else(|| {
+        json!({
+            "ok": false,
+            "reason": "读取会话列表：Sidecar 没有返回载荷",
+            "source": "generic",
+            "siteKey": "unknown",
+            "pageUrl": null,
+            "items": [],
+        })
+    }))
 }
 
 /// P4.5：用户暂停 Agent（软闸）— Sidecar 在 multi_act 前 awaitPause；恢复走 continue_agent_handover

@@ -324,13 +324,13 @@ export function ProfileTable({
                       </button>
                     </td>
                     <td
-                      className="cursor-pointer py-2.5 text-left align-middle font-mono text-caption text-muted-foreground"
+                      className="cursor-pointer px-2.5 py-2.5 text-left align-middle font-mono text-caption text-muted-foreground"
                       onClick={() => onSelect(id)}
                     >
                       {profile.id}
                     </td>
                     <td
-                      className="min-w-[9rem] cursor-pointer py-2 align-middle"
+                      className="min-w-[9rem] cursor-pointer px-2.5 py-2 align-middle"
                       onClick={() => onSelect(id)}
                     >
                       <div className="flex min-w-0 items-center gap-2">

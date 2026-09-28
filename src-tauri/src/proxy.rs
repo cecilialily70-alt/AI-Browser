@@ -386,7 +386,10 @@ pub fn generate_proxy_auth_extension(
     let canonical = ext_dir
         .canonicalize()
         .map_err(|error| AppError::Filesystem(error.to_string()))?;
-    Ok(canonical.to_string_lossy().into_owned())
+    // canonicalize 在 Windows 会加 `\\?\`；`--load-extension` 必须用普通路径
+    Ok(crate::extension_paths::strip_windows_verbatim_prefix(canonical)
+        .to_string_lossy()
+        .into_owned())
 }
 
 pub fn resolved_proxy_needs_auth_extension(resolved: &ResolvedProxy) -> bool {
@@ -750,6 +753,10 @@ mod tests {
         );
         let ext_path = generate_proxy_auth_extension(&profile_id, &resolved).expect("generate");
         assert!(std::path::Path::new(&ext_path).join("manifest.json").is_file());
+        assert!(
+            !ext_path.starts_with(r"\\?\"),
+            "proxy auth extension path must not keep Windows verbatim prefix: {ext_path}"
+        );
         let background = std::fs::read_to_string(std::path::Path::new(&ext_path).join("background.js"))
             .expect("read background");
         assert!(background.contains(r#"username: "user\"name""#));

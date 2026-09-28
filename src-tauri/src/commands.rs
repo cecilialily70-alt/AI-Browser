@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::browser_manager::BrowserManager;
 use crate::db;
@@ -34,21 +34,10 @@ fn normalize_theme_color(theme_color: Option<String>) -> String {
         .unwrap_or_else(|| DEFAULT_THEME_COLOR.to_owned())
 }
 
-/// 环境删除后一并清空其 user-data 目录。
-/// ID 复用（补回被删除的位置）后必须从零开始，避免新环境继承旧环境的 Cookie/指纹/存储。
+/// 环境删除后一并清空其 user-data 目录与聊天痕迹。
+/// ID 复用（补回被删除的位置）后必须从零开始，避免新环境继承旧环境的 Cookie/指纹/聊天记忆。
 fn purge_profile_data_dir(app: &tauri::AppHandle, profile_id: &str) {
-    let Ok(dir) = crate::fill_sidecar::resolve_profile_user_data_dir(app, profile_id) else {
-        return;
-    };
-    if !dir.exists() {
-        return;
-    }
-    if let Err(error) = std::fs::remove_dir_all(&dir) {
-        log_warn!(
-            "[delete_profile] purge data dir failed profile={profile_id} path={} err={error}",
-            dir.display()
-        );
-    }
+    crate::fill_sidecar::purge_profile_user_data_dir(app, profile_id);
 }
 
 /// 前端在退出确认框做出「否（保留浏览器）」决策后，通过此命令告知 Rust 跳过退出清场。
@@ -121,6 +110,21 @@ pub fn update_setting(
                 &scraper.to_string_lossy(),
             ),
             Err(error) => log_warn!("[commands] resolve download roots failed: {error}"),
+        }
+    }
+    drop(connection);
+
+    // 聊天模式总开关是**运行时就生效**的：打开即起调度循环，关掉即 abort
+    // （不是「循环一直跑但什么都不做」——§0.5.2「不启动即不存在」）。
+    if key.trim() == crate::chat_patrol::KEY_CHAT_MODE {
+        if let Some(patrol) = app
+            .try_state::<crate::chat_patrol::ChatPatrol>()
+            .map(|state| state.inner().clone())
+        {
+            match crate::chat_patrol::chat_mode_enabled(&app) {
+                Ok(enabled) => patrol.apply_enabled(&app, enabled),
+                Err(error) => log_warn!("[commands] chat_mode 解析失败，调度器保持原状：{error}"),
+            }
         }
     }
     Ok(())
@@ -441,6 +445,8 @@ pub fn delete_profile(
         .lock()
         .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
     db::delete_profile(&connection, numeric_id)?;
+    // 删库成功后再清盘与设置：失败不回滚库行，但必须尽力清掉聊天记忆（ID 复用防串号）
+    let _ = crate::chat_context::forget_profile_chat_on_delete(&app, &connection, &profile_id);
     drop(connection);
     purge_profile_data_dir(&app, &profile_id);
     Ok(())
@@ -456,6 +462,139 @@ pub fn purge_automation_cache(
         .lock()
         .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
     crate::cache_cleanup::purge_automation_cache(&app, &connection)
+}
+
+/// 有聊天上下文的环境总览（设置里的聊天上下文清理入口用）。
+#[tauri::command]
+pub fn list_chat_context_overview(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    manager: State<'_, BrowserManager>,
+) -> Result<Vec<crate::chat_context::ChatEnvSummary>, AppError> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+    let running: std::collections::HashSet<String> =
+        manager.running_profile_ids().into_iter().collect();
+    crate::chat_context::list_chat_context_overview(&app, &connection, &running)
+}
+
+/// 全局清理聊天上下文（**聊天/引擎正忙**的环境会逐个列出原因地跳过，不静默丢弃）。
+///
+/// 闸门与单环境清理同一口径：只挡「正在写上下文」的忙态，不挡「浏览器开着但空闲」。
+#[tauri::command]
+pub fn purge_all_chat_contexts(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    rpa: State<'_, crate::rpa_session::RpaSessionManager>,
+) -> Result<crate::chat_context::PurgeAllChatContextReport, AppError> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+    let profiles = crate::db::list_profiles(&connection)?;
+    let busy: std::collections::HashSet<String> = profiles
+        .iter()
+        .map(|profile| profile.id.to_string())
+        .filter(|id| rpa.is_engine_busy(id))
+        .collect();
+    crate::chat_context::purge_all_chat_contexts(&app, &connection, &busy)
+}
+
+/// 清理聊天上下文：`contact_key` 可选，`site_key` 可选（不给即整环境）。
+///
+/// **只挡「正在写」**：浏览器开着但聊天/Agent/回放空闲时必须能清联系人记忆 ——
+/// 否则用户现场就是「浏览器开着删不了、关掉又看不见」（鸡肋）。
+/// 忙态用 Host 互斥 waiter（与 `chat_status.running` 同一口径）；失败文案说清要先停值守。
+#[tauri::command]
+pub fn purge_chat_context(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    rpa: State<'_, crate::rpa_session::RpaSessionManager>,
+    profile_id: String,
+    site_key: Option<String>,
+    contact_key: Option<String>,
+) -> Result<crate::chat_context::PurgeChatContextReport, AppError> {
+    if rpa.is_engine_busy(&profile_id) {
+        return Err(AppError::Validation(
+            "该环境正在值守聊天（或跑 Agent / 回放 / 填表）：请先点「停止」再清理联系人记忆。"
+                .to_owned(),
+        ));
+    }
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+    crate::chat_context::purge_chat_context(
+        &app,
+        &connection,
+        &profile_id,
+        site_key.as_deref(),
+        contact_key.as_deref(),
+    )
+}
+
+/// 环境浏览器数据占用总览（设置里的「环境数据清理」入口用）。
+#[tauri::command]
+pub fn list_browser_data_overview(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    manager: State<'_, BrowserManager>,
+) -> Result<Vec<crate::browser_data::BrowserDataEnvSummary>, AppError> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+    let running: std::collections::HashSet<String> =
+        manager.running_profile_ids().into_iter().collect();
+    crate::browser_data::list_overview(&app, &connection, &running)
+}
+
+/// 清理单个环境的浏览器数据。`scope`：`cookies` / `storage` / `cache` / `all`。
+///
+/// **运行中拒绝**：浏览器正持有 IndexedDB / Cookies 的锁，在它活着时把目录从底下抽掉
+/// 只会留下半截存储（这正是「登录态存不住」的成因之一）。要求先停止环境。
+#[tauri::command]
+pub fn purge_browser_data(
+    app: tauri::AppHandle,
+    manager: State<'_, BrowserManager>,
+    profile_id: String,
+    scope: Option<String>,
+) -> Result<crate::browser_data::PurgeBrowserDataReport, AppError> {
+    if manager.is_running(&profile_id) {
+        return Err(AppError::Validation(
+            "该环境正在运行：浏览器正持有 Cookie / IndexedDB 的文件锁，请先停止该环境再清理。"
+                .to_owned(),
+        ));
+    }
+    crate::browser_data::purge_browser_data(
+        &app,
+        &profile_id,
+        scope.as_deref().unwrap_or(crate::browser_data::SCOPE_ALL),
+    )
+}
+
+/// 批量清理所有环境的浏览器数据（运行中的环境**逐个列出原因**地跳过）。
+#[tauri::command]
+pub fn purge_all_browser_data(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    manager: State<'_, BrowserManager>,
+    scope: Option<String>,
+) -> Result<crate::browser_data::PurgeAllBrowserDataReport, AppError> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+    let running: std::collections::HashSet<String> =
+        manager.running_profile_ids().into_iter().collect();
+    crate::browser_data::purge_all_browser_data(
+        &app,
+        &connection,
+        &running,
+        scope.as_deref().unwrap_or(crate::browser_data::SCOPE_ALL),
+    )
 }
 
 #[tauri::command]
@@ -491,7 +630,11 @@ pub fn batch_delete_profiles(
 
         let numeric_id = parse_profile_id(trimmed)?;
         match db::delete_profile(&connection, numeric_id) {
-            Ok(()) => deleted_ids.push(trimmed.to_owned()),
+            Ok(()) => {
+                let _ =
+                    crate::chat_context::forget_profile_chat_on_delete(&app, &connection, trimmed);
+                deleted_ids.push(trimmed.to_owned());
+            }
             Err(AppError::Validation(message)) if message.contains("running") => {
                 skipped_running_ids.push(trimmed.to_owned());
             }

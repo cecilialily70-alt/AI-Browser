@@ -4,6 +4,7 @@ import {
   FileKey,
   FileUp,
   FolderOpen,
+  MessagesSquare,
   Plug,
   Power,
   RefreshCw,
@@ -25,10 +26,16 @@ import {
   getCloakBinaryStatus,
   getExternalDataApiState,
   importKeyFile,
+  listBrowserDataOverview,
+  listChatContextOverview,
   listLocalKernels,
   pickDirectory,
   pickKeyFile,
+  purgeAllBrowserData,
+  purgeAllChatContexts,
   purgeAutomationCache,
+  purgeBrowserData,
+  purgeChatContext,
   regenerateExternalDataApiToken,
   setCloakLicenseKey,
   setExternalDataApiEnabled,
@@ -40,7 +47,15 @@ import {
   updateSetting,
   type ExternalDataApiState,
 } from "../../lib/tauri";
-import type { AppSettings, CloakBinaryStatus, ConnectivityStatus, LocalKernel } from "../../types";
+import type {
+  AppSettings,
+  BrowserDataEnvSummary,
+  BrowserDataScope,
+  ChatEnvSummary,
+  CloakBinaryStatus,
+  ConnectivityStatus,
+  LocalKernel,
+} from "../../types";
 import { createToast } from "../../lib/toast";
 import type { ToastMessage } from "../../lib/toast";
 import { useAppDialog } from "../AppDialogProvider";
@@ -151,6 +166,11 @@ export function GeneralSettingsTab({
   const [binaryError, setBinaryError] = useState<string | null>(null);
   const [localKernels, setLocalKernels] = useState<LocalKernel[]>([]);
   const [cacheBusy, setCacheBusy] = useState(false);
+  const [chatContexts, setChatContexts] = useState<ChatEnvSummary[] | null>(null);
+  const [chatContextBusy, setChatContextBusy] = useState<string | null>(null);
+  const [browserData, setBrowserData] = useState<BrowserDataEnvSummary[] | null>(null);
+  const [browserDataScope, setBrowserDataScope] = useState<BrowserDataScope>("all");
+  const [browserDataBusy, setBrowserDataBusy] = useState<string | null>(null);
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [diagnoseBusy, setDiagnoseBusy] = useState(false);
   const [killBusy, setKillBusy] = useState(false);
@@ -642,6 +662,211 @@ export function GeneralSettingsTab({
     }
   };
 
+  const refreshChatContexts = async () => {
+    try {
+      setChatContexts(await listChatContextOverview());
+    } catch (error) {
+      // 只影响统计展示，不打断设置页使用；但仍要把真实原因留在页面上
+      onError(formatInvokeError(error));
+      setChatContexts([]);
+    }
+  };
+
+  useEffect(() => {
+    void refreshChatContexts();
+    void refreshBrowserData();
+    // 仅在打开设置页时取一次；清理后会主动刷新
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const formatBytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+
+  const handlePurgeChatContext = async (env: ChatEnvSummary) => {
+    const confirmed = await confirm({
+      title: `清理「${env.profileName}」的聊天上下文`,
+      description: `将删除该环境全部聊天记忆：${env.contactCount} 位联系人的会话流水、滚动摘要、已用角度、长期事实与回访计划（约 ${formatBytes(
+        env.bytes,
+      )}）。删除后这些联系人的聊天将从零开始，且**不可恢复**。环境本身的配置、Cookie 不受影响。确定继续？`,
+      confirmLabel: "删除聊天记忆",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+    setChatContextBusy(env.profileId);
+    onSavingChange(true);
+    try {
+      const report = await purgeChatContext(env.profileId);
+      onToast(
+        createToast(
+          "success",
+          `已删除「${env.profileName}」的聊天上下文（${report.removedDirs} 个目录，约 ${formatBytes(
+            report.freedBytes,
+          )}）`,
+        ),
+      );
+      onError("");
+      await refreshChatContexts();
+    } catch (error) {
+      const message = formatInvokeError(error);
+      onToast(createToast("error", message));
+      onError(message);
+    } finally {
+      setChatContextBusy(null);
+      onSavingChange(false);
+    }
+  };
+
+  const handlePurgeAllChatContexts = async () => {
+    const total = (chatContexts ?? []).reduce((sum, env) => sum + env.contactCount, 0);
+    const confirmed = await confirm({
+      title: "清理全部聊天上下文",
+      description: `将删除所有环境累积的聊天记忆：共 ${total} 位联系人（会话流水、摘要、角度、长期事实、回访计划），并扫掉已删环境留下的残留目录与设置幽灵键。正在值守的环境会被跳过并逐个列出原因。删除后**不可恢复**。确定继续？`,
+      confirmLabel: "全部删除",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+    setChatContextBusy("__all__");
+    onSavingChange(true);
+    try {
+      const report = await purgeAllChatContexts();
+      const skipped = report.skippedRunning > 0 ? `，跳过正忙 ${report.skippedRunning} 个环境` : "";
+      onToast(
+        createToast(
+          "success",
+          `已清理 ${report.purgedProfiles} 个环境的聊天上下文（约 ${formatBytes(
+            report.freedBytes,
+          )}）${skipped}`,
+        ),
+      );
+      onError("");
+      await refreshChatContexts();
+    } catch (error) {
+      const message = formatInvokeError(error);
+      onToast(createToast("error", message));
+      onError(message);
+    } finally {
+      setChatContextBusy(null);
+      onSavingChange(false);
+    }
+  };
+
+  const refreshBrowserData = async () => {
+    try {
+      setBrowserData(await listBrowserDataOverview());
+    } catch (error) {
+      // 只影响统计展示，不打断设置页使用；但仍要把真实原因留在页面上
+      onError(formatInvokeError(error));
+      setBrowserData([]);
+    }
+  };
+
+  const scopeLabel = (scope: BrowserDataScope) =>
+    ({
+      cookies: "仅 Cookie（站点登录票据）",
+      storage: "仅站点存储（IndexedDB / 本地存储）",
+      cache: "仅缓存（不影响登录态）",
+      all: "全部（Cookie + 站点存储 + 缓存）",
+    })[scope];
+
+  const handlePurgeBrowserData = async (env: BrowserDataEnvSummary) => {
+    const confirmed = await confirm({
+      title: `清理「${env.profileName}」的浏览器数据`,
+      description: `范围：${scopeLabel(browserDataScope)}，约 ${formatBytes(
+        browserDataScope === "cookies"
+          ? env.cookiesBytes
+          : browserDataScope === "storage"
+            ? env.storageBytes
+            : browserDataScope === "cache"
+              ? env.cacheBytes
+              : env.totalBytes,
+      )}。\n\n清理后该环境在这些站点上的登录态与站点数据会被重置（部分站点需要重新扫码/登录），**不可恢复**。环境本身的配置、代理绑定与聊天记忆不受影响。\n\n确定继续？`,
+      confirmLabel: "清理数据",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+    setBrowserDataBusy(env.profileId);
+    onSavingChange(true);
+    try {
+      const report = await purgeBrowserData(env.profileId, browserDataScope);
+      onToast(
+        createToast(
+          "success",
+          `已清理「${env.profileName}」：目录 ${report.removedDirs}、文件 ${report.removedFiles}（约 ${formatBytes(
+            report.freedBytes,
+          )}）`,
+        ),
+      );
+      onError("");
+      await refreshBrowserData();
+    } catch (error) {
+      const message = formatInvokeError(error);
+      onToast(createToast("error", message));
+      onError(message);
+    } finally {
+      setBrowserDataBusy(null);
+      onSavingChange(false);
+    }
+  };
+
+  const handlePurgeAllBrowserData = async () => {
+    const list = browserData ?? [];
+    const total = list.reduce(
+      (sum, env) =>
+        sum +
+        (browserDataScope === "cookies"
+          ? env.cookiesBytes
+          : browserDataScope === "storage"
+            ? env.storageBytes
+            : browserDataScope === "cache"
+              ? env.cacheBytes
+              : env.totalBytes),
+      0,
+    );
+    const running = list.filter((env) => env.running).length;
+    const confirmed = await confirm({
+      title: "清理全部环境的浏览器数据",
+      description: `范围：${scopeLabel(browserDataScope)}，共 ${list.length} 个环境（约 ${formatBytes(
+        total,
+      )}）。${
+        running > 0 ? `\n\n其中 ${running} 个环境正在运行，会被跳过并逐个列出原因（请先停止它们再清理）。` : ""
+      }\n\n清理后各环境在这些站点上的登录态与站点数据会被重置，**不可恢复**。环境配置与聊天记忆不受影响。\n\n确定继续？`,
+      confirmLabel: "全部清理",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+    setBrowserDataBusy("__all__");
+    onSavingChange(true);
+    try {
+      const report = await purgeAllBrowserData(browserDataScope);
+      const skipped =
+        report.skippedRunning > 0 ? `，跳过正忙 ${report.skippedRunning} 个环境` : "";
+      onToast(
+        createToast(
+          "success",
+          `已清理 ${report.purgedProfiles} 个环境的数据（约 ${formatBytes(
+            report.freedBytes,
+          )}）${skipped}`,
+        ),
+      );
+      onError("");
+      await refreshBrowserData();
+    } catch (error) {
+      const message = formatInvokeError(error);
+      onToast(createToast("error", message));
+      onError(message);
+    } finally {
+      setBrowserDataBusy(null);
+      onSavingChange(false);
+    }
+  };
+
   const handleDiagnoseBinary = async () => {
     setDiagnoseBusy(true);
     onSavingChange(true);
@@ -1064,6 +1289,155 @@ export function GeneralSettingsTab({
             {cacheBusy ? "清理中…" : "清理缓存"}
           </button>
         </div>
+      </SettingsSection>
+
+      <SettingsSection
+        icon={<MessagesSquare size={15} className="text-primary" />}
+        title="聊天上下文"
+        description="聊天模式为每位联系人单独保存的记忆（会话流水、摘要、已用角度、长期事实、回访计划）。清理后这些联系人会从零开始；「全部清理」还会扫掉已删环境留下的残留目录与设置幽灵键。删除环境时聊天记忆、学来的站点描述符与该环境的聊天目标名单会一并清掉。"
+      >
+        {chatContexts === null ? (
+          <p className="text-caption text-muted-foreground">读取中…</p>
+        ) : chatContexts.length === 0 ? (
+          <p className="text-caption text-muted-foreground">
+            暂无聊天记忆。在顶栏打开「聊天模式」并开始值守后，每位联系人的记忆会出现在这里；也可在联系人卡片上按人清理。
+          </p>
+        ) : (
+          <>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-caption text-muted-foreground">
+                共 {chatContexts.length} 个环境 ·{" "}
+                {chatContexts.reduce((sum, env) => sum + env.contactCount, 0)} 位联系人 ·{" "}
+                {formatBytes(chatContexts.reduce((sum, env) => sum + env.bytes, 0))}
+              </p>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={saving || chatContextBusy !== null}
+                onClick={() => void handlePurgeAllChatContexts()}
+              >
+                <Trash2
+                  size={14}
+                  className={chatContextBusy === "__all__" ? "animate-pulse" : ""}
+                />
+                {chatContextBusy === "__all__" ? "清理中…" : "全部清理"}
+              </button>
+            </div>
+            <ul className="mt-3 space-y-2">
+              {chatContexts.map((env) => (
+                <li
+                  key={env.profileId}
+                  className="flex items-center justify-between gap-3 rounded-md bg-sunken px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-ui text-foreground">{env.profileName}</div>
+                    <div className="text-caption text-muted-foreground">
+                      {env.contactCount} 位联系人 · {env.messageCount} 条消息 ·{" "}
+                      {formatBytes(env.bytes)}
+                      {env.running ? " · 浏览器运行中（空闲可清；值守中请先停）" : ""}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-outline shrink-0"
+                    disabled={saving || chatContextBusy !== null}
+                    title={
+                      env.running
+                        ? "浏览器开着也可以清；若正在值守聊天会提示你先停"
+                        : undefined
+                    }
+                    onClick={() => void handlePurgeChatContext(env)}
+                  >
+                    <Trash2
+                      size={14}
+                      className={chatContextBusy === env.profileId ? "animate-pulse" : ""}
+                    />
+                    {chatContextBusy === env.profileId ? "清理中…" : "清理"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </SettingsSection>
+
+      <SettingsSection
+        icon={<Trash2 size={15} className="text-primary" />}
+        title="环境数据清理"
+        description="清理各环境自己的浏览器身份数据（Cookie / 站点存储 / 缓存）。用于站点登录态坏了（例如网页版反复自我登出、二维码一直出不来）、环境被站点记住需要复位时；环境配置、代理绑定与聊天记忆不受影响。运行中的环境必须先停止。清理后请重新启动环境，打开 WhatsApp 后等待约 10 秒让二维码画完。"
+      >
+        <label className="field-label max-w-xs">
+          清理范围
+          <select
+            className="field-input"
+            value={browserDataScope}
+            disabled={saving || browserDataBusy !== null}
+            onChange={(event) => setBrowserDataScope(event.target.value as BrowserDataScope)}
+          >
+            <option value="cookies">仅 Cookie（站点登录票据）</option>
+            <option value="storage">仅站点存储（IndexedDB / 本地存储）</option>
+            <option value="cache">仅缓存（不影响登录态）</option>
+            <option value="all">全部（Cookie + 站点存储 + 缓存）</option>
+          </select>
+        </label>
+        {browserData === null ? (
+          <p className="text-caption text-muted-foreground">读取中…</p>
+        ) : browserData.length === 0 ? (
+          <p className="text-caption text-muted-foreground">暂无环境。</p>
+        ) : (
+          <>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-caption text-muted-foreground">
+                共 {browserData.length} 个环境 · Cookie{" "}
+                {formatBytes(browserData.reduce((sum, env) => sum + env.cookiesBytes, 0))} · 站点存储{" "}
+                {formatBytes(browserData.reduce((sum, env) => sum + env.storageBytes, 0))} · 缓存{" "}
+                {formatBytes(browserData.reduce((sum, env) => sum + env.cacheBytes, 0))}
+              </p>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={saving || browserDataBusy !== null}
+                onClick={() => void handlePurgeAllBrowserData()}
+              >
+                <Trash2
+                  size={14}
+                  className={browserDataBusy === "__all__" ? "animate-pulse" : ""}
+                />
+                {browserDataBusy === "__all__" ? "清理中…" : "全部清理"}
+              </button>
+            </div>
+            <ul className="mt-3 space-y-2">
+              {browserData.map((env) => (
+                <li
+                  key={env.profileId}
+                  className="flex items-center justify-between gap-3 rounded-md bg-sunken px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-ui text-foreground">{env.profileName}</div>
+                    <div className="text-caption text-muted-foreground">
+                      Cookie {formatBytes(env.cookiesBytes)} · 站点存储{" "}
+                      {formatBytes(env.storageBytes)} · 缓存 {formatBytes(env.cacheBytes)}
+                      {env.running ? " · 运行中（需先停止才能清理）" : ""}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-outline shrink-0"
+                    disabled={saving || browserDataBusy !== null || env.running}
+                    title={env.running ? "该环境正在运行，请先停止" : undefined}
+                    onClick={() => void handlePurgeBrowserData(env)}
+                  >
+                    <Trash2
+                      size={14}
+                      className={browserDataBusy === env.profileId ? "animate-pulse" : ""}
+                    />
+                    {browserDataBusy === env.profileId ? "清理中…" : "清理"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </SettingsSection>
 
       <SettingsSection

@@ -27,7 +27,6 @@ import {
   type AgentPersona,
   type AgentRule,
 } from "../lib/agentRules";
-
 import {
   extractFillDataTextFromReply,
   extractJsonFromAiReply,
@@ -2563,7 +2562,14 @@ export function AIFillDrawer({
             />
           </div>
 
-          <div className="workbench-footer">
+          <div
+            className={
+              agentAttach.dropActive
+                ? "workbench-footer ring-2 ring-inset ring-primary/50"
+                : "workbench-footer"
+            }
+            {...agentAttach.dropHandlers}
+          >
             {/* Agent 输入框与 Ai Chat 不同：Agent 运行中仍允许继续编辑目标/附件（下次启动生效），
                 因此附件条与纸夹按钮不随聊天/填表忙碌禁用，这是有意为之，不是遗漏 disabled。 */}
             <ChatAttachmentChips attachments={agentAttachments} onChange={setAgentAttachments} />

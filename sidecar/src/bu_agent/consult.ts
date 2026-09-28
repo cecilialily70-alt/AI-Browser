@@ -172,27 +172,6 @@ export interface ConsultStore {
   readonly size: number;
 }
 
-/** 有界内存缓存（超限淘汰最早写入项），避免长驻 sidecar 里无限增长 */
-export function createConsultStore(maxEntries = 200): ConsultStore {
-  const map = new Map<string, unknown>();
-  const limit = Math.max(1, Math.floor(maxEntries));
-  return {
-    get(key) {
-      return map.get(key);
-    },
-    set(key, value) {
-      if (map.size >= limit) {
-        const oldest = map.keys().next();
-        if (!oldest.done) map.delete(oldest.value);
-      }
-      map.set(key, value);
-    },
-    get size() {
-      return map.size;
-    },
-  };
-}
-
 function sha1(text: string): string {
   return createHash("sha1").update(text).digest("hex").slice(0, 20);
 }

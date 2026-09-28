@@ -46,6 +46,36 @@ pub fn resolve_profile_user_data_dir(app: &AppHandle, profile_id: &str) -> Resul
     Ok(profiles_root.join(format!("profile-{profile_id}")))
 }
 
+/// 删除环境后清空其 user-data 目录（Cookie / 指纹 / `chat_context` / 学来的 connectors）。
+///
+/// 整目录删失败时仍尽力清掉聊天相关子目录，避免 ID 复用后新环境继承旧记忆。
+pub fn purge_profile_user_data_dir(app: &AppHandle, profile_id: &str) {
+    let Ok(dir) = resolve_profile_user_data_dir(app, profile_id) else {
+        return;
+    };
+    if !dir.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(&dir) {
+        crate::log_warn!(
+            "[delete_profile] purge data dir failed profile={profile_id} path={} err={error}",
+            dir.display()
+        );
+        for sub in ["chat_context", "connectors"] {
+            let path = dir.join(sub);
+            if !path.exists() {
+                continue;
+            }
+            if let Err(sub_error) = std::fs::remove_dir_all(&path) {
+                crate::log_warn!(
+                    "[delete_profile] purge {sub} failed profile={profile_id} path={} err={sub_error}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
 async fn load_profile_cdp_context(
     db_state: &AppState,
     profile_id: &str,

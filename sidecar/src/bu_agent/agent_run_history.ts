@@ -176,32 +176,3 @@ export function buildAgentRunFinishPayload(input: {
     phase: "agent_run_finish",
   };
 }
-
-/** 回归：摘要/thought 不得含常见明文 OTP。 */
-export function runHistoryLooksClean(payload: {
-  summary?: string;
-  thoughtSummary?: AgentRunThoughtLine[];
-  goal?: string;
-  llmModel?: string;
-  failureClass?: string;
-  failureCounts?: Record<string, number>;
-}): boolean {
-  const blobs = [
-    payload.summary ?? "",
-    payload.goal ?? "",
-    payload.llmModel ?? "",
-    payload.failureClass ?? "",
-    JSON.stringify(payload.failureCounts ?? {}),
-    ...(payload.thoughtSummary ?? []).map((l) => l.text),
-  ].join("\n");
-  if (/验证码\s*[:：=]?\s*\d{4,8}/i.test(blobs)) {
-    return false;
-  }
-  if (/\botp\s*[:：=]?\s*[0-9A-Za-z]{4,12}\b/i.test(blobs)) {
-    return false;
-  }
-  if (/\bsk-[A-Za-z0-9_-]{12,}\b/.test(blobs)) {
-    return false;
-  }
-  return true;
-}

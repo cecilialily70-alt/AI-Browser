@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "纯数据资源（非代码）：任务完成度验收词典。代码中不含任何站点/业务文案，只把本文件当判定依据。goalIntents.outcome = 成功必须外部可观测（页面跳转/成功提示）的任务意图；goalIntents.informational = 交付物是信息本身（总结/查询）的任务意图。successSignals.strong = 独立即可证明完成的强提示；weak = 泛化词（首页/通用文案里也会出现），只在已有可验证副作用时才作数。删除本文件会退化为通用策略（只要求轨迹里存在可验证副作用）。可用 TIANSHUTAI_COMPLETION_LEXICON 指向自定义路径整体替换。",
+  "_comment": "纯数据资源（非代码）：任务完成度验收词典。代码中不含任何站点/业务文案，只把本文件当判定依据。goalIntents.outcome = 成功必须外部可观测（页面跳转/成功提示）的任务意图；goalIntents.informational = 交付物是信息本身（总结/查询）的任务意图；goalIntents.chat = 会话型任务意图（跟人对话/发消息/回消息），交付物是「话发出去」，与 outcome 同等严格，但契约里不得出现臆造的 navigation（会话页就地完成，不需要先跳转）。successSignals.strong = 独立即可证明完成的强提示；weak = 泛化词（首页/通用文案里也会出现），只在已有可验证副作用时才作数。删除本文件会退化为通用策略（只要求轨迹里存在可验证副作用）。可用 TIANSHUTAI_COMPLETION_LEXICON 指向自定义路径整体替换。",
   "policy": {
     "_comment": "maxDoneRejections：同一任务内 done(success=true) 因缺证据被驳回的上限，超过即放行但在结论里标注「未验证」，避免死循环。scanChars：页面文案扫描上限（字符），控制开销。minClaimChars：informational 目标下结论正文的最短长度，低于视为未交付。",
     "maxDoneRejections": 2,
@@ -18,6 +18,16 @@
       "terms": [
         "总结", "概括", "摘要", "是什么", "什么是", "多少钱", "价格", "查询", "查找", "告诉我", "回答", "解释", "分析", "统计", "对比", "列出", "提取", "读取", "翻译", "帮我看看", "看一下", "读一下", "探讨", "讨论", "点评", "评价", "评估", "综述", "梳理",
         "summarize", "summary", "what is", "who is", "how much", "price of", "look up", "find out", "tell me", "answer", "explain", "analyze", "analyse", "compare", "list", "extract", "read", "translate", "how many", "discuss"
+      ]
+    },
+    "chat": {
+      "_comment": "会话型目标：交付物是「把话说出去 / 等对方回话」，不是「到达某个页面」。命中即：契约里不得出现臆造的 navigation 交付物（否则任务一开始就在会话页，会被 verifyNavigation 永久判「未达成」→ done 被无限驳回），完成度验收按与结果型同等严格的标准要「发送成功提示 / 可验证的发送副作用」。只收「跟人对话」的强信号，避免把下单/评论/发帖这类结果型动作误判。",
+      "terms": [
+        "聊天", "会话", "对话", "私信", "群聊", "群消息", "回消息", "回复消息", "回个消息", "回一句话", "回他", "回她", "回复他", "回复她",
+        "发消息", "发一条消息", "发个消息", "发条消息", "发一句话", "发句", "聊两句", "聊几句", "聊聊天", "问一句", "问一句他",
+        "跟他说", "跟她说", "和他说话", "和她说话", "打招呼", "寒暄", "联系人聊天", "跟客服聊",
+        "chat with", "chat to", "send a message", "send message", "send him a message", "send her a message",
+        "reply to", "reply message", "private message", "direct message", "instant message", "conversation with", "talk to", "chat room", "message thread"
       ]
     }
   },

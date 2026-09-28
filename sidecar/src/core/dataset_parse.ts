@@ -421,10 +421,3 @@ export function parseDatasetText(text: string, options: ParseDatasetOptions = {}
   }
   return tryTxt();
 }
-
-/**
- * 单行数据集（剪贴板快照 / 单值）：列名 `text`（§6.1）。
- */
-export function datasetFromSingleText(text: string): DatasetParseResult {
-  return parseDatasetText(text, { format: "clipboard", source: "clipboard" });
-}

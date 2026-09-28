@@ -56,6 +56,26 @@ import {
   snapshotInteractiveElements,
 } from "./interactive_elements.js";
 import { runAutonomousAgentLoop } from "./agent_loop.js";
+import {
+  buildChatSession,
+  chatSnapshotPath,
+  parseActiveRoleId,
+  parseCadence,
+  parseContactFlags,
+  parseContactSeeds,
+  parseRoles,
+  parseTakeovers,
+  type ChatSessionHandle,
+} from "./bu_agent/chat_session.js";
+import { closeChatPage, contextOf } from "./bu_agent/chat_actions.js";
+import { listPageThreads } from "./bu_agent/chat_contacts.js";
+import { learnSite } from "./bu_agent/chat_learn.js";
+import {
+  CHAT_CONTACTS_PER_SLICE_DEFAULT,
+  CHAT_SLICE_MS_DEFAULT,
+} from "./core/web_chat/slice_limits.js";
+import { resolveLearnedConnectorDir } from "./core/web_chat/descriptor/registry.js";
+import { parsePacingConfig } from "./core/web_chat/pacing.js";
 import { parseControlMemorySeed } from "./cross_task_memory.js";
 import { parseFieldOverrides } from "./deferred_generation.js";
 import { parseGeoContext } from "./persona_engine.js";
@@ -103,6 +123,26 @@ let rpaMachine: RpaStateMachine | null = null;
 let rpaRunning = false;
 let agentRunning = false;
 let trajectoryReplayRunning = false;
+/**
+ * 聊天模式（第四种执行形态，§0.4）正在占用该环境。
+ *
+ * 必须登记进同一个互斥（§7.4 / S5）：聊天有自己的引擎与循环，但「谁在占这台浏览器」
+ * 只有一个答案。它由 `chat_start` 置位、`chat_stop` 与引擎退出时清位。
+ */
+let chatRunning = false;
+/**
+ * 正在**学习站点**（发现流水线）时的句柄。
+ *
+ * 学习同样在占用这台浏览器（会开/导航我们自己的聊天标签），所以也登记进 `chatRunning`
+ * 这一把互斥 —— 但它**不是一片值守**：`chat_stop` 必须能把它一起中止，
+ * 否则用户点了停止而学习还在跑（假停止）。
+ */
+let chatLearning: { controller: AbortController; waitId: string | null } | null = null;
+/**
+ * 当前聊天会话句柄（一个环境同时最多一个；§4.3「一个 run 一个 driver」）。
+ * 持有 abort controller 与 done promise，供 `chat_stop` 精确停住并等待收尾。
+ */
+let chatSession: ChatSessionHandle | null = null;
 let trajectoryReplayAbort: AbortController | null = null;
 /**
  * 本次回放运行途中读取的剪贴板内容（`{{clip.N}}` / `{{clip.<into>}}`）。
@@ -112,7 +152,7 @@ let trajectoryReplayAbort: AbortController | null = null;
 let replayClipValues: Record<string, string> = {};
 
 function engineBusySnapshot(): EngineBusyState {
-  return { agentRunning, rpaRunning, trajectoryReplayRunning };
+  return { agentRunning, rpaRunning, trajectoryReplayRunning, chatRunning };
 }
 
 /** 互斥拦截：忙则写明确错误并返回 true（调用方应立即 return） */
@@ -160,6 +200,16 @@ const pendingAskResolvers = new Map<string, AskResolver>();
 const pendingHostResolvers = new Map<string, HostRequestResolver>();
 /** 宿主请求超时（新建环境要落库，给足时间；超时后必须**失败**，不能让动作悬着） */
 const HOST_REQUEST_TIMEOUT_MS = 20_000;
+/**
+ * `chat_stop` 等引擎收尾的限期：到点仍未落地就摘掉忙标记并补发终态行。
+ * 正常收尾是毫秒级；这里只是保险丝，防「卡住的引擎把这个环境永久判成正忙」。
+ */
+const CHAT_STOP_SETTLE_MS = 20_000;
+/**
+ * 「读会话列表」这一次只读探针的预算：到点就带着人话原因返回。
+ * 它是给视图勾选对象用的短任务，卡住时宁可如实说「读不到」，也不让宿主干等。
+ */
+const CHAT_LIST_CONTACTS_TIMEOUT_MS = 15_000;
 let agentAbortController: AbortController | null = null;
 
 function enqueueCommand(task: () => Promise<void>): void {
@@ -263,6 +313,8 @@ function attachStdinAbortListener(
     "agent_pause",
     "agent_abort",
     "agent_bring_to_front",
+    // 聊天值守可能正跑一个很长的片：停止必须绕过串行队列，否则「停不下来」
+    "chat_stop",
   ]);
 
   attachStdinLineParser((trimmed) => {
@@ -1257,6 +1309,478 @@ async function handleAgentStart(
   }
 }
 
+/* ————————————————————————— 聊天模式（第四种执行形态，§0.4） ————————————————————————— */
+
+/**
+ * 启动聊天模式值守。
+ *
+ * 与 Agent / RPA / 回放**共用同一个互斥**：忙则拒绝（S5）。启动后引擎按自己的相位
+ * 跑一个值守片，片末让位并把 `nextWakeAt` 写进快照；由 Host 调度器决定何时再拉起。
+ */
+async function handleChatStart(
+  browser: Browser,
+  payload: Record<string, unknown>,
+  waitId?: string | null,
+): Promise<void> {
+  const boundWaitId = waitId?.trim() || String(payload.waitId ?? payload.wait_id ?? "").trim() || null;
+  bindCommandWaitId(boundWaitId);
+
+  // 互斥（S5）：任何引擎在跑都不允许再起聊天
+  const busy = engineBusySnapshot();
+  if (isEngineBusy(busy)) {
+    const msg = formatEngineBusyMessage(busy, "聊天模式启动") || ENGINE_BUSY_MESSAGE;
+    logger.warn("engine_busy_reject", { requested: "聊天模式启动", ...busy, msg, waitId: boundWaitId });
+    // 只走聊天协议终态（带 waitId + stopReason），**不**打 agentState(failed)：
+    // 否则 Agent 监视栏会多一条吓人的「失败」，调度器还可能把正忙当成硬失败去退避挂起。
+    logger.chatProgress(msg, {
+      type: "chat_state_update",
+      phase: "stopped",
+      stopReason: "engine_busy",
+      ...(boundWaitId ? { waitId: boundWaitId } : {}),
+    });
+    return;
+  }
+
+  const contacts = parseContactSeeds(payload.contacts ?? payload.targets);
+  /**
+   * 「没指定对象 → 用**当前打开的**聊天窗口」（用户显式意图：`useCurrentWindow`）。
+   *
+   * 注意这里**只是放行空名单**，真正「绑哪个会话」由 Sidecar 会话装配层在运行期
+   * 用 `resolveCurrentConversation` 判定（必须确认那确实是一个聊天页，不猜）。
+   * 没有这个标志又没给名单 → 仍然拒绝启动（不猜对象）。
+   */
+  const useCurrentWindow = payload.useCurrentWindow === true || payload.use_current_window === true;
+  if (contacts.length === 0 && !useCurrentWindow) {
+    const msg = "聊天模式未指定联系人（需要 host 明确给出要聊的对象，不猜）";
+    logger.chatProgress(msg, { type: "chat_state_update", phase: "stopped", stopReason: "no_contacts" });
+    logger.agentState("failed", { step: 0, msg, ...(boundWaitId ? { waitId: boundWaitId } : {}) });
+    return;
+  }
+
+  const envId = String(readAppEnv(ENV_PROFILE_ID) ?? "").trim() || "unknown";
+  const profileIdNum = Number(payload.profileId ?? payload.profile_id ?? NaN);
+  const userDataDir = resolveUserDataDir(payload);
+
+  // 每联系人上下文必须落在该环境的 userDataDir 里（环境删除才能一并清掉，避免串号）。
+  // 拿不到就**不启动**，而不是悄悄跑一个「没有记忆」的聊天——那是静默降级（§0.5.3 B）。
+  if (!userDataDir) {
+    const msg = "聊天模式缺少 userDataDir：无法持久化每联系人上下文，已拒绝启动";
+    logger.chatProgress(msg, { type: "chat_state_update", phase: "stopped", stopReason: "no_user_data_dir" });
+    logger.agentState("failed", { step: 0, msg, ...(boundWaitId ? { waitId: boundWaitId } : {}) });
+    return;
+  }
+
+  const sliceMs = Number(payload.sliceMs ?? payload.slice_ms ?? CHAT_SLICE_MS_DEFAULT);
+  const maxContacts = Number(
+    payload.maxContactsPerSlice ?? payload.max_contacts ?? CHAT_CONTACTS_PER_SLICE_DEFAULT,
+  );
+
+  const controller = new AbortController();
+  /**
+   * 页内哨兵 / 事件桥的**成对销毁**（坑族 J / R8 第③条）。
+   *
+   * 会话装配层把销毁钩子登记进来，这里在**这一片真正落地**时执行一次：
+   * 观察器与 `exposeFunction` 是**页面级**资源 —— 尤其「用当前打开的窗口」那条路径，
+   * 那个标签属于用户，收工后必须还回去（不许留着常驻拦截全站键盘）。
+   */
+  let disposeConnector: (() => Promise<void>) | null = null;
+  // 每联系人开关解析出的坏值：**不许静默丢弃**（§0.5.3 B）—— 收集起来在下面如实记一条日志
+  const contactFlagDiagnostics: string[] = [];
+  const roleDiagnostics: string[] = [];
+  const roles = parseRoles(payload.roles, roleDiagnostics);
+  const activeRoleId = parseActiveRoleId(
+    payload.activeRoleId ?? payload.active_role_id,
+    roles,
+    roleDiagnostics,
+  );
+  const engine = buildChatSession({
+    browser,
+    logger,
+    aiSettings: asAiSettings(payload.ai),
+    contacts,
+    signal: controller.signal,
+    registerDispose: (fn) => {
+      disposeConnector = fn;
+    },
+    config: {
+      envId,
+      profileId: Number.isFinite(profileIdNum) ? profileIdNum : null,
+      goal: String(payload.goal ?? "").trim(),
+      styleHint: String(payload.styleHint ?? payload.style_hint ?? "").trim() || null,
+      bannedWords: Array.isArray(payload.bannedWords)
+        ? payload.bannedWords.map((w) => String(w)).filter(Boolean)
+        : [],
+      sliceMs: Number.isFinite(sliceMs) && sliceMs > 0 ? sliceMs : CHAT_SLICE_MS_DEFAULT,
+      maxContactsPerSlice:
+        Number.isFinite(maxContacts) && maxContacts > 0
+          ? maxContacts
+          : CHAT_CONTACTS_PER_SLICE_DEFAULT,
+      cadence: parseCadence(payload.cadence ?? payload.chatCadence),
+      pacing: parsePacingConfig(payload.pacing, []),
+      takeovers: parseTakeovers(payload.takeovers ?? payload.chatTakeovers),
+      contactFlags: parseContactFlags(
+        payload.contactFlags ?? payload.contact_flags,
+        contactFlagDiagnostics,
+      ),
+      roles,
+      activeRoleId,
+      snapshotFile: chatSnapshotPath(userDataDir, envId),
+      userDataDir,
+      useCurrentWindow,
+    },
+  });
+
+  chatRunning = true;
+  if (contactFlagDiagnostics.length > 0) {
+    // 坏设置会让「用户以为关了、其实还在发」或反过来；如实说清哪几条没认，不静默降级
+    logger.warn("chat_contact_flags_diagnostics", {
+      diagnostics: contactFlagDiagnostics,
+      count: contactFlagDiagnostics.length,
+    });
+  }
+  if (roleDiagnostics.length > 0) {
+    logger.warn("chat_roles_diagnostics", {
+      diagnostics: roleDiagnostics,
+      count: roleDiagnostics.length,
+    });
+  }
+  logger.chatProgress(
+    useCurrentWindow && contacts.length === 0
+      ? "开始值守（用你当前打开的聊天窗口）"
+      : `开始值守（要聊 ${contacts.length} 人）`,
+    {
+      type: "chat_start",
+      phase: "booting",
+      envId,
+      contactCount: contacts.length,
+      useCurrentWindow,
+      ...(boundWaitId ? { waitId: boundWaitId } : {}),
+    },
+  );
+
+  const done = engine
+    .run()
+    .then((result) => {
+      logger.result("chat_engine_done", {
+        stopReason: result.stopReason,
+        processed: result.processed,
+        sent: result.sent,
+        skipped: result.skipped,
+        nextWakeAt: result.snapshot.engine.nextWakeAt,
+        note: result.note ?? null,
+      });
+      logger.chatProgress(`聊天值守结束：${result.stopReason}`, {
+        type: "chat_state",
+        phase: result.snapshot.engine.phase,
+        stopReason: result.stopReason,
+        processed: result.processed,
+        sent: result.sent,
+        skipped: result.skipped,
+        nextWakeAt: result.snapshot.engine.nextWakeAt,
+        // 片终态带上人话原因（目前是 `no_targets` 的「为什么没对象可聊 + 现在该做什么」）：
+        // 宿主把它透传进 `msg`，视图据此弹提示 —— 否则用户只看到「开始 1 秒后结束」（§0.5.3 H）
+        msg: result.note ?? null,
+        ...(boundWaitId ? { waitId: boundWaitId } : {}),
+      });
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("chat_engine_failed", { error: message });
+      logger.chatProgress(`聊天值守异常：${message.slice(0, 200)}`, {
+        type: "chat_state",
+        phase: "stopped",
+        stopReason: "exception",
+        ...(boundWaitId ? { waitId: boundWaitId } : {}),
+      });
+    })
+    .finally(() => {
+      // 身份校验：被强制停掉之后可能已经起了**新的一片**，
+      // 老引擎迟到收尾绝不能把新会话的忙标记抹掉（否则两片互相覆盖）。
+      if (chatSession?.engine === engine) {
+        chatRunning = false;
+        chatSession = null;
+      }
+      clearActiveCommandWaitId(boundWaitId);
+      // 收尾必须释放页内资源（幂等；失败不改这一片的结论，也不许把终态行吞掉）
+      void disposeConnector?.().catch(() => undefined);
+    });
+
+  chatSession = { engine, controller, done, waitId: boundWaitId };
+}
+
+/** 停止聊天值守：中止 + 等收尾 + 关掉聊天专用标签（只关自己开的） */
+async function handleChatStop(browser: Browser | null, payload: Record<string, unknown>): Promise<void> {
+  const handle = chatSession;
+  const learning = chatLearning;
+  if (!handle && !learning) {
+    // 没在跑也要把忙标记归位：否则一次异常退出会把这个环境**永久**判成「正忙」，
+    // 之后 Agent / 回放 / 填表全都被拒，而 UI 没有任何手段能自行恢复。
+    chatRunning = false;
+    logger.chatProgress("聊天模式本来就没在跑", { type: "chat_state", phase: "stopped" });
+    return;
+  }
+  const reason = String(payload.reason ?? "user_stop");
+
+  if (learning) {
+    // 学习也必须能被停下（否则就是「假停止」）：中止信号由 learnSite 一路透传进采集/推断/自检
+    chatLearning = null;
+    chatRunning = false;
+    learning.controller.abort(reason);
+    logger.chatProgress("站点学习已请求停止", {
+      type: "chat_state",
+      phase: "stopped",
+      stopReason: reason,
+      ...(learning.waitId ? { waitId: learning.waitId } : {}),
+    });
+    clearActiveCommandWaitId(learning.waitId);
+  }
+
+  if (!handle) {
+    // 只有学习在跑：上面已经中止并摘了忙标记，不需要再等一片值守的收尾
+    logger.chatProgress(`聊天值守已停止（${reason}）`, {
+      type: "chat_state",
+      phase: "stopped",
+      stopReason: reason,
+    });
+    return;
+  }
+
+  // 先摘会话与忙标记，再等收尾：停止必须即时生效，不能被一个卡住的 LLM 调用挂住
+  // （与 `agent_abort` 同口径）。收尾由下面的限期等待负责，超时即如实上报（不静默）。
+  if (chatSession?.engine === handle.engine) {
+    chatSession = null;
+    chatRunning = false;
+  }
+  handle.controller.abort(reason);
+
+  const settled = await Promise.race([
+    handle.done.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<boolean>((resolve) => {
+      setTimeout(() => resolve(false), CHAT_STOP_SETTLE_MS);
+    }),
+  ]);
+
+  if (!settled) {
+    // 引擎在限期内没落地：忙标记已摘（环境可重新拉起），但必须留痕，
+    // 并补发终态行让宿主 waiter 立刻结算（否则宿主只能干等自己的 300s 超时）。
+    logger.chatProgress("聊天引擎未在限期内收工，已强制摘除忙标记（该环境可重新拉起）", {
+      type: "chat_state",
+      phase: "stopped",
+      stopReason: "force_stopped",
+      ...(handle.waitId ? { waitId: handle.waitId } : {}),
+    });
+    clearActiveCommandWaitId(handle.waitId);
+  }
+
+  // 关掉聊天标签，别把用户浏览器留一堆我们开的页
+  if (browser) {
+    try {
+      await closeChatPage(contextOf(browser));
+    } catch {
+      /* 浏览器可能已关，忽略 */
+    }
+  }
+  logger.chatProgress(`聊天值守已停止（${reason}）`, { type: "chat_state", phase: "stopped", stopReason: reason });
+}
+
+/* 不在本进程回答：`chat_status` 由 Host 读快照文件 + `chat_threads` 索引作答
+   （`chat_context.rs::read_chat_runtime_status`），这样**没有活会话时也能答**（§0.5.3 H）。 */
+
+/* ————————————————————— 站点描述符：学习（P5 发现流水线） ————————————————————— */
+/* 总览与删除走一次性 CLI（`chat_connector_cli.js`）；本进程只负责**学习当前站点**。 */
+
+/**
+ * 学习当前站点：采集 → 推断 → 机器自检 →（通过才）落盘。
+ *
+ * 这是**长任务**（要调模型、可能多轮修正），因此：
+ *   - 进度行**不带** waitId（片内进度不该唤醒宿主，§0.5.3 E）；
+ *   - 终态单独发一条带 waitId 的 `chat_learn_done`，宿主据此结算；
+ *   - 学不成也要有终态（`ok:false` + 人话原因），绝不让宿主干等超时。
+ */
+async function handleChatLearnSite(
+  browser: Browser,
+  payload: Record<string, unknown>,
+  waitId?: string | null,
+): Promise<void> {
+  const boundWaitId = waitId?.trim() || String(payload.waitId ?? payload.wait_id ?? "").trim() || null;
+  bindCommandWaitId(boundWaitId);
+
+  // 互斥（S5）：学习会开/导航聊天标签，别的引擎在跑就不许开始
+  const busy = engineBusySnapshot();
+  if (isEngineBusy(busy)) {
+    const msg = formatEngineBusyMessage(busy, "站点学习") || ENGINE_BUSY_MESSAGE;
+    logger.warn("engine_busy_reject", { requested: "站点学习", ...busy, msg, waitId: boundWaitId });
+    logger.chatProgress(msg, {
+      type: "chat_learn_done",
+      ok: false,
+      outcome: "failed",
+      phase: "stopped",
+      stopReason: "engine_busy",
+      ...(boundWaitId ? { waitId: boundWaitId } : {}),
+    });
+    clearActiveCommandWaitId(boundWaitId);
+    return;
+  }
+
+  const userDataDir = resolveUserDataDir(payload) ?? null;
+  if (!userDataDir) {
+    // 学习成果必须落在该环境自己的目录里；拿不到就**不学**（免得写到一个猜出来的全局路径）
+    const msg = "站点学习缺少该环境的数据目录：不落盘的学习没有意义，已拒绝开始";
+    logger.chatProgress(msg, {
+      type: "chat_learn_done",
+      ok: false,
+      outcome: "failed",
+      phase: "stopped",
+      stopReason: "no_user_data_dir",
+      ...(boundWaitId ? { waitId: boundWaitId } : {}),
+    });
+    clearActiveCommandWaitId(boundWaitId);
+    return;
+  }
+
+  const aiSettings = asAiSettings(payload.ai);
+  const controller = new AbortController();
+  chatLearning = { controller, waitId: boundWaitId };
+  chatRunning = true;
+
+  const selfTestRaw = payload.selfTestContact ?? payload.self_test_contact;
+  const selfTestContact =
+    selfTestRaw && typeof selfTestRaw === "object" && !Array.isArray(selfTestRaw)
+      ? {
+          label: String((selfTestRaw as Record<string, unknown>).label ?? "").trim(),
+          url:
+            typeof (selfTestRaw as Record<string, unknown>).url === "string"
+              ? String((selfTestRaw as Record<string, unknown>).url)
+              : null,
+        }
+      : null;
+
+  try {
+    const result = await learnSite({
+      browser,
+      logger,
+      aiSettings,
+      userDataDir,
+      url: typeof payload.url === "string" ? payload.url : null,
+      siteLabel: typeof payload.siteLabel === "string" ? payload.siteLabel : null,
+      slot: payload.slot === "fast_text" ? "fast_text" : "logic",
+      maxRounds: Number.isFinite(Number(payload.maxRounds)) ? Number(payload.maxRounds) : undefined,
+      selfTestContact: selfTestContact && selfTestContact.label ? selfTestContact : null,
+      signal: controller.signal,
+    });
+
+    logger.chatProgress(result.summary, {
+      type: "chat_learn_done",
+      ok: result.ok,
+      outcome: result.outcome,
+      siteKey: result.siteKey,
+      descriptorId: result.descriptorId,
+      savedPaths: result.savedPaths,
+      readVerified: result.readVerified,
+      sendVerified: result.sendVerified,
+      attempts: result.attempts,
+      usage: result.usage,
+      checks: result.checks,
+      schemaDiagnostics: result.schemaDiagnostics,
+      learnedDir: resolveLearnedConnectorDir(userDataDir),
+      ...(boundWaitId ? { waitId: boundWaitId } : {}),
+    });
+    clearActiveCommandWaitId(boundWaitId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("chat_learn_failed", { error: message });
+    logger.chatProgress(`站点学习失败：${message.slice(0, 200)}`, {
+      type: "chat_learn_done",
+      ok: false,
+      outcome: "failed",
+      phase: "stopped",
+      stopReason: "exception",
+      ...(boundWaitId ? { waitId: boundWaitId } : {}),
+    });
+    clearActiveCommandWaitId(boundWaitId);
+  } finally {
+    // 身份校验后清理：别把后来者的状态抹掉（§0.5.3 H「老引擎迟到收尾」）
+    if (chatLearning?.controller === controller) {
+      chatLearning = null;
+      chatRunning = false;
+    }
+  }
+}
+
+/**
+ * 「读当前浏览器里那个聊天页的会话列表」——视图里勾选聊天对象的**只读**探针。
+ *
+ * 纪律：
+ *   - **只读**：不点击 / 不导航 / 不新开 / 不滚动（`chat_contacts.ts` 页内函数里也没有这些动作）；
+ *   - **无对话内容**：返回的只有展示名 / 会话直链 / 未读标记，正文一个字都不取；
+ *   - **不占互斥**：它不建会话、不改状态，也不是「引擎」，因此不进 `engine_mutex`；
+ *     但宿主在引擎忙时**会先拒**（并发读页只会让两边都读不准）；
+ *   - **终态裸写 stdout**：宿主按顶层 `type` 分发（`logger.result` 会把载荷塞进 `data`，
+ *     宿主永远收不到 → 请求悬到超时的老坑，§0.5.3 E）。
+ */
+async function handleChatListContacts(
+  browser: Browser,
+  payload: Record<string, unknown>,
+  waitId?: string | null,
+): Promise<void> {
+  const boundWaitId = waitId?.trim() || String(payload.waitId ?? payload.wait_id ?? "").trim() || null;
+  const userDataDir = resolveUserDataDir(payload) ?? null;
+  // 预算是硬的：读列表是短任务，卡住就往回说，不让宿主的 waiter 干等（§0.5.3 E）
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort("timeout"), CHAT_LIST_CONTACTS_TIMEOUT_MS);
+  try {
+    const result = await listPageThreads(browser, {
+      userDataDir,
+      signal: controller.signal,
+      onDiagnostic: (code, detail) => logger.warn("chat_list_contacts_diagnostic", { code, detail }),
+    });
+    process.stdout.write(
+      `${JSON.stringify({
+        type: "chat_contacts_list",
+        ok: result.ok,
+        reason: result.reason,
+        source: result.source,
+        siteKey: result.siteKey,
+        pageUrl: result.pageUrl,
+        items: result.items.map((item) => ({
+          key: item.key,
+          // 标签在探针里已经过统一脱敏（`sanitizeForLedger`），且身份（`flagKey`）
+          // 就是用这个标签算出来的 —— 这里不再动它，否则视图回传的标签会对不上身份。
+          label: item.label,
+          url: item.url,
+          unread: item.unread,
+          // 视图把「自动回复 / 定时回访」写进设置表时用的键（由侧车算，前端不自己拼）
+          flagKey: item.flagKey,
+        })),
+        scannedAt: new Date().toISOString(),
+        ...(boundWaitId ? { waitId: boundWaitId } : {}),
+      })}\n`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("chat_list_contacts_failed", { error: message });
+    // 失败也要有终态：否则宿主的 waiter 只能干等超时（§0.5.3 E）
+    process.stdout.write(
+      `${JSON.stringify({
+        type: "chat_contacts_list",
+        ok: false,
+        reason: `读取会话列表失败：${message.slice(0, 200)}`,
+        source: "generic",
+        siteKey: "unknown",
+        pageUrl: null,
+        items: [],
+        ...(boundWaitId ? { waitId: boundWaitId } : {}),
+      })}\n`,
+    );
+  } finally {
+    clearTimeout(timer);
+    clearActiveCommandWaitId(boundWaitId);
+  }
+}
+
 async function handleTrajectoryList(payload: Record<string, unknown>): Promise<void> {
   const domain = String(payload.domain ?? "").trim();
   try {
@@ -1960,6 +2484,7 @@ async function main(): Promise<void> {
     if (
       command === "agent_start" ||
       command === "rpa_start" ||
+      command === "chat_start" ||
       command === "trajectory_replay" ||
       command === "fill" ||
       command === "smart_element_fill" ||
@@ -1980,6 +2505,58 @@ async function main(): Promise<void> {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error("agent_start_failed", { error: message });
+      }
+      return;
+    }
+
+    if (command === "chat_start") {
+      try {
+        await handleChatStart(browser, payload, waitId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("chat_start_failed", { error: message });
+        logger.chatProgress(`聊天模式启动失败：${message.slice(0, 200)}`, {
+          type: "chat_state",
+          phase: "stopped",
+          stopReason: "start_failed",
+          // 必须带 waitId：否则宿主的 waiter 等不到终态行，只能干等 300s 超时（§0.5.3 E）
+          ...(waitId ? { waitId } : {}),
+        });
+      }
+      return;
+    }
+
+    if (command === "chat_stop") {
+      await handleChatStop(browser, payload);
+      return;
+    }
+
+    if (command === "chat_list_contacts") {
+      try {
+        await handleChatListContacts(browser, payload, waitId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("chat_list_contacts_failed", { error: message });
+      }
+      return;
+    }
+
+    if (command === "chat_learn_site") {
+      try {
+        await handleChatLearnSite(browser, payload, waitId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("chat_learn_site_failed", { error: message });
+        // 终态必须带 waitId，否则宿主的 waiter 只能干等超时（§0.5.3 E）
+        logger.chatProgress(`站点学习启动失败：${message.slice(0, 200)}`, {
+          type: "chat_learn_done",
+          ok: false,
+          outcome: "failed",
+          phase: "stopped",
+          stopReason: "start_failed",
+          ...(waitId ? { waitId } : {}),
+        });
+        clearActiveCommandWaitId(waitId);
       }
       return;
     }

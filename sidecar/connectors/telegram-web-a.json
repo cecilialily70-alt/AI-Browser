@@ -1,0 +1,154 @@
+{
+  "id": "telegram-web-a",
+  "version": 1,
+  "source": "builtin",
+  "match": {
+    "hostPattern": "^web\\.telegram\\.org$",
+    "pathPattern": "^/a(?:/|$)"
+  },
+  "ready": {
+    "allOf": [
+      "#MiddleColumn",
+      "#LeftColumn"
+    ],
+    "absent": [
+      "#auth-pages",
+      ".auth-pages",
+      ".qr-container"
+    ]
+  },
+  "peer": {
+    "fromAttribute": {
+      "attr": "data-peer-id",
+      "pattern": "^(-?\\d{4,20})$",
+      "group": 1
+    },
+    "fallbackAttrs": [
+      "data-peer-id",
+      "data-chat-id"
+    ],
+    "fallbackHeader": {
+      "selectors": [
+        "#MiddleColumn .peer-title",
+        "#MiddleColumn .ChatInfo .title",
+        "#MiddleColumn .chat-info .title"
+      ],
+      "digitsOnly": false
+    }
+  },
+  "rows": {
+    "selector": ".Message[data-message-id]",
+    "id": {
+      "attr": "data-message-id",
+      "accept": [
+        "^-?\\d{1,20}$"
+      ]
+    },
+    "idPrefixDirection": null,
+    "thenTailIcons": {
+      "out": [
+        ".Message.is-out",
+        ".is-out"
+      ],
+      "in": [
+        ".Message.is-in",
+        ".is-in"
+      ]
+    },
+    "thenCheckIcons": {
+      "out": [
+        ".Message.is-out.can-have-tail"
+      ]
+    },
+    "exclude": [
+      ".ActionMessage",
+      ".Message.service",
+      ".last-in-list"
+    ],
+    "textSelectors": [
+      ".text-content",
+      ".message-content",
+      ".translatable-message"
+    ],
+    "attachmentSelectors": [
+      ".Photo",
+      ".Video",
+      ".Audio",
+      ".Document",
+      ".Sticker",
+      ".Voice"
+    ],
+    "quotedReplySelectors": [
+      ".Reply",
+      ".EmbeddedMessage",
+      ".reply-markup"
+    ],
+    "timeSelectors": [
+      ".MessageMeta",
+      ".message-time",
+      ".time",
+      "time"
+    ],
+    "retractedSelectors": [
+      ".Message.is-deleted",
+      ".ActionMessage.is-deleted"
+    ],
+    "tokenAttrs": [
+      "class"
+    ],
+    "insertedAtTopMeansOlder": false
+  },
+  "composer": {
+    "selectors": [
+      "#message-input-text[contenteditable=\"true\"]",
+      "#MiddleColumn .input-message-input[contenteditable=\"true\"]",
+      "#MiddleColumn div[contenteditable=\"true\"][role=\"textbox\"]"
+    ],
+    "input": {
+      "method": "typeKeys",
+      "verify": "equals",
+      "retries": 2,
+      "failClosed": true
+    },
+    "send": {
+      "selectors": [
+        "button.Button.send",
+        ".Button.send",
+        "button[aria-label*=\"send\" i]"
+      ],
+      "method": "enterOnce",
+      "elseClick": true
+    }
+  },
+  "history": {
+    "scrollRoot": [
+      "#MiddleColumn .MessageList",
+      "#MiddleColumn .messages-container",
+      "#MiddleColumn"
+    ],
+    "batchLimit": 80,
+    "concurrency": 4
+  },
+  "threads": {
+    "itemSelectors": [
+      "#LeftColumn .Chat[data-peer-id]",
+      "#LeftColumn .ListItem[data-peer-id]",
+      "#LeftColumn [data-peer-id]"
+    ],
+    "keyAttr": "data-peer-id",
+    "hrefAttr": "href",
+    "labelSelectors": [
+      ".peer-title",
+      ".title",
+      "span[dir=\"auto\"]"
+    ],
+    "unreadSelectors": [
+      "[class*=\"unread\"]",
+      ".ChatBadge"
+    ],
+    "limit": 60
+  },
+  "presence": {
+    "typing": []
+  }
+}

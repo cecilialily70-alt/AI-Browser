@@ -34,9 +34,6 @@ import type { AgentConfirmActionRow } from "./AgentConfirmModal";
 
 const logger = createLogger("InterventionCenter");
 
-/** @deprecated 兼容旧 Panel 引用；统一使用 PendingAgentHuman */
-export type BlockedTask = PendingAgentHuman;
-
 interface InterventionCenterValue {
   /** SSOT 介入队列（confirm / ask / handover） */
   inbox: PendingAgentHuman[];

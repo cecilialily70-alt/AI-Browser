@@ -84,10 +84,3 @@ export function buildOpenTabsPayload(input: OpenTabsReportInput): {
     ...(step !== undefined ? { step } : {}),
   };
 }
-
-export function formatOpenTabsHint(tabCount: number): string {
-  if (tabCount <= 1) {
-    return "控件索引仅属于当前页；新标签出现后由 Agent 使用 switch(tab_id) 切换。";
-  }
-  return `共 ${tabCount} 个标签（只读）。切换由 Agent 执行 switch(tab_id)；此处可「切到环境前台」查看浏览器。`;
-}

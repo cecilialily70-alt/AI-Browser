@@ -1,0 +1,13 @@
+{
+  "_note": "会话列表采集夹具（WhatsApp Web）：页内采集产物（`ThreadsProbe`）的脱敏形态。这一站的列表项**没有 href**，所以 url 全为 null（打开只能靠按展示名点列表项）。",
+  "ok": true,
+  "reason": null,
+  "source": "descriptor",
+  "baseUrl": "https://web.whatsapp.com/",
+  "items": [
+    { "key": null, "label": "小明", "href": null, "unread": true },
+    { "key": null, "label": "小王", "href": null, "unread": false },
+    { "key": null, "label": "小明", "href": null, "unread": false },
+    { "key": null, "label": "  有空格的   名字  ", "href": null, "unread": false }
+  ]
+}

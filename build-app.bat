@@ -126,6 +126,8 @@ call :REQ_RECURSE "%PORTABLE_DIR%\sidecar\config" "action_risk_lexicon.json" "HI
 call :REQ_RECURSE "%PORTABLE_DIR%\sidecar\config" "human_credential_lexicon.json" "human credential lexicon -- missing makes the external data API stop refusing OTP fields"
 call :REQ_RECURSE "%PORTABLE_DIR%\sidecar\agent_skills" "SKILL.md" "Sidecar agent skill packs -- missing means the Agent reports unknown skill_id"
 call :REQ_FILE "%PORTABLE_DIR%\sidecar\agent_skills\press-hold-captcha\SKILL.md" "press-hold captcha skill pack -- required by the long-press solver's skill index"
+call :REQ_GLOB "%PORTABLE_DIR%\sidecar\connectors" "*.json" "Sidecar site descriptors -- missing means every chat site silently falls back to the generic reader"
+call :REQ_FILE "%PORTABLE_DIR%\sidecar\connectors\whatsapp-web.json" "Built-in site descriptor -- the fidelity baseline other descriptors are measured against"
 
 call :WARN_DIR "%PORTABLE_DIR%\extensions" "browser extensions"
 call :WARN_GLOB "%PORTABLE_DIR%\Browse" "chromium-*" "local kernels under Browse"

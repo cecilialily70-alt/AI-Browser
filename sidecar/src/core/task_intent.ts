@@ -50,8 +50,6 @@ const FALLBACK_SEARCH_TERMS = [
   "lookup",
 ];
 
-const FALLBACK_NAVIGATE_TERMS = ["打开", "访问", "前往", "导航", "进入", "浏览", "open", "visit", "go to", "navigate"];
-
 const FALLBACK_QUERY_STOPWORDS = [
   "首页",
   "首页面",
@@ -178,10 +176,6 @@ function searchTerms(lexicon: TaskIntentLexicon | null): string[] {
   return lexicon?.searchTerms.length ? lexicon.searchTerms : FALLBACK_SEARCH_TERMS;
 }
 
-function navigateTerms(lexicon: TaskIntentLexicon | null): string[] {
-  return lexicon?.navigateTerms.length ? lexicon.navigateTerms : FALLBACK_NAVIGATE_TERMS;
-}
-
 function stopwords(lexicon: TaskIntentLexicon | null): string[] {
   return lexicon?.queryStopwords.length ? lexicon.queryStopwords : FALLBACK_QUERY_STOPWORDS;
 }
@@ -197,14 +191,6 @@ export function goalRequestsSearch(goal: string, lexicon: TaskIntentLexicon | nu
   const hay = normalizeHaystack(goal);
   if (!hay) return { requested: false, matched: null };
   const hit = firstHit(hay, searchTerms(lexicon));
-  return { requested: Boolean(hit), matched: hit };
-}
-
-/** 目标是否显式请求了导航（仅用于日志/扩展） */
-export function goalRequestsNavigation(goal: string, lexicon: TaskIntentLexicon | null = loadTaskIntentLexicon()): IntentHit {
-  const hay = normalizeHaystack(goal);
-  if (!hay) return { requested: false, matched: null };
-  const hit = firstHit(hay, navigateTerms(lexicon));
   return { requested: Boolean(hit), matched: hit };
 }
 

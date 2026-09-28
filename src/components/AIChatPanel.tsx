@@ -87,7 +87,7 @@ export function AIChatPanel({
   const historyRef = useRef<HTMLDivElement>(null);
   const inputLocked = chatLoading || chatDisabled;
 
-  const { fileInputRef, onFilePicked, onPaste } = useChatAttachmentPicker({
+  const { fileInputRef, onFilePicked, onPaste, dropActive, dropHandlers } = useChatAttachmentPicker({
     attachments,
     onAttachmentsChange,
     onAttachError,
@@ -114,7 +114,10 @@ export function AIChatPanel({
   }, [chatLines, chatLoading]);
 
   return (
-    <div className="panel">
+    <div
+      className={dropActive ? "panel ring-2 ring-inset ring-primary/50" : "panel"}
+      {...dropHandlers}
+    >
       <div ref={historyRef} className="min-h-0 flex-1 overflow-y-auto bg-sunken p-3">
         {chatLines.length === 0 ? (
           <p className="text-caption text-muted-foreground">{emptyHint}</p>

@@ -448,24 +448,29 @@
     @apply flex min-h-[38px] items-center justify-between gap-3 bg-destructive/10 px-4 py-2 text-caption text-destructive;
   }
 
-  /* ---- 表格：无竖线，仅斑马纹 + 悬停 ---- */
+  /* ---- 表格：无竖线，仅斑马纹 + 悬停 ----
+     下面四条一律套 `:where()` 把特异性压到 0：
+     `.data-table thead th`（0-1-2）与 `.data-table tbody tr:nth-child(even)`（0-2-1）
+     的特异性高于写在 <th>/<tr> 上的工具类（0-1-0），
+     结果是 th 上的 `text-center` 被吃掉（表头左对齐、内容居中 → 对不齐），
+     选中行的 `bg-primary/10` 也被斑马纹盖住（偶数选中行看不出被选中）。 */
   .data-table {
     @apply w-full border-collapse text-ui;
   }
 
-  .data-table thead th {
+  :where(.data-table thead th) {
     @apply sticky top-0 z-10 bg-surface-muted px-2.5 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground;
   }
 
-  .data-table tbody tr:nth-child(even) {
-    @apply bg-secondary/25;
-  }
-
-  .data-table tbody tr {
+  :where(.data-table tbody tr) {
     @apply transition-colors;
   }
 
-  .data-table tbody tr:hover {
+  :where(.data-table tbody tr:nth-child(even)) {
+    @apply bg-secondary/25;
+  }
+
+  :where(.data-table tbody tr:hover) {
     @apply bg-secondary/40;
   }
 

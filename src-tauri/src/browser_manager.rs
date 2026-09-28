@@ -14,7 +14,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::db;
 use crate::error::AppError;
 use crate::{log_info, log_warn};
-use crate::extension_paths::{collect_extension_paths, merge_extension_paths};
+use crate::extension_paths::{
+    collect_extension_paths, merge_extension_paths, strip_windows_verbatim_prefix,
+};
 use crate::models::{Profile, StartProfileResult};
 use crate::process_win::{
     kill_process_tree, prepare_sidecar_command, register_child_for_lifecycle,
@@ -268,9 +270,51 @@ impl BrowserManager {
 
         let user_data_dir = profiles_root.join(format!("profile-{profile_id}"));
         std::fs::create_dir_all(&user_data_dir)?;
-        let user_data_dir = user_data_dir
-            .canonicalize()
-            .unwrap_or_else(|_| profiles_root.join(format!("profile-{profile_id}")));
+
+        // 启动前先清掉同一 profile 目录上的孤儿 Chromium：它握着 IndexedDB / Cookies 的锁，
+        // 不清掉就会出现「浏览器起来了、界面也正常，但站点存储全都写不进磁盘」——
+        // 站点因此每一轮都判定「本机已被登出」，登录态永远存不住。
+        //
+        // 匹配键故意用**未 canonicalize** 的路径：它是 `\\?\C:\...` 形式命令行的子串，
+        // 反过来不成立（拿 `\\?\` 形式去找普通形式的进程会漏杀）。
+        #[cfg(windows)]
+        {
+            let swept = crate::win_taskbar::kill_browsers_matching_user_data_dir(
+                &user_data_dir.to_string_lossy(),
+            );
+            if swept.killed > 0 {
+                log_warn!(
+                    "[browser_manager] 环境 #{profile_id} 启动前清理了 {} 个残留浏览器进程（释放 profile 存储锁）",
+                    swept.killed
+                );
+            }
+        }
+
+        // 强杀留下的空壳 IndexedDB / Service Worker 会让 WhatsApp 等站点卡在「加载中」：
+        // 目录在、文件数为 0 → 站点以为存储已损坏。启动前自愈拆掉空壳（有真实数据的不动）。
+        {
+            let scrub = crate::browser_data::scrub_corrupt_site_storage(&user_data_dir);
+            if scrub.removed_dirs > 0 {
+                log_warn!(
+                    "[browser_manager] 环境 #{profile_id} 启动前清除了 {} 处损坏的空站点存储（{details}）",
+                    scrub.removed_dirs,
+                    details = scrub.details.join("；")
+                );
+            }
+        }
+
+        // 解析成绝对路径后**必须剥掉** Windows 的 `\\?\` 扩展前缀再交给 Chromium。
+        //
+        // 实测（2026-09-28）：`--user-data-dir=\\?\C:\...` 时 WhatsApp 的 IndexedDB
+        // usage 恒为 0、磁盘 leveldb 0 文件、WebSocket 不起、二维码区永远转圈；
+        // 同一目录用不带前缀的 `C:\...` 则 6~12 秒画出二维码、IDB 正常落盘。
+        // `Path::canonicalize()` 在 Windows 上会加上 `\\?\`，以前直接把结果塞进
+        // launch 配置，等于每次启动都踩中这个坑。
+        let user_data_dir = strip_windows_verbatim_prefix(
+            user_data_dir
+                .canonicalize()
+                .unwrap_or_else(|_| profiles_root.join(format!("profile-{profile_id}"))),
+        );
 
         proxy::purge_stale_profile_proxy_auth_ext(&user_data_dir);
         let auth_extension_dir = if let Some(ref resolved) = resolved_proxy {
@@ -405,7 +449,14 @@ impl BrowserManager {
         };
 
         if let Some((_, child)) = self.processes.remove(&profile_id) {
-            stop_child(child)?;
+            // 优雅关闭失败**不能**中止这里的收尾：那会让环境永远停在 running
+            // （start 拒绝、stop 也拒绝，界面无法自愈）。失败只记日志，交给下面的
+            // force_kill_profile_browser 兜底回收。
+            if let Err(error) = stop_child(child) {
+                log_warn!(
+                    "[browser_manager] 环境 #{profile_id} 优雅关闭失败，转强制回收：{error}"
+                );
+            }
         }
 
         match force_kill_profile_browser(app, cdp_port, &user_data_dir) {
@@ -1124,6 +1175,12 @@ fn parse_launch_stdout_line(line: &str) -> LaunchStdoutEvent {
     LaunchStdoutEvent::Ignore
 }
 
+/// 兼容旧名：user-data-dir 与扩展路径同一套剥前缀规则。
+#[cfg(test)]
+fn normalize_chromium_user_data_dir(path: std::path::PathBuf) -> std::path::PathBuf {
+    strip_windows_verbatim_prefix(path)
+}
+
 fn stop_child(mut child: Child) -> Result<(), AppError> {
     let pid = child.id();
 
@@ -1201,6 +1258,17 @@ fn classify_user_data_dir_kill(
     }
 }
 
+/// 强制回收环境浏览器。
+///
+/// 两条腿都要走，缺一不可：
+/// 1. **CDP 端口**上的进程 —— 管这次启动的那个实例；
+/// 2. **user-data-dir** 上的全部残留 —— 管**另一次启动留下的孤儿实例**。
+///
+/// 端口只标识「这一次」启动的浏览器。同一 profile 目录上完全可能还剩着孤儿
+/// （上一次启动被取消、看门狗重启执行进程、Node 宿主先退出导致 Chromium 被系统接管……）：
+/// 它不监听本次端口，却仍握着 `Default\IndexedDB` 与 `Default\Network\Cookies`
+/// 的 LevelDB / SQLite 锁。只杀端口上的进程，下一次启动就**写不进存储** ——
+/// 表现为「站点每轮都说我已被登出、二维码一直出不来」。
 fn force_kill_profile_browser(
     app: &AppHandle,
     cdp_port: Option<i64>,
@@ -1208,26 +1276,35 @@ fn force_kill_profile_browser(
 ) -> ProfileKillOutcome {
     #[cfg(windows)]
     {
+        let mut outcome = ProfileKillOutcome::AlreadyGone;
+
         if let Some(port) = cdp_port.filter(|value| *value > 0 && *value <= u16::MAX as i64) {
             let port = port as u16;
             if crate::win_taskbar::kill_browser_for_profile(port, Some(user_data_dir)).is_ok() {
-                return ProfileKillOutcome::Killed;
-            }
-            // 端口上仍有监听者却杀不掉 —— 这一支才是真失败
-            if let Some(pid) = crate::win_taskbar::find_pid_listening_on_port(port) {
-                return match kill_process_tree(pid) {
+                outcome = ProfileKillOutcome::Killed;
+            } else if let Some(pid) = crate::win_taskbar::find_pid_listening_on_port(port) {
+                // 端口上仍有监听者却杀不掉 —— 这一支才是真失败
+                outcome = match kill_process_tree(pid) {
                     Ok(()) => ProfileKillOutcome::Killed,
                     Err(_) => ProfileKillOutcome::Failed,
                 };
             }
         }
-        // 无有效 CDP / 端口已释放：仍按 user-data-dir 清幽灵进程，释放收费席位
+
+        // 端口那一支成功与否都要再按 user-data-dir 扫一遍：孤儿实例不监听本次端口，
+        // 只有这一遍能把它清掉、把 profile 上的存储锁放开。
         if !user_data_dir.trim().is_empty() {
-            let outcome = crate::win_taskbar::kill_browsers_matching_user_data_dir(user_data_dir);
-            return classify_user_data_dir_kill(outcome);
+            let swept = crate::win_taskbar::kill_browsers_matching_user_data_dir(user_data_dir);
+            match classify_user_data_dir_kill(swept) {
+                ProfileKillOutcome::Killed => outcome = ProfileKillOutcome::Killed,
+                // 扫到了却一个都杀不掉：这才是需要告警的残留
+                ProfileKillOutcome::Failed => outcome = ProfileKillOutcome::Failed,
+                ProfileKillOutcome::AlreadyGone => {}
+            }
         }
+
         let _ = app;
-        ProfileKillOutcome::AlreadyGone
+        outcome
     }
 
     #[cfg(not(windows))]
@@ -1300,6 +1377,27 @@ mod tests {
         // 二次释放不应 panic（stop_profile 也会摘除同名标记）
         manager.launching.remove("8");
         assert!(!manager.is_running("8"));
+    }
+
+    /// `\\?\` 前缀必须剥掉，否则 Chromium 写不进 IndexedDB（WhatsApp 二维码永远转圈）。
+    #[test]
+    fn normalize_chromium_user_data_dir_strips_verbatim_prefix() {
+        let extended = std::path::PathBuf::from(r"\\?\C:\Users\x\browser-profiles\profile-1");
+        let normal = normalize_chromium_user_data_dir(extended);
+        assert_eq!(
+            normal.to_string_lossy(),
+            r"C:\Users\x\browser-profiles\profile-1"
+        );
+
+        let unc = std::path::PathBuf::from(r"\\?\UNC\server\share\profile-1");
+        let unc_out = normalize_chromium_user_data_dir(unc);
+        assert_eq!(unc_out.to_string_lossy(), r"\\server\share\profile-1");
+
+        let already = std::path::PathBuf::from(r"C:\Users\x\browser-profiles\profile-2");
+        assert_eq!(
+            normalize_chromium_user_data_dir(already.clone()),
+            already
+        );
     }
 
     /// 回归：`force_kill_profile_browser` 过去把「端口上没有进程」也报成失败，

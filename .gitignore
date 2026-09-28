@@ -57,6 +57,8 @@ extensions/immersive-translate/
 # Agent / temp assets
 agent-transcripts/
 assets/
+tmp-preview/
+tmp-*/
 
 # Sidecar runtime artifacts (debug logs / control memory LRU)
 sidecar/logs/

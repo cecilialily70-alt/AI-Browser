@@ -32,7 +32,7 @@ pub struct Profile {
     /// Milestone 3：环境核心人设 JSON（姓名/生日/性别等），由 Agent 首次生成后落盘复用
     #[serde(default)]
     pub persona_data: Option<String>,
-    /// 启动时额外打开的网站 JSON 数组（首位永远由引擎强制 BrowserScan）
+    /// 启动时额外打开的网站 JSON 数组（首位永远由引擎强制打开 Google）
     #[serde(default)]
     pub startup_urls: String,
     /// P1.1：邮箱 OTP 通道绑定 JSON（仅 secretRef 句柄，不含密码明文）

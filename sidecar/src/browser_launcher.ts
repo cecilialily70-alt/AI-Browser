@@ -199,7 +199,7 @@ export interface ProfileLaunchConfig {
   allowThirdPartyCookies?: boolean;
   /** Windows-only debug: disable all spoofing and expose the real fingerprint (--fingerprint=off). */
   fingerprintOff?: boolean;
-  /** 额外启动网址（首位永远强制 BrowserScan，由引擎拼接） */
+  /** 额外启动网址（首位永远强制 Google，由引擎拼接） */
   startupUrls?: string[] | null;
   /** Portable/dev: absolute Browse/ root containing chromium-151…-pro for offline seed */
   bundledBrowseRoot?: string | null;
@@ -745,7 +745,7 @@ function normalizeExtraStartupUrls(raw: unknown): string[] {
 }
 
 /**
- * 启动开页：第 1 个永远 BrowserScan；其余按环境设置顺序新开标签。
+ * 启动开页：第 1 个永远 Google；其余按环境设置顺序新开标签。
  */
 async function openStartupPages(
   context: BrowserContext,

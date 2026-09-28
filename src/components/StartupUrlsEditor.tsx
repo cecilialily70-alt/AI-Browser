@@ -1,7 +1,7 @@
 import { Plus, Trash2 } from "lucide-react";
 
 /** 启动时强制首位打开的首页（不可删除） */
-export const FORCED_STARTUP_HOMEPAGE = "https://www.browserscan.net/zh";
+export const FORCED_STARTUP_HOMEPAGE = "https://www.google.com/";
 
 export function parseStartupUrlsJson(raw: string | null | undefined): string[] {
   if (!raw?.trim()) {
@@ -42,7 +42,7 @@ interface StartupUrlsEditorProps {
 }
 
 /**
- * 启动自动开页编辑器：首位锁定 BrowserScan，可追加多个网站。
+ * 启动自动开页编辑器：首位锁定 Google，可追加多个网站。
  */
 export function StartupUrlsEditor({ urls, onChange, disabled }: StartupUrlsEditorProps) {
   const updateAt = (index: number, value: string) => {
@@ -76,7 +76,7 @@ export function StartupUrlsEditor({ urls, onChange, disabled }: StartupUrlsEdito
           添加网址
         </button>
       </div>
-      <p className="text-[11px] leading-4 text-muted-foreground">第 1 页固定为检测页；其余按下方顺序打开</p>
+      <p className="text-[11px] leading-4 text-muted-foreground">第 1 页固定为 Google；其余按下方顺序打开</p>
       <div className="space-y-1.5 rounded-md bg-surface-muted p-2.5">
         <div className="flex items-center gap-2">
           <span className="w-6 shrink-0 text-center text-[10px] tabular-nums text-muted-foreground">1</span>

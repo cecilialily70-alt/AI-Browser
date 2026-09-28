@@ -3,8 +3,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 
-/** 指纹浏览器默认首页 / 新标签目标 */
-export const DEFAULT_HOMEPAGE_URL = "https://www.browserscan.net/zh";
+/** 浏览器默认首页 / 新标签目标 */
+export const DEFAULT_HOMEPAGE_URL = "https://www.google.com/";
 
 const GOOGLE_SEARCH_URL =
   "https://www.google.com/search?q={searchTerms}&ie={inputEncoding}";

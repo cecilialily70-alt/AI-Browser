@@ -41,7 +41,7 @@ export interface Profile {
    * 列保留以避免迁移风险，当前无写入方，也不再被自动填表/回放读取。
    */
   persona_data?: string | null;
-  /** 启动额外打开的网站 JSON 数组字符串（首位 BrowserScan 由引擎强制） */
+  /** 启动额外打开的网站 JSON 数组字符串（首位 Google 由引擎强制） */
   startup_urls?: string;
   /** P1.1：邮箱 OTP 通道绑定 JSON（仅 secretRef，不含密码明文） */
   otp_channel?: string | null;

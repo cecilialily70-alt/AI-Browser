@@ -1023,7 +1023,7 @@ fn normalize_browser_version(raw: Option<&str>) -> Result<String, AppError> {
     Ok(trimmed.to_owned())
 }
 
-/// 规范化额外启动网址 JSON：过滤空项、补 https、去重、上限 20；不含强制首位 BrowserScan。
+/// 规范化额外启动网址 JSON：过滤空项、补 https、去重、上限 20；不含强制首位首页。
 pub fn normalize_startup_urls_json(raw: Option<&str>) -> Result<String, AppError> {
     const MAX: usize = 20;
     let text = raw.map(str::trim).filter(|v| !v.is_empty()).unwrap_or("[]");
@@ -1036,7 +1036,7 @@ pub fn normalize_startup_urls_json(raw: Option<&str>) -> Result<String, AppError
         ));
     };
 
-    let forced = "https://www.browserscan.net/zh";
+    let forced = "https://www.google.com/";
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     seen.insert(forced.to_ascii_lowercase());

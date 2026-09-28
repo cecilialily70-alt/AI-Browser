@@ -234,7 +234,7 @@ export const PROMPT_TOOL_CATALOG = `## 【工具目录与调用规则】
 | click | index **或** coordinate_x+coordinate_y | — | 勾选类元素会回读并验证勾选态；被弹层遮挡时系统会自动清障后重点。**不可逆动作（支付/转账/删除/发布/发送/改密等）必触发人工确认**（目标已提及也不豁免）；注册/登录/提交/同意等敏感动作仅当目标未覆盖时才确认；用户取消=失败 |
 | input | index, text | clear(默认 true) | 执行后**回读真值**：\`（回读确认：…）\`=写入成功，\`未生效\`=失败（勿反复重填）。敏感字段（密码/OTP/卡号/CVV/私钥等）在目标未覆盖时会触发人工确认 |
 | dropdown_options | index | — | 列出选项 → 结果仅本轮后出现在 read_state |
-| select_dropdown | index, text | — | 按选项**精确文案**选择 |
+| select_dropdown | index, text | — | 按选项**精确文案**选择；选完后**不要按 Escape**（部分站点会清空已选） |
 
 ### 2. 感知与抽取（成本控制）
 | 工具 | 必填 | 可选 | 说明 |

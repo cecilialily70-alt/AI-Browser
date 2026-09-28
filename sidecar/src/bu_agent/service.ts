@@ -1563,7 +1563,15 @@ async function runBuAutonomousAgentLoopInner(
       // 纯导航目标到达目标 URL：先落客观证据（done 验收用，去重一次），再由下面的确定性收尾结束任务
       if (!navigationReachedRecorded && analyzed.navigationTargets.length > 0) {
         const reached = firstReachedTarget(pageUrl, analyzed.navigationTargets);
-        if (reached && !goalRequestsSearch(deps.goal).requested && !goalHasFollowup && !goalNeedsUnderstanding) {
+        if (
+          reached &&
+          !goalRequestsSearch(deps.goal).requested &&
+          !goalHasFollowup &&
+          !goalNeedsUnderstanding &&
+          !analyzed.intent.needsFollowup &&
+          analyzed.intent.kind !== "task" &&
+          analyzed.intent.kind !== "understand"
+        ) {
           navigationReachedRecorded = markNavigationReached(evidenceLedger, {
             step,
             url: pageUrl,
@@ -1959,7 +1967,13 @@ async function runBuAutonomousAgentLoopInner(
         );
       }
       const autoNavDone =
-        !autoDone && !captchaGate.interstitial
+        !autoDone &&
+        !captchaGate.interstitial &&
+        // LLM/规则已标明「打开之后还有事」时，禁止因 bootstrap 导航目标碰巧到达就本地收尾
+        // （现场：「帮我创建谷歌邮箱」→ 到 google.com 就反复 done）。
+        !analyzed.intent.needsFollowup &&
+        analyzed.intent.kind !== "task" &&
+        analyzed.intent.kind !== "understand"
           ? tryDeterministicNavigationDone({
               goal: deps.goal,
               queryTerms: analyzed.queryTerms,

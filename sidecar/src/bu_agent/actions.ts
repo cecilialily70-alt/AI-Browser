@@ -403,6 +403,84 @@ async function ensurePopupOpened(
   return state;
 }
 
+/** 读自定义 combobox / listbox 触发器当前显示值（用于 select_dropdown 落值校验） */
+async function readComboboxShownValue(scope: DomScope, playwrightSelector: string): Promise<string> {
+  if (!playwrightSelector) return "";
+  try {
+    return await scope.locator(playwrightSelector).first().evaluate((node) => {
+      const el = node as HTMLElement;
+      const aria = (el.getAttribute("aria-label") || "").trim();
+      const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      // 选中态 option（列表可能仍开着）
+      const selected = el.ownerDocument.querySelector(
+        '[role="option"][aria-selected="true"], [role="menuitem"][aria-selected="true"]',
+      );
+      const selectedText = selected
+        ? (selected.textContent || "").replace(/\s+/g, " ").trim()
+        : "";
+      return selectedText || text || aria;
+    });
+  } catch {
+    return "";
+  }
+}
+
+function normalizeChoiceText(value: string): string {
+  return String(value ?? "").replace(/\s+/g, "").toLowerCase();
+}
+
+/**
+ * 下拉是否真正落值：显示文案包含目标，或相对选择前发生了可辨认变化且含目标关键词。
+ * 禁止把「仍是占位 月 / 性別」当成已选中。
+ */
+function dropdownSelectionApplied(afterShown: string, wanted: string, beforeShown: string): boolean {
+  const after = normalizeChoiceText(afterShown);
+  const want = normalizeChoiceText(wanted);
+  if (!want) return false;
+  if (after.includes(want)) return true;
+  // 目标「3 月」vs 显示「三月」这类宽松：数字/主词都在
+  const digits = want.replace(/[^\d]/g, "");
+  if (digits && after.includes(digits) && after !== normalizeChoiceText(beforeShown)) {
+    return true;
+  }
+  return false;
+}
+
+/** 表单可见值指纹：evaluate / 下拉动作前后比对，真改了才算进展 */
+async function readFormValueFingerprint(page: Page): Promise<string> {
+  try {
+    return await page.evaluate(() => {
+      const bits: string[] = [];
+      const nodes = document.querySelectorAll(
+        'input:not([type="hidden"]):not([type="password"]), textarea, select, [role="combobox"]',
+      );
+      for (const node of nodes) {
+        const el = node as HTMLElement;
+        let value = "";
+        if (
+          el instanceof HTMLInputElement ||
+          el instanceof HTMLTextAreaElement ||
+          el instanceof HTMLSelectElement
+        ) {
+          value = el.value || "";
+        } else {
+          value = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 48);
+        }
+        if (!value) continue;
+        const key =
+          el.getAttribute("name") ||
+          el.getAttribute("aria-label") ||
+          el.id ||
+          el.tagName.toLowerCase();
+        bits.push(`${key}=${value}`);
+      }
+      return bits.sort().join("|").slice(0, 800);
+    });
+  } catch {
+    return "";
+  }
+}
+
 /**
  * 替代写法：聚焦 + 全选 + 逐字输入（应对受控组件 / 热键吞键 / 框架 value tracker）。
  * 与主路径同样是「不依赖站点选择器」的通用手法；始终按整体覆盖语义写入。
@@ -2572,7 +2650,6 @@ export function registerAllActions(): void {
     const label = el.text || el.tagName;
     const locator = elementPlaywrightSelector(el);
     const nativeSelect = String(el.tagName || "").toUpperCase() === "SELECT";
-    const choiceMeta = { choiceChanged: true, choiceLabel: text.slice(0, 80) };
     try {
       if (nativeSelect) {
         await gw.selectOption(locator, text, {
@@ -2580,7 +2657,9 @@ export function registerAllActions(): void {
           scope: doc.scope,
           offset: doc.offset,
         });
-        return ok(`已选择 [${index}] → ${text}`, { metadata: choiceMeta });
+        return ok(`已选择 [${index}] → ${text}`, {
+          metadata: { choiceChanged: true, choiceLabel: text.slice(0, 80) },
+        });
       }
       const target = doc.scope.locator(locator).first();
       const popup = await popupDisclosureState(doc.scope, locator);
@@ -2588,28 +2667,44 @@ export function registerAllActions(): void {
         await target.click({ timeout: 3_000 });
         await doc.scope.waitForTimeout(250);
       }
-      const picked = await doc.scope.evaluate((wanted) => {
-        const want = wanted.replace(/\s+/g, "").toLowerCase();
-        const visible = (node: Element) => {
-          const style = getComputedStyle(node);
-          const rect = (node as HTMLElement).getBoundingClientRect();
-          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 2 && rect.height > 2;
-        };
-        const nodes = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], li'));
-        const textOf = (node: Element) => (node.textContent || "").replace(/\s+/g, "").toLowerCase();
-        const exact = nodes.find((node) => visible(node) && textOf(node) === want);
-        const hit = (exact ?? nodes.find((node) => visible(node) && textOf(node).includes(want))) as HTMLElement | undefined;
-        if (!hit) return { ok: false, detail: "列表里没有匹配的可见选项" };
-        hit.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
-        hit.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-        hit.click();
-        return { ok: true, detail: (hit.innerText || hit.textContent || "").trim().slice(0, 40) };
-      }, text);
-      if (!picked.ok) {
-        return fail(`select_dropdown 未选中「${text}」：${picked.detail}`);
+      const beforeShown = await readComboboxShownValue(doc.scope, locator);
+
+      // 真实指针点击（Playwright），不用合成 MouseEvent——Google Material 等自定义
+      // listbox 常忽略合成事件，表现为「回执已选中、栏位仍是占位」。
+      const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const exactRe = new RegExp(`^\\s*${escaped}\\s*$`);
+      const option = doc.scope
+        .locator('[role="option"], [role="menuitem"], [role="listbox"] li, ul[role="listbox"] li')
+        .filter({ hasText: exactRe })
+        .first();
+      try {
+        await option.click({ timeout: 4_000 });
+      } catch (clickErr) {
+        // 宽松回退：子串匹配（「3月」vs「3 月」）
+        const loose = doc.scope
+          .locator('[role="option"], [role="menuitem"], [role="listbox"] li, ul[role="listbox"] li')
+          .filter({ hasText: text })
+          .first();
+        try {
+          await loose.click({ timeout: 3_000 });
+        } catch {
+          const msg = clickErr instanceof Error ? clickErr.message : String(clickErr);
+          return fail(`select_dropdown 未选中「${text}」：${msg.slice(0, 240)}`);
+        }
+      }
+      await doc.scope.waitForTimeout(200);
+
+      const afterShown = await readComboboxShownValue(doc.scope, locator);
+      const applied = dropdownSelectionApplied(afterShown, text, beforeShown);
+      if (!applied) {
+        return fail(
+          `select_dropdown 点击了「${text}」但下拉栏未落值（当前显示「${(afterShown || "空").slice(0, 40)}」）。请改点选项的独立 index，或等列表稳定后再试；不要按 Escape（会清空已选）。`,
+        );
       }
       gw.recordClick({ selector: `text=${text}`, label: text });
-      return ok(`已选择 [${index}] → ${picked.detail || text}`, { metadata: choiceMeta });
+      return ok(`已选择 [${index}] → ${text}`, {
+        metadata: { choiceChanged: true, choiceLabel: text.slice(0, 80) },
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return fail(`select_dropdown 未选中「${text}」：${msg.slice(0, 240)}`);
@@ -2678,13 +2773,20 @@ export function registerAllActions(): void {
       scriptText: code,
     });
     if (blocked) return blocked;
+    const beforeFp = await readFormValueFingerprint(ctx.page);
     const result = await ctx.page.evaluate(async (c) => {
       // eslint-disable-next-line no-new-func
       const fn = new Function(`return (${c})`);
       const v = fn();
       return typeof v?.then === "function" ? await v : v;
     }, code);
-    return ok(`evaluate 结果: ${JSON.stringify(result)?.slice(0, 2000)}`);
+    const afterFp = await readFormValueFingerprint(ctx.page);
+    const formChanged = Boolean(beforeFp && afterFp && beforeFp !== afterFp);
+    return ok(`evaluate 结果: ${JSON.stringify(result)?.slice(0, 2000)}`, {
+      metadata: formChanged
+        ? { choiceChanged: true, choiceLabel: "evaluate-form-change" }
+        : undefined,
+    });
   });
 
   registerAction("upload_file", async (params, ctx) => {

@@ -10,8 +10,8 @@
   "goalIntents": {
     "outcome": {
       "terms": [
-        "注册", "注册账号", "注册账户", "创建账号", "创建账户", "开户", "登录", "登入", "登陆", "登出", "退出登录", "注销", "提交", "提交表单", "上传", "发送", "发布", "下单", "购买", "支付", "付款", "充值", "提现", "转账", "申请", "预约", "订阅", "关注", "点赞", "评论", "收藏", "报名", "投票", "激活", "绑定", "解绑", "改密", "重置密码", "开通",
-        "register", "sign up", "signup", "create account", "create an account", "open an account", "log in", "login", "sign in", "signin", "log out", "logout", "submit", "upload", "send", "post", "publish", "place order", "checkout", "purchase", "buy", "pay", "deposit", "withdraw", "transfer", "apply", "book", "reserve", "subscribe", "follow", "like", "comment", "enroll", "activate", "bind", "unbind", "reset password", "change password"
+        "注册", "注册账号", "注册账户", "创建账号", "创建账户", "创建邮箱", "邮箱账户", "邮箱账号", "谷歌邮箱", "开户", "登录", "登入", "登陆", "登出", "退出登录", "注销", "提交", "提交表单", "上传", "发送", "发布", "下单", "购买", "支付", "付款", "充值", "提现", "转账", "申请", "预约", "订阅", "关注", "点赞", "评论", "收藏", "报名", "投票", "激活", "绑定", "解绑", "改密", "重置密码", "开通",
+        "register", "sign up", "signup", "create account", "create an account", "open an account", "create email", "gmail", "log in", "login", "sign in", "signin", "log out", "logout", "submit", "upload", "send", "post", "publish", "place order", "checkout", "purchase", "buy", "pay", "deposit", "withdraw", "transfer", "apply", "book", "reserve", "subscribe", "follow", "like", "comment", "enroll", "activate", "bind", "unbind", "reset password", "change password"
       ]
     },
     "informational": {

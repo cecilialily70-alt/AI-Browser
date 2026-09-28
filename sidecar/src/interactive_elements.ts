@@ -1538,7 +1538,13 @@ const EXTRACT_AGENT_TREE_SCRIPT = () => {
       return true;
     }
     const role = (element.getAttribute("role") ?? "").toLowerCase();
-    return (
+    // listbox / menu 是选项容器：收它会让 overlapsCollected 把内部 option/menuitem 全部吞掉
+    // （Google 注册页「月 / 性別」下拉就是这样——只剩一个 ul，选项没有独立 index）。
+    // 点容器本身也没有意义；真正要点的是 option / menuitem。
+    if (role === "listbox" || role === "menu") {
+      return false;
+    }
+    if (
       role === "button" ||
       role === "checkbox" ||
       role === "radio" ||
@@ -1549,11 +1555,20 @@ const EXTRACT_AGENT_TREE_SCRIPT = () => {
       role === "switch" ||
       role === "slider" ||
       role === "option" ||
-      role === "listbox" ||
       role === "treeitem" ||
       role === "spinbutton" ||
       role === "searchbox"
-    );
+    ) {
+      return true;
+    }
+    // 无 role 的 <li> 挂在 listbox/menu 下时，按选项收（部分站点不写 role="option"）
+    if (element.tagName.toLowerCase() === "li") {
+      const parentRole = (element.parentElement?.getAttribute("role") ?? "").toLowerCase();
+      if (parentRole === "listbox" || parentRole === "menu") {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 高频操作文案（忽略大小写 / 空白折叠）— 移动端 H5 纯文本按钮兜底 */
@@ -2513,7 +2528,11 @@ function mapAgentType(raw: AgentRawElement): string {
   if (role === "tab") {
     return "tab";
   }
-  if (role === "menuitem") {
+  if (role === "menuitem" || role === "option") {
+    return "menuitem";
+  }
+  // listbox 内无 role 的 li：仍标成可点的选项项
+  if (tag === "li" && !role) {
     return "menuitem";
   }
   // 语言球 / 客服图标 / 合成标签

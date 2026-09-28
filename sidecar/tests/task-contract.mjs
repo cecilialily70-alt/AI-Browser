@@ -12,6 +12,9 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   classifyGoalIntent,
@@ -29,6 +32,7 @@ import {
 } from "../dist/bu_agent/task_contract.js";
 import { verifyDeliverable } from "../dist/core/deliverable_verify.js";
 
+const SIDECAR_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const LEXICON = loadCompletionLexicon();
 
 /** 最小证据台账（只填这些用例真正会读到的字段） */
@@ -72,9 +76,13 @@ test("会话型目标被单独识别（且先于结果型，避免「发送」�
 
 test("结果型 / 信息型 / 通用型不受影响（不误伤注册与总结）", () => {
   assert.equal(classifyGoalIntent("注册一个新账号", LEXICON), "outcome");
+  assert.equal(classifyGoalIntent("帮我创建一个谷歌邮箱账户", LEXICON), "outcome");
+  assert.equal(classifyGoalIntent("帮我注册一个谷歌邮箱账户", LEXICON), "outcome");
+  assert.equal(classifyGoalIntent("create a gmail account", LEXICON), "outcome");
   assert.equal(classifyGoalIntent("下单买这个杯子", LEXICON), "outcome");
   assert.equal(classifyGoalIntent("帮我总结这个页面的内容", LEXICON), "informational");
   assert.equal(classifyGoalIntent("随便逛逛", LEXICON), "generic");
+  assert.equal(classifyGoalIntent("打开百度首页", LEXICON), "generic");
 });
 
 /* ————————————————————————— ② 契约生成 ————————————————————————— */
@@ -336,4 +344,26 @@ test("运行期判据：isUnverifiableNavigation 只认「navigation + 说不出
     isUnverifiableNavigation({ id: "element_state#1", kind: "element_state", text: "找 Anne", hints: ["打开"], required: true }),
     false,
   );
+});
+
+/* ————————————————————————— 自定义下拉 / 纯导航误杀（注册现场） ————————————————————————— */
+
+test("源码级：listbox/menu 容器不得吞掉内部 option（否则月份选项没有独立 index）", () => {
+  const src = readFileSync(join(SIDECAR_ROOT, "src/interactive_elements.ts"), "utf8");
+  assert.ok(src.includes('role === "listbox" || role === "menu"'), "必须显式排除 listbox/menu 容器");
+  assert.ok(src.includes("existing.contains(element)"), "overlapsCollected 仍在（容器先入账就会吞子项）");
+});
+
+test("源码级：select_dropdown 必须真实点击并校验落值（禁止合成事件假成功）", () => {
+  const src = readFileSync(join(SIDECAR_ROOT, "src/bu_agent/actions.ts"), "utf8");
+  assert.ok(src.includes("readComboboxShownValue"), "必须有落值回读");
+  assert.ok(src.includes("dropdownSelectionApplied"), "必须有落值校验");
+  assert.ok(!/hit\.dispatchEvent\(new MouseEvent\("mousedown"/.test(src), "禁止再用合成 mousedown 当主路径");
+  assert.ok(src.includes("option.click"), "必须走 Playwright 真实点击");
+});
+
+test("源码级：task 意图 / needsFollowup 时禁止纯导航本地收尾", () => {
+  const src = readFileSync(join(SIDECAR_ROOT, "src/bu_agent/service.ts"), "utf8");
+  assert.ok(src.includes("!analyzed.intent.needsFollowup"), "needsFollowup 必须挡住本地导航收尾");
+  assert.ok(src.includes('analyzed.intent.kind !== "task"'), "task 意图必须挡住本地导航收尾");
 });

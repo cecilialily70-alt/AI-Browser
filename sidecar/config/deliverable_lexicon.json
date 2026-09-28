@@ -16,8 +16,10 @@
       "翻页", "下一页", "下一张", "更多", "展开", "查看详情", "查看全部", "查看大图", "看大图",
       "收藏", "关注", "点赞", "评论", "分享", "转发", "加入购物车", "加购", "已加购", "结算页", "收银台", "已达收银台", "待支付", "下单", "购买",
       "填写", "填表", "填入", "输入并", "提交", "上传", "勾选", "选中", "选择", "切换语言",
+      "注册", "创建账号", "创建账户", "创建邮箱", "邮箱账户", "邮箱账号", "谷歌邮箱",
       "download", "save as", "export", "click", "open the second", "switch to", "next page",
-      "screenshot", "copy", "bookmark", "share", "add to cart", "checkout page", "awaiting payment", "fill in", "submit", "upload", "select"
+      "screenshot", "copy", "bookmark", "share", "add to cart", "checkout page", "awaiting payment", "fill in", "submit", "upload", "select",
+      "register", "sign up", "create account", "create email", "gmail"
     ]
   },
   "deliverableKinds": {
@@ -49,7 +51,7 @@
         "required": true
       },
       "submitted": {
-        "terms": ["提交", "注册", "登录", "登入", "下单", "结算", "购买", "支付", "付款", "上传", "发布", "报名", "订阅", "submit", "register", "sign up", "login", "checkout", "order", "purchase", "pay", "upload", "publish", "subscribe"],
+        "terms": ["提交", "注册", "登录", "登入", "下单", "结算", "购买", "支付", "付款", "上传", "发布", "报名", "订阅", "创建账号", "创建账户", "创建邮箱", "邮箱账户", "邮箱账号", "谷歌邮箱", "submit", "register", "sign up", "login", "checkout", "order", "purchase", "pay", "upload", "publish", "subscribe", "create account", "create email", "gmail"],
         "required": true
       },
       "choice_made": {

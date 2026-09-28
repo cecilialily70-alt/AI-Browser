@@ -128,6 +128,7 @@ call :REQ_RECURSE "%PORTABLE_DIR%\sidecar\agent_skills" "SKILL.md" "Sidecar agen
 call :REQ_FILE "%PORTABLE_DIR%\sidecar\agent_skills\press-hold-captcha\SKILL.md" "press-hold captcha skill pack -- required by the long-press solver's skill index"
 call :REQ_GLOB "%PORTABLE_DIR%\sidecar\connectors" "*.json" "Sidecar site descriptors -- missing means every chat site silently falls back to the generic reader"
 call :REQ_FILE "%PORTABLE_DIR%\sidecar\connectors\whatsapp-web.json" "Built-in site descriptor -- the fidelity baseline other descriptors are measured against"
+call :REQ_FILE "%PORTABLE_DIR%\sidecar\chat_media\README.md" "Chat image library -- missing means the chat engine can never send product photos"
 
 call :WARN_DIR "%PORTABLE_DIR%\extensions" "browser extensions"
 call :WARN_GLOB "%PORTABLE_DIR%\Browse" "chromium-*" "local kernels under Browse"

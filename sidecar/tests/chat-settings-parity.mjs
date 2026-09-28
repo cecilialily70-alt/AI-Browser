@@ -293,6 +293,22 @@ test("每联系人开关与全局开关都真的接到引擎上（不是画了�
     /roles:\s*settings\.roles/.test(chatModal) && /activeRoleId:\s*settings\.activeRoleId/.test(chatModal),
     "ChatModeModal 必须把 roles / activeRoleId 随 chatStart 一起发下去",
   );
+  assert.ok(
+    /mediaLibraryDir:\s*settings\.mediaLibraryDir/.test(chatModal),
+    "ChatModeModal 必须把自定义图库目录随 chatStart 一起发下去",
+  );
+  assert.ok(
+    /mediaLibraryDir/.test(frontendSettings) && /mediaLibraryDir:\s*""/.test(frontendSettings),
+    "前端默认图库目录必须是空串（= 软件自带）",
+  );
+  assert.ok(
+    /media_library_dir/.test(readFileSync(join(ROOT, "src-tauri", "src", "rpa_session.rs"), "utf8")),
+    "Host chat_start 必须能转发 media_library_dir",
+  );
+  assert.ok(
+    /mediaLibraryDir/.test(readFileSync(join(ROOT, "src-tauri", "src", "chat_patrol.rs"), "utf8")),
+    "调度器必须从 chat_mode 读 mediaLibraryDir 并转发",
+  );
   // ③ 「读取当前页面会话列表」真的调只读探针，而不是本地编一份
   assert.ok(/chatListContacts\(/.test(chatModal), "视图必须调 chatListContacts 读会话列表");
 
@@ -438,11 +454,21 @@ test("事件标签表完备：侧车/宿主发射的每个 kind 都有中文标�
     "事件色调不许再用子串猜测",
   );
 
-  // 值守日志面板：相位机内部流转不得刷给普通人（showInLog: false）
-  for (const quiet of ["chat_phase", "chat_send_submitted", "chat_persist", "chat_descriptor_selected"]) {
+  // 值守日志面板：相位机内部流转 / 调度叠片拉起 不得刷给普通人（showInLog: false）
+  for (const quiet of [
+    "chat_phase",
+    "chat_send_submitted",
+    "chat_persist",
+    "chat_descriptor_selected",
+    "chat_patrol_launch",
+  ]) {
     const row = new RegExp(`${quiet}:\\s*\\{[\\s\\S]*?showInLog:\\s*false`).exec(chatEventLabels);
     assert.ok(row, `${quiet} 必须标 showInLog: false，否则值守日志又会刷相位/描述符术语`);
   }
+  assert.ok(
+    /stopReason\s*===\s*"engine_busy"/.test(chatEventLabels),
+    "叠片正忙拒绝必须按 stopReason=engine_busy 隐藏，不许靠中文子串猜",
+  );
 });
 
 test("角色库上限：前端与侧车逐字一致", () => {

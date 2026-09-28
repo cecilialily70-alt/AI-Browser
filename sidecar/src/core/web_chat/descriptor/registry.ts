@@ -227,7 +227,7 @@ export interface DescriptorListItem {
   path: string;
   health: ConnectorHealth | null;
   /** 该描述符有什么能力（视图如实标注「降级」时需要） */
-  capabilities: { send: boolean; history: boolean; subscribe: boolean; presence: boolean; threads: boolean };
+  capabilities: { send: boolean; history: boolean; subscribe: boolean; presence: boolean; threads: boolean; sendImage: boolean };
 }
 
 export function listDescriptorItems(
@@ -243,6 +243,7 @@ export function listDescriptorItems(
     health: healthOf(item.descriptor.id),
     capabilities: {
       send: item.descriptor.composer.selectors.length > 0,
+      sendImage: Boolean(item.descriptor.composer.attach?.buttonSelectors.length),
       history: item.descriptor.history.scrollRoot.length > 0 && item.descriptor.history.batchLimit > 0,
       // 页内事件订阅在 P3 接上（`page_agent`）；声明为空即如实标 false
       subscribe: false,

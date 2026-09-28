@@ -147,6 +147,7 @@ function specFor(over = {}) {
       ...(over.input ?? {}),
     },
     send: { selectors: [], method: "enterOnce", elseClick: false, ...(over.send ?? {}) },
+    attach: over.attach ?? null,
   };
 }
 
@@ -552,12 +553,22 @@ test("页内哨兵：置为 disposed 后不再推送事件", () => {
 /* ————————————————————————— D. 源码级纪律（R8） ————————————————————————— */
 
 test("R8：出站与页内哨兵都不得自建网络请求（只走输入框）", () => {
-  for (const name of ["composer.js", "page_agent.js", "facts.js", "dom_connector.js"]) {
+  for (const name of ["composer.js", "attach.js", "page_agent.js", "facts.js", "dom_connector.js"]) {
     const text = readFileSync(join(DESCRIPTOR_DIST, name), "utf8");
     for (const pattern of [/\bfetch\s*\(/, /XMLHttpRequest/, /sendBeacon/, /new\s+WebSocket/]) {
       assert.ok(!pattern.test(text), `${name} 出现自建网络请求 ${pattern}（R8 明令禁止）`);
     }
   }
+});
+
+test("发图走 filechooser / setInputFiles，且有发送锁防双发", () => {
+  const attach = readFileSync(join(DESCRIPTOR_DIST, "attach.js"), "utf8");
+  assert.ok(attach.includes("waitForEvent"), "必须先等 filechooser 再点附件");
+  assert.ok(attach.includes("filechooser") || attach.includes("FileChooser"), "必须走 Playwright filechooser");
+  assert.ok(attach.includes("setInputFiles") || attach.includes("setFiles"), "必须用 setFiles/setInputFiles 注入本地文件");
+  assert.ok(attach.includes("send_locked"), "必须有发送锁，禁止一次调用提交两次");
+  assert.ok(!/\beval\s*\(/.test(attach), "attach 不得 eval");
+  assert.ok(!/new Function/.test(attach), "attach 不得 new Function");
 });
 
 test("R8：页内哨兵的桥名与闸门名是稳定契约（宿主/测试都按它对接）", () => {

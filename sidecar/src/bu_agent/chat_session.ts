@@ -58,6 +58,7 @@ import {
   type VisitState,
 } from "../core/web_chat/context_store.js";
 import { hashText, looksLikeOwnSentText } from "../core/web_chat/outbox.js";
+import { loadMediaLibrary, matchMedia } from "../core/web_chat/media_library.js";
 import { snapshotFromMessages } from "../core/web_chat/descriptor/map_rows.js";
 import type {
   ConnectorActivityEvent,
@@ -203,6 +204,16 @@ export interface BuildChatSessionInput {
 export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
   const { browser, logger, config, contacts, signal } = input;
   const policy: ChatSitePolicy = loadChatSitePolicy();
+  const mediaAssets = loadMediaLibrary(config.mediaLibraryDir);
+  // 自定义路径写了却扫不到图：必须先说后跑（否则用户以为在用自己的文件夹）
+  if (config.mediaLibraryDir && mediaAssets.length === 0) {
+    logger.chatProgress("自定义图库目录为空或不存在：要图时只会用文字说明备图", {
+      type: "chat_image_library_empty",
+      phase: "booting",
+      threadKey: null,
+      count: 0,
+    });
+  }
 
   /**
    * 读快照：没有 userDataDir（`chatSnapshotPath` 返回 null）时**明确拒绝读**。
@@ -1023,6 +1034,27 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
             },
           );
         }
+      }
+      return { ok: result.ok, reason: result.reason, diagnostics: result.diagnostics };
+    },
+
+    pickMedia: ({ excerpt }) => {
+      const query = [excerpt, config.goal, config.styleHint ?? ""].filter(Boolean).join(" ");
+      const hit = matchMedia(query, mediaAssets);
+      return hit ? { path: hit.path, label: hit.label } : null;
+    },
+
+    sendImage: async (contact, filePath) => {
+      if (!page || !containerSelector) {
+        return { ok: false, reason: "no_page_or_container" };
+      }
+      const active = connectorFor(contact);
+      if (!active?.sendImage) {
+        return { ok: false, reason: "unsupported_attach" };
+      }
+      const result = await active.sendImage(connectorContactOf(contact), filePath);
+      if (result.ok) {
+        rememberSent(contact, `[图片:${filePath}]`);
       }
       return { ok: result.ok, reason: result.reason, diagnostics: result.diagnostics };
     },

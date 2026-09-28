@@ -55,5 +55,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM - chat_media\ : 聊天发图图库（中/英文件名；漏拷则永远匹配不到图）
+echo [Pack] copying sidecar chat_media...
+xcopy /E /I /Y "%SRC%\chat_media" "%TARGET%\chat_media\" >nul
+if errorlevel 1 (
+  echo [ERROR] failed to copy sidecar\chat_media
+  exit /b 1
+)
+
 echo [OK] sidecar bundle copied to %TARGET%
 exit /b 0

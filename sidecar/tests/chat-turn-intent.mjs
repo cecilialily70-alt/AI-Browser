@@ -78,6 +78,36 @@ test("直接提问下纯推销无答违规", () => {
   assert.equal(draftViolatesIntent("因为你说的配置更高，所以贵一点。你更看重哪一块？", intent), false);
 });
 
+test("要图 → image_request；纯推销不问图违规；配图说明合规", () => {
+  const intent = classifyTurnIntent([
+    { id: "1", direction: "in", text: "可以给我看看图片吗？", ts: null, identity: null, stableId: false },
+  ]);
+  assert.equal(intent.kind, "image_request");
+  const withSku = classifyTurnIntent([
+    { id: "1", direction: "in", text: "可以给我看看 Pro Max 深蓝的图片吗", ts: null, identity: null, stableId: false },
+  ]);
+  assert.equal(withSku.kind, "image_request");
+  assert.equal(draftViolatesIntent("入手就对了，库存不多包邮", intent), true);
+  assert.equal(draftViolatesIntent("图我现拍给你看，深蓝那台成色很好", intent), false);
+});
+
+test("要视频/语音 → voice_video_request；承诺发视频违规；主动说不能发违规；借口合规", () => {
+  const intent = classifyTurnIntent([
+    { id: "1", direction: "in", text: "发个视频给我看看", ts: null, identity: null, stableId: false },
+  ]);
+  assert.equal(intent.kind, "voice_video_request");
+  assert.equal(draftViolatesIntent("行，我现在就发视频给你", intent), true);
+  assert.equal(draftViolatesIntent("网页上发不了视频，我不会发语音", intent), true);
+  assert.equal(draftViolatesIntent("仓库这会儿人不在跟前，我先把实拍图给你看成色", intent), false);
+});
+
+test("信任攻击优先于要图", () => {
+  const intent = classifyTurnIntent([
+    { id: "1", direction: "in", text: "你是骗子吗，还要给我看图", ts: null, identity: null, stableId: false },
+  ]);
+  assert.equal(intent.kind, "trust_attack");
+});
+
 test("气泡上限：默认 1；多问/信任攻击放宽到 2～3", () => {
   const cont = { kind: "continue", excerpt: "" };
   assert.equal(maxBubblesForTurn([], cont), 1);

@@ -1424,6 +1424,8 @@ async function handleChatStart(
       ),
       roles,
       activeRoleId,
+      mediaLibraryDir:
+        String(payload.mediaLibraryDir ?? payload.media_library_dir ?? "").trim() || null,
       snapshotFile: chatSnapshotPath(userDataDir, envId),
       userDataDir,
       useCurrentWindow,

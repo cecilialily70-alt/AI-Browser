@@ -84,6 +84,11 @@ export interface ChatSessionConfig {
   roles?: readonly ChatRole[];
   /** 当前选用的角色 id；`null` / 不在库中 = 无角色 */
   activeRoleId?: string | null;
+  /**
+   * 用户自定义图库目录（本机绝对路径）。空 / 未设 = 用内置 `sidecar/chat_media`。
+   * 写了却不存在 → 空库（不静默回落内置）。
+   */
+  mediaLibraryDir?: string | null;
 }
 
 /** 聊天角色库里的一条 */

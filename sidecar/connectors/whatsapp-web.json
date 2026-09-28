@@ -129,6 +129,28 @@
       ],
       "method": "enterOnce",
       "elseClick": true
+    },
+    "attach": {
+      "buttonSelectors": [
+        "[data-testid=\"attach-menu-plus\"]",
+        "span[data-icon=\"plus-rounded\"]",
+        "span[data-icon=\"attach-menu-plus\"]",
+        "button[aria-label*=\"Attach\" i]"
+      ],
+      "menuItemSelectors": [
+        "[data-testid=\"mi-attach-image\"]",
+        "[data-testid=\"attach-image\"]",
+        "li[data-animate-dropdown-item]"
+      ],
+      "fileInputSelectors": [
+        "input[type=\"file\"][accept*=\"image\"]",
+        "input[type=\"file\"]"
+      ],
+      "previewReadySelectors": [],
+      "confirmSendSelectors": [
+        "[data-testid=\"send\"]",
+        "[data-testid=\"compose-btn-send\"]"
+      ]
     }
   },
   "history": {

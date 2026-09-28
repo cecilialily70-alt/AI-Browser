@@ -608,6 +608,7 @@ impl ChatPatrol {
             contact_flags: settings.contact_flags.clone(),
             roles: settings.roles.clone(),
             active_role_id: settings.active_role_id.clone(),
+            media_library_dir: settings.media_library_dir.clone(),
             slice_ms: settings.slice_ms,
             max_contacts_per_slice: settings.max_contacts_per_slice,
             use_current_window,
@@ -1034,6 +1035,8 @@ struct LaunchSettings {
     roles: Option<Value>,
     /// 当前选用的角色 id（原样转发；空＝无角色）
     active_role_id: Option<String>,
+    /// 自定义发图图库目录（原样转发；空＝软件自带）
+    media_library_dir: Option<String>,
     slice_ms: Option<u64>,
     max_contacts_per_slice: Option<u32>,
     max_parallel: u32,
@@ -1096,6 +1099,7 @@ impl LaunchSettings {
             contact_flags: value.get("contactFlags").filter(|entry| entry.is_object()).cloned(),
             roles: value.get("roles").filter(|entry| entry.is_array()).cloned(),
             active_role_id: str_value(value, "activeRoleId"),
+            media_library_dir: str_value(value, "mediaLibraryDir"),
             slice_ms: u64_value(value, "sliceMs").map(|entry| {
                 entry.clamp(
                     crate::rpa_session::CHAT_SLICE_MIN_MS,
@@ -1519,6 +1523,7 @@ mod tests {
             "contactFlags": { "wa|Anne": { "autoReply": false, "followUp": true } },
             "roles": [{ "id": "r1", "name": "顾问", "prompt": "简短专业" }],
             "activeRoleId": "r1",
+            "mediaLibraryDir": "  D:\\\\Photos\\\\chat_media  ",
             "targetsByEnv": {
                 "7": [{ "label": "小明", "url": "" }],
                 "8": [{ "label": "小红" }, "garbage"]
@@ -1535,6 +1540,10 @@ mod tests {
         assert_eq!(settings.max_parallel, CHAT_PARALLEL_HARD_MAX);
         assert!(settings.cadence.is_some());
         assert_eq!(settings.active_role_id.as_deref(), Some("r1"));
+        assert_eq!(
+            settings.media_library_dir.as_deref(),
+            Some(r"D:\\Photos\\chat_media")
+        );
         assert_eq!(
             settings
                 .roles

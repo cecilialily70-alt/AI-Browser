@@ -4,7 +4,7 @@
  * 核心纪律（改本文件前先读）：
  *   1. **描述符是数据不是代码**：字段只能是「选择器 / 属性名 / 正则源码 / 固定枚举 / 数字 / 布尔」。
  *      没有任何位置可以放函数、表达式或脚本；运行时**零动态求值**（无 `eval` / `new Function`）。
- *   2. **出站只走输入框**：`composer.input.method` 与 `composer.send.method` 是**固定枚举**，
+ *   2. **出站只走真实 UI**：文字走输入框；图片走附件按钮 + 系统 file chooser 注入（`setFiles`）。
  *      不允许站点内部发送函数、不允许自建网络请求。
  *   3. **三层优先级**：`learned` > `builtin` > **通用模式**（没有描述符时的启发式读法）。
  *      描述符未命中或被健康熔断 → 回落通用模式，**不是**「什么都做不了」。
@@ -132,10 +132,30 @@ export interface RowsSpec {
   insertedAtTopMeansOlder: boolean;
 }
 
+/**
+ * 发图附件声明（纯选择器；缺省 null = 该站不能发图，回落 unsupported_attach）。
+ *
+ * 运行时走 Playwright filechooser / `setInputFiles`，不调站点内部上传 API。
+ */
+export interface ComposerAttachSpec {
+  /** 回形针 / 附件按钮 */
+  buttonSelectors: string[];
+  /** 点开后若还要选「照片或视频」；可空 */
+  menuItemSelectors: string[];
+  /** 已挂载的 `input[type=file]`（动态创建时以 filechooser 为主，本项作兜底） */
+  fileInputSelectors: string[];
+  /** 选文件后预览层出现（可空：没有预览就直接点发送） */
+  previewReadySelectors: string[];
+  /** 预览层上的确认发送；可空则回落 `composer.send.selectors` */
+  confirmSendSelectors: string[];
+}
+
 export interface ComposerSpec {
   selectors: string[];
   input: { method: InputMethod; verify: VerifyMode; retries: number; failClosed: boolean };
   send: { selectors: string[]; method: SendMethod; elseClick: boolean };
+  /** null = 未声明发图能力 */
+  attach: ComposerAttachSpec | null;
 }
 
 export interface HistorySpec {
@@ -352,6 +372,11 @@ export interface ChatConnector {
   openThread(contact: ConnectorContact): Promise<ConnectorOpenResult>;
   readThread(contact: ConnectorContact, options: ConnectorReadOptions): Promise<ConnectorReadResult>;
   sendText(contact: ConnectorContact, text: string): Promise<ConnectorSendResult>;
+  /**
+   * 发一张本地图片（可选）。未实现或描述符没有 `composer.attach` 时
+   * 返回 `ok:false, reason: unsupported_attach`。
+   */
+  sendImage?(contact: ConnectorContact, filePath: string): Promise<ConnectorSendResult>;
   /** 页内事件推送（首选；替代轮询）。通用模式返回 null，由调用方走兜底轮询 */
   subscribe?: (
     contact: ConnectorContact,

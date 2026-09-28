@@ -2184,6 +2184,8 @@ pub struct ChatSliceRequest {
     pub roles: Option<Value>,
     /// 当前选用的角色 id（原样转发；空＝无角色）
     pub active_role_id: Option<String>,
+    /// 自定义发图图库目录（原样转发；空＝软件自带 chat_media；合法性由 Sidecar 判定）
+    pub media_library_dir: Option<String>,
     pub slice_ms: Option<u64>,
     pub max_contacts_per_slice: Option<u32>,
     /// 「没指定对象 → 用**当前打开的**聊天窗口」（用户显式勾选；没有它就仍然拒绝启动）
@@ -2355,6 +2357,12 @@ pub async fn run_chat_slice(
             command["activeRoleId"] = json!(role_id);
         }
     }
+    if let Some(media_dir) = request.media_library_dir {
+        let media_dir = media_dir.trim();
+        if !media_dir.is_empty() {
+            command["mediaLibraryDir"] = json!(media_dir);
+        }
+    }
     let slice_ms = request
         .slice_ms
         .map(|value| value.clamp(CHAT_SLICE_MIN_MS, CHAT_SLICE_MAX_MS));
@@ -2398,6 +2406,7 @@ pub async fn chat_start(
     contact_flags: Option<Value>,
     roles: Option<Value>,
     active_role_id: Option<String>,
+    media_library_dir: Option<String>,
     slice_ms: Option<u64>,
     max_contacts_per_slice: Option<u32>,
     use_current_window: Option<bool>,
@@ -2424,6 +2433,7 @@ pub async fn chat_start(
             contact_flags,
             roles,
             active_role_id,
+            media_library_dir,
             slice_ms,
             max_contacts_per_slice,
             // 默认开：「没指定对象 → 用当前打开的聊天窗口」是设置里的默认口径（§3.5）。

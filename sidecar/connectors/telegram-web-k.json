@@ -119,6 +119,30 @@
       ],
       "method": "enterOnce",
       "elseClick": true
+    },
+    "attach": {
+      "buttonSelectors": [
+        ".btn-attach",
+        "button.btn-attach",
+        ".attach-file",
+        "button[aria-label*=\"Attach\" i]",
+        "button[aria-label*=\"attach\" i]",
+        "button[title*=\"Attach\" i]"
+      ],
+      "menuItemSelectors": [
+        ".btn-menu-item .icon-media",
+        ".btn-menu-item"
+      ],
+      "fileInputSelectors": [
+        "input[type=\"file\"]",
+        "input[type=\"file\"][accept*=\"image\"]"
+      ],
+      "previewReadySelectors": [],
+      "confirmSendSelectors": [
+        ".popup-send-photo .btn-send",
+        "button.btn-send",
+        ".btn-send"
+      ]
     }
   },
   "history": {

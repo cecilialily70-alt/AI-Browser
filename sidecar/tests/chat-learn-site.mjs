@@ -296,7 +296,9 @@ test("宿主不重写描述符解析：总览与删除都经一次性 CLI，不�
 test("打包必须带上 sidecar/connectors（缺了就是「所有站点静默退回通用读法」）", () => {
   const copy = readSource("scripts/copy-sidecar-bundle.bat");
   assert.ok(copy.includes("%SRC%\\connectors"), "便携包必须拷 connectors");
+  assert.ok(copy.includes("%SRC%\\chat_media"), "便携包必须拷 chat_media 图库");
   const build = readSource("build-app.bat");
   assert.ok(build.includes("sidecar\\connectors"), "完整性闸门必须检查 connectors");
+  assert.ok(build.includes("sidecar\\chat_media"), "完整性闸门必须检查 chat_media");
   assert.ok(build.includes("whatsapp-web.json"), "至少抽查一份内置描述符（保真基准）");
 });

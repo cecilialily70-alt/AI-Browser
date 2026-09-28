@@ -379,9 +379,47 @@ function parseRows(ctx: Ctx, value: unknown): RowsSpec | null {
   };
 }
 
+function parseAttach(ctx: Ctx, value: unknown): ComposerSpec["attach"] {
+  if (value === undefined || value === null) return null;
+  const path = "/composer/attach";
+  const record = ctx.obj(value, path, [
+    "buttonSelectors",
+    "menuItemSelectors",
+    "fileInputSelectors",
+    "previewReadySelectors",
+    "confirmSendSelectors",
+  ]);
+  if (!record) return null;
+  const buttonSelectors = ctx.strArray(record.buttonSelectors, `${path}/buttonSelectors`);
+  const menuItemSelectors = ctx.strArray(record.menuItemSelectors, `${path}/menuItemSelectors`);
+  const fileInputSelectors = ctx.strArray(record.fileInputSelectors, `${path}/fileInputSelectors`);
+  const previewReadySelectors = ctx.strArray(record.previewReadySelectors, `${path}/previewReadySelectors`);
+  const confirmSendSelectors = ctx.strArray(record.confirmSendSelectors, `${path}/confirmSendSelectors`);
+  if (
+    buttonSelectors === null ||
+    menuItemSelectors === null ||
+    fileInputSelectors === null ||
+    previewReadySelectors === null ||
+    confirmSendSelectors === null
+  ) {
+    return null;
+  }
+  if (buttonSelectors.length === 0) {
+    ctx.fail("bad_value", `${path}/buttonSelectors`, "声明了 attach 就必须给出附件按钮选择器");
+    return null;
+  }
+  return {
+    buttonSelectors,
+    menuItemSelectors,
+    fileInputSelectors,
+    previewReadySelectors,
+    confirmSendSelectors,
+  };
+}
+
 function parseComposer(ctx: Ctx, value: unknown): ComposerSpec | null {
   const path = "/composer";
-  const record = ctx.obj(value, path, ["selectors", "input", "send"]);
+  const record = ctx.obj(value, path, ["selectors", "input", "send", "attach"]);
   if (!record) return null;
 
   const selectors = ctx.strArray(record.selectors, `${path}/selectors`, { required: true });
@@ -406,12 +444,20 @@ function parseComposer(ctx: Ctx, value: unknown): ComposerSpec | null {
     elseClick: ctx.bool(sendRecord.elseClick, `${sendPath}/elseClick`, true),
   };
 
+  const attach = parseAttach(ctx, record.attach);
+
   if (selectors === null || input.retries === null || send.selectors === null) return null;
   if (!input.failClosed) {
     ctx.fail("bad_value", `${inputPath}/failClosed`, "必须为 true：写入校验失败即取消发送（R8 第④条）");
     return null;
   }
-  return { selectors, input: { ...input, retries: input.retries }, send: { ...send, selectors: send.selectors } };
+  if (record.attach !== undefined && record.attach !== null && attach === null) return null;
+  return {
+    selectors,
+    input: { ...input, retries: input.retries },
+    send: { ...send, selectors: send.selectors },
+    attach,
+  };
 }
 
 function parseHistory(ctx: Ctx, value: unknown): HistorySpec | null {

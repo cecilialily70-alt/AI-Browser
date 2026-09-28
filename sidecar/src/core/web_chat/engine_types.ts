@@ -135,6 +135,18 @@ export interface ChatEngineDeps {
     text: string,
   ) => Promise<{ ok: boolean; reason?: string; diagnostics?: Record<string, unknown> }>;
 
+  /**
+   * 从图库选一张（确定性；未实现 = 本环境没有发图能力）。
+   * 返回 null 表示话术对不上任何文件，不得猜一张。
+   */
+  pickMedia?: (input: { excerpt: string }) => { path: string; label: string } | null;
+
+  /** 经附件 UI 发出本地图片；未实现时引擎只走文字 */
+  sendImage?: (
+    contact: ChatContactState,
+    filePath: string,
+  ) => Promise<{ ok: boolean; reason?: string; diagnostics?: Record<string, unknown> }>;
+
   /** 页面回读：该内容是否已出现在会话里（`originalText` 供归一化包含兜底） */
   isVisibleInPage: (
     contact: ChatContactState,

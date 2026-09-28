@@ -54,6 +54,10 @@ export const CHAT_EVENT_STYLES: Record<string, ChatEventStyle> = {
   chat_draft_rejected: { label: "草稿被拦", tone: "warning" },
   // 「已提交」与「已发送并确认」成对刷两行 → 只留终态
   chat_send_submitted: { label: "正在发送", tone: "success", showInLog: false },
+  chat_image_sent: { label: "已发图片", tone: "success" },
+  chat_image_missing: { label: "图库没有对应图", tone: "muted" },
+  chat_image_library_empty: { label: "自定义图库为空", tone: "warning" },
+  chat_media_refused: { label: "语音视频已转文字/图片", tone: "muted" },
   chat_send: { label: "已发送", tone: "success" },
   chat_send_soft_confirm: { label: "已发送（页面回读未命中，已继续）", tone: "muted" },
   chat_composer_method_fallback: { label: "改用备用方式写入", tone: "muted", showInLog: false },
@@ -95,7 +99,8 @@ export const CHAT_EVENT_STYLES: Record<string, ChatEventStyle> = {
   chat_learn_done: { label: "学习结束", tone: "muted" },
 
   // —— 宿主：调度器与看门狗（P8） ——
-  chat_patrol_launch: { label: "自动拉起值守", tone: "muted" },
+  // 叠片撞锁时会每秒刷「拉起 → 正忙」：协议与调度照旧，只不进值守日志面板
+  chat_patrol_launch: { label: "自动拉起值守", tone: "muted", showInLog: false },
   chat_patrol_queue: { label: "排队等待席位", tone: "muted" },
   chat_patrol_resumed: { label: "恢复自动值守", tone: "success" },
   chat_watchdog_stall: { label: "值守卡住了", tone: "warning" },
@@ -158,10 +163,14 @@ export function formatChatEvent(event: {
   kind?: string;
   msg?: string;
   reason?: string;
+  stopReason?: string;
 }): FormattedChatEvent {
   const kind = String(event.kind ?? "chat_note");
   const style = CHAT_EVENT_STYLES[kind];
-  const showInLog = style ? style.showInLog !== false : true;
+  const stopReason = String(event.stopReason ?? "").trim();
+  // 调度叠片被拒：stopReason 稳定码；功能照旧，只不刷面板
+  const quietBusy = stopReason === "engine_busy";
+  const showInLog = quietBusy ? false : style ? style.showInLog !== false : true;
   const msg = String(event.msg ?? "").trim();
   const code = event.reason ? String(event.reason) : "";
   const reasonZh = code ? REASON_LABELS[code] ?? "" : "";

@@ -9,6 +9,8 @@ import type { ChatMessage } from "./conversation_extract.js";
 
 export type TurnIntentKind =
   | "trust_attack"
+  | "voice_video_request"
+  | "image_request"
   | "price_question"
   | "fact_correction"
   | "direct_question"
@@ -23,6 +25,22 @@ export interface TurnIntent {
 
 const TRUST_ATTACK_RE =
   /(骗子|诈骗|骗钱|托儿|托吗|是不是机器人|你是机器人|ai\b|chatgpt|gpt|假人|营销号|广告|scam|fraud|bot\b|robot|are you (a )?bot|are you (an )?ai)/i;
+
+/** 对方明确要语音 / 视频 / 通话（引擎不能发，只许被动婉拒或转图） */
+const VOICE_VIDEO_ASK_RE =
+  /(语音条|发个语音|发语音|语音消息|voice\s*message|voice\s*note|视频通话|语音通话|video\s*call|voice\s*call|打个电话|打电话过来|来视频|发个视频|发视频|看看视频|看视频|视频看看)/i;
+
+/** 对方要看图 / 实拍（优先于泛化提问，避免用连环问配置顶替） */
+const IMAGE_ASK_RE =
+  /(要图|要图片|发图|发张图|发个图|看看图|看图|给我看.{0,24}图|给.{0,8}看看.{0,24}图|实拍|照片|相片|图片|看下图|看一下图|\bphotos?\b|\bpics?\b|\bimages?\b|\bpictures?\b)/i;
+
+/** 承诺马上发语音/视频/通话 —— 草稿禁止 */
+const MEDIA_PROMISE_RE =
+  /(发个?语音|发个?视频|视频通话|语音通话|马上录|这就录|打给你|这就打|我发语音|我发视频)/;
+
+/** 主动表白「我不能发语音视频」—— 草稿禁止（不提醒对方能力缺陷） */
+const MEDIA_CONFESS_RE =
+  /(我(不会|不能|没法|没办法)发?(语音|视频)|没有语音|没有视频功能|网页(上)?发不了(语音|视频)|不支持语音|不支持视频)/;
 
 /** 对方在问价（商业目标下必须给大致价，不许空推「没官宣」） */
 const PRICE_ASK_RE =
@@ -73,6 +91,8 @@ export function classifyTurnIntent(messages: readonly ChatMessage[]): TurnIntent
   const excerpt = incomingTextOf(messages).slice(0, 500);
   if (!excerpt) return { kind: "continue", excerpt: "" };
   if (TRUST_ATTACK_RE.test(excerpt)) return { kind: "trust_attack", excerpt };
+  if (VOICE_VIDEO_ASK_RE.test(excerpt)) return { kind: "voice_video_request", excerpt };
+  if (IMAGE_ASK_RE.test(excerpt)) return { kind: "image_request", excerpt };
   // 纠错优先于泛化提问：对方先戳穿「还没发布」时，本轮必须认错接住
   if (FACT_CORRECTION_RE.test(excerpt)) return { kind: "fact_correction", excerpt };
   if (PRICE_ASK_RE.test(excerpt)) return { kind: "price_question", excerpt };
@@ -83,12 +103,23 @@ export function classifyTurnIntent(messages: readonly ChatMessage[]): TurnIntent
   return { kind: "continue", excerpt };
 }
 
+export function wantsOutboundImage(intent: TurnIntent): boolean {
+  return intent.kind === "image_request" || intent.kind === "voice_video_request";
+}
+
 /**
  * 草稿是否违背本轮意图：信任攻击/问价/纠错/直接提问时，倒产品却不答 = 违规。
  */
 export function draftViolatesIntent(text: string, intent: TurnIntent): boolean {
   const raw = String(text ?? "").trim();
   if (!raw) return true;
+  if (intent.kind === "voice_video_request") {
+    return MEDIA_PROMISE_RE.test(raw) || MEDIA_CONFESS_RE.test(raw);
+  }
+  if (intent.kind === "image_request") {
+    if (PITCH_RE.test(raw) && !/(图|照片|实拍|成色|photo|pic)/i.test(raw)) return true;
+    return false;
+  }
   if (intent.kind === "trust_attack") {
     if (TRUST_ANSWER_RE.test(raw)) return false;
     // 含推销且没有正面澄清 → 违规
@@ -138,6 +169,10 @@ export function intentPromptDirective(intent: TurnIntent): string | null {
   switch (intent.kind) {
     case "trust_attack":
       return "对方在质疑你是骗子/机器人/托：必须先正面回应这个质疑（澄清你是真人、解释误会），本轮禁止推销产品或继续上一套话术。";
+    case "voice_video_request":
+      return "对方要语音或视频：不要主动说你不会/不能。用一句自然借口带过；可以请对方先看实拍图。禁止承诺马上发语音、视频或通话。";
+    case "image_request":
+      return "对方要看图：不要用连环问配置/容量顶替发图。系统若能发图，你只写一句配图说明；库里没有对应图时如实说备图情况。";
     case "price_question":
       return "对方在问价格：必须给出你这边的渠道大致价或常见价位区间（可说大概/左右），并问清要哪个版本/容量；禁止只说「还没官宣 / 给不了数字」。";
     case "fact_correction":
@@ -155,6 +190,12 @@ export function intentPromptDirective(intent: TurnIntent): string | null {
 export function intentRewriteHint(intent: TurnIntent): string {
   if (intent.kind === "trust_attack") {
     return `上一版草稿没有正面回答对方的信任质疑（「${intent.excerpt.slice(0, 80)}」）。请先澄清你不是骗子/机器人，不要提产品。`;
+  }
+  if (intent.kind === "voice_video_request") {
+    return `上一版草稿承诺了语音/视频，或主动说了做不到（「${intent.excerpt.slice(0, 80)}」）。请改成一句自然借口，不要提能力缺陷，也不要承诺发语音视频。`;
+  }
+  if (intent.kind === "image_request") {
+    return `上一版草稿没有对着图片说话（「${intent.excerpt.slice(0, 80)}」）。请写一句配图说明或备图情况，不要用问配置顶替。`;
   }
   if (intent.kind === "price_question") {
     return `上一版草稿没有报出价格（「${intent.excerpt.slice(0, 80)}」）。请给出渠道大致价或价位区间，并问清版本/容量；不要再说「还没官宣 / 给不了」。`;

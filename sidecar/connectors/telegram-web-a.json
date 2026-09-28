@@ -118,6 +118,27 @@
       ],
       "method": "enterOnce",
       "elseClick": true
+    },
+    "attach": {
+      "buttonSelectors": [
+        "button[aria-label*=\"Attach\" i]",
+        "button[title*=\"Attach\" i]",
+        ".AttachmentModal button",
+        "#MiddleColumn button.attach"
+      ],
+      "menuItemSelectors": [
+        ".MenuItem",
+        "[class*=\"AttachmentMenu\"] .MenuItem"
+      ],
+      "fileInputSelectors": [
+        "input[type=\"file\"]",
+        "input[type=\"file\"][accept*=\"image\"]"
+      ],
+      "previewReadySelectors": [],
+      "confirmSendSelectors": [
+        "button.Button.send",
+        ".Button.send"
+      ]
     }
   },
   "history": {

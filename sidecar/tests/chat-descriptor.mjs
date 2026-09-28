@@ -77,6 +77,32 @@ test("合法描述符：解析成功，且 source 由加载方决定（不信任
   assert.equal(result.descriptor.rows.idPrefixDirection.out, "false_");
   assert.equal(result.descriptor.composer.input.method, "selectAllBeforeInput");
   assert.equal(result.descriptor.composer.input.failClosed, true);
+  assert.equal(result.descriptor.composer.attach, null);
+});
+
+test("composer.attach 可声明；空按钮数组拒绝", () => {
+  const raw = validDescriptor();
+  raw.composer.attach = {
+    buttonSelectors: [".btn-attach"],
+    menuItemSelectors: [],
+    fileInputSelectors: ['input[type="file"]'],
+    previewReadySelectors: [],
+    confirmSendSelectors: [],
+  };
+  const ok = parseDescriptor(raw, "builtin");
+  assert.equal(ok.ok, true, JSON.stringify(ok.diagnostics));
+  assert.equal(ok.descriptor.composer.attach.buttonSelectors[0], ".btn-attach");
+
+  const bad = validDescriptor();
+  bad.composer.attach = {
+    buttonSelectors: [],
+    menuItemSelectors: [],
+    fileInputSelectors: [],
+    previewReadySelectors: [],
+    confirmSendSelectors: [],
+  };
+  const denied = parseDescriptor(bad, "builtin");
+  assert.equal(denied.ok, false);
 });
 
 test("未知字段一律拒绝，且诊断带字段路径（手误不被静默忽略）", () => {

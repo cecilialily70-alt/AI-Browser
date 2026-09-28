@@ -66,6 +66,7 @@ function makeHarness(over = {}) {
   const logs = [];
   const saves = [];
   const sentTexts = [];
+  const sentImages = [];
   const handovers = [];
 
   const cfg = {
@@ -197,6 +198,18 @@ function makeHarness(over = {}) {
       return { ok: cfg.sendOk };
     },
 
+    pickMedia: (input) => {
+      calls.push(["pickMedia", input.excerpt]);
+      if (typeof cfg.pickMedia === "function") return cfg.pickMedia(input);
+      return cfg.mediaPick ?? null;
+    },
+
+    sendImage: async (_contact, filePath) => {
+      calls.push(["sendImage", filePath]);
+      sentImages.push(filePath);
+      return { ok: cfg.sendImageOk !== false };
+    },
+
     isVisibleInPage: async () => {
       calls.push(["isVisibleInPage"]);
       const v = cfg.visibleResults[Math.min(visibleIdx, cfg.visibleResults.length - 1)];
@@ -289,6 +302,7 @@ function makeHarness(over = {}) {
     logs,
     saves,
     sentTexts,
+    sentImages,
     handovers,
     indexOf: (name) => calls.findIndex((c) => c[0] === name),
     logsOf: (type) => logs.filter((l) => l.type === type),
@@ -1698,5 +1712,50 @@ test("发完后观察器没报、重读发现对方已回 → 片内续聊（连
   assert.ok(
     h.logsOf("chat_wait").some((l) => String(l.signaledBy ?? "").startsWith("reread")),
     "必须走重读兜底（不能只靠观察器）",
+  );
+});
+
+test("要图且图库命中 → 发图，不空转问配置", async () => {
+  const pick = { path: "/lib/iPhone_18_Pro_Max/深蓝_正面.png", label: "iPhone_18_Pro_Max/深蓝_正面" };
+  const h = makeHarness({
+    messages: [{ id: "m-1", direction: "in", text: "可以给我看看 Pro Max 深蓝的图片吗" }],
+    newCount: 1,
+    mediaPick: pick,
+    drafts: [{ text: "图我现拍给你看，深蓝成色可以", angle: "实拍", costMicroUsd: 1 }],
+  });
+  const result = await h.engine.run();
+  assert.ok(h.sentImages.includes(pick.path), "必须发出匹配到的那张图");
+  assert.notEqual(h.indexOf("sendImage"), -1);
+  assert.ok(result.sent >= 1);
+  assert.ok(h.logsOf("chat_image_sent").length >= 1);
+});
+
+test("要图但图库没有对应文件 → 不发图", async () => {
+  const h = makeHarness({
+    messages: [{ id: "m-1", direction: "in", text: "给我看看图片" }],
+    newCount: 1,
+    mediaPick: null,
+    drafts: [{ text: "这款现成图我这边还没备上，你先说下要哪个颜色", angle: "备图", costMicroUsd: 1 }],
+  });
+  await h.engine.run();
+  assert.equal(h.sentImages.length, 0);
+  assert.ok(h.logsOf("chat_image_missing").length >= 1);
+  assert.ok(h.sentTexts.length >= 1);
+});
+
+test("要视频且图库命中 → 发图且不承诺视频", async () => {
+  const pick = { path: "/lib/iPhone_18_Pro_Max/深蓝_正面.png", label: "iPhone_18_Pro_Max/深蓝_正面" };
+  const h = makeHarness({
+    messages: [{ id: "m-1", direction: "in", text: "发个视频给我看看成色" }],
+    newCount: 1,
+    mediaPick: pick,
+    drafts: [{ text: "仓库这会儿人不在跟前，我先把实拍图给你看成色", angle: "转图", costMicroUsd: 1 }],
+  });
+  await h.engine.run();
+  assert.ok(h.sentImages.includes(pick.path));
+  assert.ok(h.logsOf("chat_media_refused").length >= 1);
+  assert.equal(
+    h.sentTexts.some((t) => /发视频|我不能发|不会发语音/.test(t)),
+    false,
   );
 });

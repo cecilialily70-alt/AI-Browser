@@ -519,6 +519,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
         contactFlags: settings.contactFlags,
         roles: settings.roles,
         activeRoleId: settings.activeRoleId,
+        mediaLibraryDir: settings.mediaLibraryDir,
         sliceMs: settings.sliceMs,
         maxContactsPerSlice: settings.maxContactsPerSlice,
       });

@@ -128,6 +128,11 @@ export interface ChatModeSettings {
   roles: ChatRole[];
   /** 当前选用的角色 id；`null` / 不在库中 = 无角色 */
   activeRoleId: string | null;
+  /**
+   * 发图图库目录（本机路径）。空串 = 用软件自带的 `chat_media`。
+   * 填写后只认这个文件夹（不存在或空 → 要图时只回文字备图）。
+   */
+  mediaLibraryDir: string;
 }
 
 /** 一位联系人的两个开关；缺省（未设置）＝开 */
@@ -166,6 +171,7 @@ export const DEFAULT_CHAT_MODE_SETTINGS: ChatModeSettings = {
   contactFlags: {},
   roles: [],
   activeRoleId: null,
+  mediaLibraryDir: "",
 };
 
 export const CHAT_SLICE_MS_MIN = 15_000;
@@ -458,6 +464,22 @@ export function parseChatModeSettings(raw: unknown): ChatModeSettingsParseResult
   const roles = parseRoles(source.roles, diagnostics);
   const activeRoleId = parseActiveRoleId(source.activeRoleId, roles, diagnostics);
 
+  let mediaLibraryDir = "";
+  if (source.mediaLibraryDir !== undefined && source.mediaLibraryDir !== null) {
+    if (typeof source.mediaLibraryDir !== "string" && typeof source.mediaLibraryDir !== "number") {
+      diagnostics.push("图库目录不是文本路径，已忽略（继续用软件自带图库）");
+    } else {
+      mediaLibraryDir = String(source.mediaLibraryDir).trim();
+      if (mediaLibraryDir.includes("\0")) {
+        diagnostics.push("图库目录含非法字符，已忽略");
+        mediaLibraryDir = "";
+      } else if (mediaLibraryDir.length > 1_024) {
+        diagnostics.push("图库目录路径过长，已截断");
+        mediaLibraryDir = mediaLibraryDir.slice(0, 1_024);
+      }
+    }
+  }
+
   const settings: ChatModeSettings = {
     enabled: source.enabled === true || source.enabled === "true" || source.enabled === 1,
     goal: typeof source.goal === "string" ? source.goal : "",
@@ -494,6 +516,7 @@ export function parseChatModeSettings(raw: unknown): ChatModeSettingsParseResult
     contactFlags: parseContactFlags(source.contactFlags, diagnostics),
     roles,
     activeRoleId,
+    mediaLibraryDir,
     cadence: {
       followUpEnabled: cadenceRaw.followUpEnabled === true,
       followUpHours: clampNumber(

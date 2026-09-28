@@ -29,6 +29,7 @@ interface ChatSiteSupportSectionProps {
 
 const CAPABILITY_LABEL: Record<string, string> = {
   send: "发消息",
+  sendImage: "发图",
   history: "读历史",
   subscribe: "页内事件",
   presence: "在线/未读",

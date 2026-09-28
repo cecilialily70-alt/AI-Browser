@@ -6,12 +6,11 @@
  *     或**描述符声明的就绪门禁**（`ready.allOf` / `ready.absent`，更精确）
  *   - 打开会话 → `bu_agent/chat_actions.openContact`
  *   - 读会话   → `conversation_extract.readConversation` → `map_rows.snapshotFromMessages`
- *   - 发送     → `bu_agent/chat_actions.sendChatText`
+ *   - 发送文字 → `composer.sendViaComposer`；发图 → `attach.sendViaAttach`（filechooser）
  *
  * 纪律（改动前先读）：
- *   - **出站只走输入框**（R8 第②条）：本模块只有 `sendChatText` 一条发送路径，
- *     它走的是「真实 composer 写入 → 回读校验 → 真实回车/按钮」。这里**不提供**任何
- *     「调站点内部发送函数」或「自建网络请求」的入口，将来也不许加。
+ *   - **出站只走真实 UI**（R8 第②条）：文字走输入框，图片走附件按钮 + filechooser。
+ *     这里**不提供**任何「调站点内部发送函数」或「自建网络请求」的入口。
  *   - **没有描述符也能跑**（通用模式）：`descriptor === null` 时行为与今天的代码一致，
  *     所以本模块上线**不改变任何现有行为**；描述符只是让选站/方向更准。
  *   - **拿不到就说拿不到**：`waitReady` 的三态（ready / pending→超时 / blocked）与
@@ -29,6 +28,7 @@ import {
   type OpenContactResult,
   type ReadThreadOptions,
 } from "../../../bu_agent/chat_actions.js";
+import { sendViaAttach } from "./attach.js";
 import { loadChatSitePolicy, type ChatSitePolicy } from "../site_detect.js";
 import type { LoadedDescriptor } from "./registry.js";
 import type {
@@ -281,7 +281,7 @@ export function createDomConnector(options: DomConnectorOptions): ChatConnector 
   const containerOf = (contact: ConnectorContact): string | null =>
     state.containers.get(contactKey(contact)) ?? seeded;
 
-  return {
+  const connector: ChatConnector = {
     id: descriptor?.descriptor.id ?? "generic-dom",
     kind,
     descriptorVersion: descriptor?.descriptor.version ?? null,
@@ -447,6 +447,51 @@ export function createDomConnector(options: DomConnectorOptions): ChatConnector 
       return { ok: result.ok, reason: result.reason };
     },
 
+    async sendImage(contact: ConnectorContact, filePath: string): Promise<ConnectorSendResult> {
+      const container = containerOf(contact);
+      if (!container) return { ok: false, reason: "container_missing" };
+      if (!descriptor?.descriptor.composer.attach) {
+        return { ok: false, reason: "unsupported_attach" };
+      }
+      const abort = new AbortController();
+      const before = await connector.readThread(contact, {
+        loadHistory: false,
+        previous: [],
+        signal: abort.signal,
+      });
+      const beforeIds = new Set(
+        before.messages.filter((row) => row.direction === "out" && row.kind === "media").map((row) => row.id),
+      );
+      const result = await sendViaAttach(page, descriptor.descriptor.composer, filePath, {
+        semanticLabel: "聊天发图",
+      });
+      reportHealth(descriptor, result.ok ? "ok" : "error", result.reason ?? null);
+      if (!result.ok) {
+        return {
+          ok: false,
+          reason: result.reason,
+          diagnostics: result.diagnostics as unknown as Record<string, unknown>,
+        };
+      }
+      await sleep(500);
+      const after = await connector.readThread(contact, {
+        loadHistory: false,
+        previous: [],
+        signal: abort.signal,
+      });
+      const added = after.messages.some(
+        (row) => row.direction === "out" && row.kind === "media" && !beforeIds.has(row.id),
+      );
+      if (!added) {
+        return {
+          ok: false,
+          reason: "media_not_visible",
+          diagnostics: result.diagnostics as unknown as Record<string, unknown>,
+        };
+      }
+      return { ok: true, diagnostics: result.diagnostics as unknown as Record<string, unknown> };
+    },
+
     async subscribe(
       _contact: ConnectorContact,
       onEvent: (event: ConnectorActivityEvent) => void,
@@ -520,6 +565,7 @@ export function createDomConnector(options: DomConnectorOptions): ChatConnector 
       if (agent) await agent.dispose().catch(() => undefined);
     },
   };
+  return connector;
 }
 
 /** 空读取的唯一样子（避免每个失败分支各写一份、字段漏掉） */

@@ -57,6 +57,7 @@ import {
   intentPromptDirective,
   intentRewriteHint,
   maxBubblesForTurn,
+  wantsOutboundImage,
   type TurnIntent,
 } from "./turn_intent.js";
 import type {
@@ -220,6 +221,7 @@ interface TurnContext {
   planReason: string | null;
   intent: TurnIntent | null;
   draft: DraftResult | null;
+  mediaPick: { path: string; label: string } | null;
 }
 
 export class ChatEngine {
@@ -672,6 +674,7 @@ export class ChatEngine {
       planReason: null,
       intent: null,
       draft: null,
+      mediaPick: null,
     };
 
     try {
@@ -1054,6 +1057,29 @@ export class ChatEngine {
           ? classifyTurnIntent(ctx.incoming)
           : { kind: "continue", excerpt: "" };
       }
+      if (wantsOutboundImage(ctx.intent) && this.deps.pickMedia) {
+        ctx.mediaPick = this.deps.pickMedia({ excerpt: ctx.intent.excerpt }) ?? null;
+        if (ctx.intent.kind === "image_request" && !ctx.mediaPick) {
+          this.deps.log("图库没有对应图片，改用文字说明备图情况", {
+            type: "chat_image_missing",
+            phase: "drafting",
+            threadKey: ctx.contact.key,
+          });
+        }
+        if (ctx.intent.kind === "voice_video_request") {
+          this.deps.log(
+            ctx.mediaPick
+              ? "对方要语音/视频：先发实拍、不承诺音视频"
+              : "对方要语音/视频：用文字借口带过，不主动提能力缺陷",
+            {
+              type: "chat_media_refused",
+              phase: "drafting",
+              threadKey: ctx.contact.key,
+              hasImage: Boolean(ctx.mediaPick),
+            },
+          );
+        }
+      }
       await this.enter("drafting", {}, { threadKey: ctx.contact.key });
       const draft = await this.generateDraft(
         ctx.contact,
@@ -1066,18 +1092,23 @@ export class ChatEngine {
       );
       assertNotAborted(signal);
       if (!draft) {
-        this.deps.log("草稿未能通过去重，本轮不发", {
-          type: "chat_draft_rejected",
-          phase: "drafting",
-          threadKey: ctx.contact.key,
-          reason: "no_passing_draft",
-        });
-        ctx.contact = this.consumeIncoming(ctx.contact);
-        this.snapshot = upsertContact(this.snapshot, ctx.contact);
-        await this.save();
-        return turnDone(ctx.contact, "skipped");
+        if (ctx.mediaPick && this.deps.sendImage) {
+          ctx.draft = { text: "", texts: [], angle: null, costMicroUsd: 0 };
+        } else {
+          this.deps.log("草稿未能通过去重，本轮不发", {
+            type: "chat_draft_rejected",
+            phase: "drafting",
+            threadKey: ctx.contact.key,
+            reason: "no_passing_draft",
+          });
+          ctx.contact = this.consumeIncoming(ctx.contact);
+          this.snapshot = upsertContact(this.snapshot, ctx.contact);
+          await this.save();
+          return turnDone(ctx.contact, "skipped");
+        }
+      } else {
+        ctx.draft = draft;
       }
-      ctx.draft = draft;
     }
 
     // 闸门（红线 → 禁用词 → 意图 → 去重）：整批发之前先把每一句过一遍；任一红线即停。
@@ -1101,6 +1132,10 @@ export class ChatEngine {
         return turnDone(ctx.contact, "skipped");
       }
       if (draftViolatesIntent(text, intent)) {
+        if (ctx.mediaPick && this.deps.sendImage) {
+          ctx.draft = { text: "", texts: [], angle: ctx.draft?.angle ?? null, costMicroUsd: ctx.draft?.costMicroUsd ?? 0 };
+          break;
+        }
         this.deps.log("发送被拦：草稿未回应对方意图（疑似继续推销）", {
           type: "chat_draft_rejected",
           phase: "verifying",
@@ -1121,14 +1156,23 @@ export class ChatEngine {
   private async deliverAndRecord(ctx: TurnContext): Promise<TurnOutcome> {
     const { signal } = ctx;
     const draft = ctx.draft;
-    if (!draft) return turnDone(ctx.contact, "skipped");
-
     const queue = draftTextsOf(draft);
-    if (queue.length === 0) return turnDone(ctx.contact, "skipped");
+    if (!ctx.mediaPick && queue.length === 0) return turnDone(ctx.contact, "skipped");
 
     let lastDelivered: "sent" | "skipped" | "handover" | "aborted" = "skipped";
     let sentCount = 0;
     const sentJoined: string[] = [];
+
+    if (ctx.mediaPick && this.deps.sendImage) {
+      const delivered = await this.deliverImage(ctx.contact, ctx.mediaPick, ctx.stage, signal);
+      lastDelivered = delivered;
+      if (delivered === "handover") return { kind: "handover" };
+      if (delivered === "aborted") return { kind: "aborted" };
+      if (delivered === "sent") {
+        sentCount += 1;
+        sentJoined.push(`[图片:${ctx.mediaPick.label}]`);
+      }
+    }
 
     for (let i = 0; i < queue.length; i += 1) {
       assertNotAborted(signal);
@@ -1176,7 +1220,7 @@ export class ChatEngine {
         ctx.contact,
         text,
         ctx.stage,
-        i === 0 ? draft.angle : null,
+        i === 0 ? draft?.angle ?? null : null,
         ctx.incoming,
         signal,
       );
@@ -1203,7 +1247,7 @@ export class ChatEngine {
       contact: ctx.contact,
       newMessages: ctx.read?.messages ?? [],
       sentText: sentJoined.length > 0 ? sentJoined.join("\n") : null,
-      angle: draft.angle,
+      angle: draft?.angle ?? null,
       stage: ctx.stage,
       error: lastDelivered === "sent" || sentCount > 0 ? null : "send_not_confirmed",
     });
@@ -1240,7 +1284,7 @@ export class ChatEngine {
           sentTotal: this.snapshot.counters.sentTotal + sentCount,
           llmCallsToday: this.snapshot.counters.llmCallsToday + 1,
           costMicroUsd:
-            this.snapshot.counters.costMicroUsd + Math.max(0, Math.round(draft.costMicroUsd)),
+            this.snapshot.counters.costMicroUsd + Math.max(0, Math.round(draft?.costMicroUsd ?? 0)),
         },
       };
       await this.save();
@@ -1611,6 +1655,83 @@ export class ChatEngine {
     }
 
     return null;
+  }
+
+  /**
+   * 发图：幂等 + sendImage 自身 fail-closed 回读。
+   */
+  private async deliverImage(
+    contact: ChatContactState,
+    pick: { path: string; label: string },
+    _stage: ChatStage,
+    signal: AbortSignal,
+  ): Promise<"sent" | "skipped" | "handover" | "aborted"> {
+    if (!this.deps.sendImage) return "skipped";
+    const marker = `[图片:${pick.label}]`;
+    const turnSeq = this.snapshot.engine.progressCounter + 1;
+    const threadKey = contact.key;
+    const effectId = computeEffectId(threadKey, turnSeq, marker);
+    const existing = findOutboxEntry(this.snapshot.outbox, effectId);
+    const decision = decideSend(existing, { seenInPage: false });
+    if (decision.action === "skip" || decision.action === "settle_sent") {
+      this.deps.log("该图片已记过账，不重发", {
+        type: "chat_outbox_reconcile",
+        phase: "sending",
+        threadKey,
+        effectId,
+      });
+      return "skipped";
+    }
+    if (decision.action === "hand_off") {
+      this.deps.log("该图片发送结果无法确认，交人工（不重发）", {
+        type: "chat_send_unconfirmed",
+        phase: "sending",
+        threadKey,
+        effectId,
+      });
+      await this.deps.handover({ contact, reason: "chat_send_unconfirmed", detail: decision.reason });
+      return "handover";
+    }
+
+    const pending = beginSend(effectId, threadKey, marker, this.deps.now(), existing);
+    this.snapshot = setOutbox(this.snapshot, upsertOutbox(this.snapshot.outbox, pending));
+    await this.save();
+    await this.enter("sending", {}, { threadKey, effectId });
+
+    const result = await this.deps.sendImage(contact, pick.path);
+    assertNotAborted(signal);
+    await this.noteProgress();
+
+    if (!result.ok) {
+      this.snapshot = setOutbox(
+        this.snapshot,
+        upsertOutbox(this.snapshot.outbox, markUnconfirmed(pending, this.deps.now(), result.reason ?? "发图失败")),
+      );
+      await this.save();
+      this.deps.log("发图未成功，已标 unconfirmed（不自动重发）", {
+        type: "chat_send_unconfirmed",
+        phase: "sending",
+        threadKey,
+        effectId,
+        reason: result.reason ?? "send_image_failed",
+        diagnostics: result.diagnostics ?? null,
+      });
+      return "skipped";
+    }
+
+    this.snapshot = setOutbox(
+      this.snapshot,
+      upsertOutbox(this.snapshot.outbox, commitSent(pending, this.deps.now())),
+    );
+    await this.save();
+    this.deps.log(`已发出图片「${pick.label}」`, {
+      type: "chat_image_sent",
+      phase: "sending",
+      threadKey,
+      effectId,
+      label: pick.label,
+    });
+    return "sent";
   }
 
   /**

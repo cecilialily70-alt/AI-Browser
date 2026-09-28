@@ -407,6 +407,7 @@ export interface ChatConnectorCapabilities {
   subscribe: boolean;
   presence: boolean;
   threads: boolean;
+  sendImage?: boolean;
 }
 
 /** 运行期健康（熔断状态活在内存里，不落盘；无记录即 null） */

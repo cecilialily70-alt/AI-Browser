@@ -1,4 +1,4 @@
-import { Clock, EyeOff, MessageSquare, MessagesSquare, Plus, Save, ShieldCheck, Trash2, UserRound } from "lucide-react";
+import { Clock, EyeOff, FolderOpen, Image, MessageSquare, MessagesSquare, Plus, Save, ShieldCheck, Trash2, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -19,7 +19,7 @@ import {
 } from "../../lib/chatModeSettings";
 import { createToast } from "../../lib/toast";
 import type { ToastMessage } from "../../lib/toast";
-import { fetchRawSettings, formatInvokeError, updateSetting } from "../../lib/tauri";
+import { fetchRawSettings, formatInvokeError, pickDirectory, updateSetting } from "../../lib/tauri";
 import { ChatSiteSupportSection } from "./ChatSiteSupportSection";
 import { SettingsSection } from "./SettingsSection";
 
@@ -303,6 +303,69 @@ export function ChatModeSettingsTab({
           disabled={saving}
           onChange={(next) => void persist({ ...settings, maxContactsPerSlice: next })}
         />
+      </SettingsSection>
+
+      <SettingsSection
+        icon={<Image size={16} />}
+        title="发图图库"
+        description="对方要看图时，引擎只从这个文件夹按文件名/子文件夹名匹配实拍图发出去。留空则用软件自带的图库。"
+      >
+        <div className="space-y-2 rounded-md bg-card/50 px-3 py-2 ring-1 ring-inset ring-border-strong/30">
+          <p className="text-caption leading-4 text-muted-foreground">
+            文件夹名 = 品类（如 iPhone_18_Pro_Max），文件名 = 颜色或角度（如 深蓝_正面.jpg）。支持 jpg / png / webp / gif。
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              className="field-input h-8 min-w-0 flex-1 text-ui"
+              placeholder="留空 = 软件自带图库"
+              value={settings.mediaLibraryDir}
+              disabled={saving}
+              onChange={(event) =>
+                setSettings({ ...settings, mediaLibraryDir: event.target.value })
+              }
+              onBlur={() => {
+                const next = settings.mediaLibraryDir.trim();
+                void persist({ ...settings, mediaLibraryDir: next });
+              }}
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              className="btn-outline h-8 shrink-0 gap-1.5 px-2.5 text-caption"
+              disabled={saving}
+              onClick={() => {
+                void (async () => {
+                  try {
+                    const picked = await pickDirectory("选择聊天发图图库文件夹");
+                    if (!picked?.trim()) return;
+                    await persist(
+                      { ...settings, mediaLibraryDir: picked.trim() },
+                      "已改用自定义图库目录",
+                    );
+                  } catch (error) {
+                    onError(formatInvokeError(error));
+                  }
+                })();
+              }}
+            >
+              <FolderOpen size={14} />
+              浏览…
+            </button>
+            {settings.mediaLibraryDir.trim() ? (
+              <button
+                type="button"
+                className="btn-ghost h-8 shrink-0 px-2 text-caption"
+                disabled={saving}
+                onClick={() =>
+                  void persist({ ...settings, mediaLibraryDir: "" }, "已恢复软件自带图库")
+                }
+              >
+                恢复默认
+              </button>
+            ) : null}
+          </div>
+        </div>
       </SettingsSection>
 
       <SettingsSection

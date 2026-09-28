@@ -432,6 +432,11 @@ export async function chatStart(input: {
   roles?: Array<{ id: string; name: string; prompt: string }>;
   /** 当前选用的角色 id；`null`＝无角色 */
   activeRoleId?: string | null;
+  /**
+   * 自定义发图图库目录；空 / 不传 = 软件自带 `chat_media`。
+   * Host 只读转发，合法性与是否存在由 Sidecar 处理。
+   */
+  mediaLibraryDir?: string | null;
 }): Promise<ChatSliceResult> {
   return invoke<ChatSliceResult>("chat_start", {
     profileId: input.profileId,
@@ -444,6 +449,7 @@ export async function chatStart(input: {
     contactFlags: input.contactFlags ?? null,
     roles: input.roles ?? null,
     activeRoleId: input.activeRoleId ?? null,
+    mediaLibraryDir: input.mediaLibraryDir?.trim() || null,
     sliceMs: input.sliceMs ?? null,
     maxContactsPerSlice: input.maxContactsPerSlice ?? null,
     useCurrentWindow: input.useCurrentWindow ?? false,

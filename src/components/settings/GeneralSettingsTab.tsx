@@ -45,6 +45,7 @@ import {
   testKeyFile,
   updateCloakBinary,
   updateSetting,
+  openDownloadDir,
   type ExternalDataApiState,
 } from "../../lib/tauri";
 import type {
@@ -924,12 +925,26 @@ export function GeneralSettingsTab({
 
   const handlePickDownloadDir = async (key: "browser_download_dir" | "scraper_download_dir") => {
     try {
-      const title = key === "browser_download_dir" ? "选择常规浏览器下载目录" : "选择爬虫抓取下载目录";
+      const title = key === "browser_download_dir" ? "选择常规浏览器下载目录" : "选择数据目录";
       const picked = await pickDirectory(title);
       if (!picked?.trim()) {
         return;
       }
       onSettingsChange({ ...settings, [key]: picked.trim() });
+    } catch (error) {
+      onToast(createToast("error", formatInvokeError(error)));
+    }
+  };
+
+  const handleOpenDownloadDir = async (track: "browser" | "scraper") => {
+    try {
+      const opened = await openDownloadDir(track);
+      onToast(
+        createToast(
+          "success",
+          track === "scraper" ? `已打开数据目录：${opened}` : `已打开下载目录：${opened}`,
+        ),
+      );
     } catch (error) {
       onToast(createToast("error", formatInvokeError(error)));
     }
@@ -1256,7 +1271,7 @@ export function GeneralSettingsTab({
           </div>
         </label>
         <label className="field-label">
-          爬虫数据抓取目录
+          数据目录
           <div className="mt-1 flex gap-2">
             <input
               className="field-input font-mono text-xs flex-1"
@@ -1277,6 +1292,26 @@ export function GeneralSettingsTab({
             </button>
           </div>
         </label>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="btn btn-outline"
+            disabled={saving}
+            onClick={() => void handleOpenDownloadDir("browser")}
+          >
+            <FolderOpen size={14} />
+            打开下载目录
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline"
+            disabled={saving}
+            onClick={() => void handleOpenDownloadDir("scraper")}
+          >
+            <FolderOpen size={14} />
+            打开数据目录
+          </button>
+        </div>
         <div className="mt-3 rounded-md bg-sunken p-3">
           <div className="text-ui font-medium text-foreground">缓存清理</div>
           <button

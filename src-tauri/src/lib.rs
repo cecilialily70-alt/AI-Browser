@@ -58,7 +58,7 @@ use crate::commands::{
     export_profile_cookies, export_text_to_download_dir, get_agent_run, get_otp_channel_binding,
     get_profiles, get_proxies, get_settings, get_templates_by_domain, import_profile_cookies,
     list_agent_control_memory, list_agent_runs, summarize_agent_run_board, list_agent_trajectories, open_external_url,
-    open_path_in_os,
+    open_download_dir, open_path_in_os,
     pick_directory, prepare_console_exit, put_secret_ref, request_profile_interactive_extract,
     save_template, secret_ref_exists, set_profile_agent_panorama, set_profile_interactive_extract,
     set_profile_otp_channel, test_proxy_connection,
@@ -83,7 +83,8 @@ use crate::replay_plan::build_replay_run_plan;
 use crate::rpa_session::{
     abort_autonomous_agent, bring_profile_to_front, cancel_agent_action, chat_list_contacts,
     chat_start, chat_status, chat_stop, confirm_agent_action, continue_agent_handover,
-    get_chat_thread_messages, get_profile_page_url, pause_autonomous_agent, pause_rpa_fill,
+    get_chat_thread_messages, get_profile_page_url, mark_agent_success, pause_autonomous_agent,
+    pause_rpa_fill,
     replay_agent_trajectory, reply_agent_ask, rescan_rpa_page, resume_rpa_fill, run_rpa_fill,
     start_autonomous_agent, RpaSessionManager,
 };
@@ -330,6 +331,7 @@ pub fn run() {
             continue_agent_handover,
             abort_autonomous_agent,
             pause_autonomous_agent,
+            mark_agent_success,
             bring_profile_to_front,
             chat_start,
             chat_stop,
@@ -383,6 +385,7 @@ pub fn run() {
             check_license_entitlement,
             pick_directory,
             open_path_in_os,
+            open_download_dir,
             open_external_url,
             export_text_to_download_dir,
             prepare_console_exit

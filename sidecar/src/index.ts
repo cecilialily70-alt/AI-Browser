@@ -13,6 +13,7 @@ import {
 } from "./cdp_session.js";
 import { extractPageFormSchema } from "./dom_parser.js";
 import { parseFillInput } from "./fill_export.js";
+import { exportFillProfileToDataDir, createFillDataLedger } from "./core/fill_data_export.js";
 import { fillActionsToRpaActions, mergeProfileIntoFillActions } from "./fill_action_builder.js";
 import { runFillEngine, runFillEngineFromActions, type FillProfile, type SidecarAiSettings } from "./engine.js";
 import { generateHybridFillProfile } from "./hybrid_fill.js";
@@ -31,7 +32,12 @@ import {
   clearUserPauseRequest,
   drainUserPauseGate,
   requestUserPause,
+  userPauseLockId,
 } from "./bu_agent/user_pause_gate.js";
+import {
+  clearUserSuccessRequest,
+  requestUserSuccess,
+} from "./bu_agent/user_success_gate.js";
 import { installParentProcessWatchdog } from "./parent_process_watchdog.js";
 import {
   parseRpaActions,
@@ -99,6 +105,7 @@ import {
   deletePersistedTrajectory,
   listPersistedTrajectories,
   loadTrajectoryFromFile,
+  unpackActionsWithReplayHints,
   type TrajectoryStep,
 } from "./trajectory.js";
 import { classifyExternalFillFields } from "./core/external_fill_gate.js";
@@ -312,6 +319,7 @@ function attachStdinAbortListener(
     "agent_host_response",
     "agent_pause",
     "agent_abort",
+    "agent_success",
     "agent_bring_to_front",
     // 聊天值守可能正跑一个很长的片：停止必须绕过串行队列，否则「停不下来」
     "chat_stop",
@@ -831,6 +839,21 @@ async function runLegacyFillBody(
   if ((directFill || prebuiltActions) && prebuiltActions && prebuiltActions.length > 0) {
     logger.progress("fill_using_prebuilt_actions", { actionCount: prebuiltActions.length });
     await runFillEngineFromActions(page, prebuiltActions, logger, { pressEnterAfterFill });
+    const fillProfileId =
+      String(payload.profileId ?? payload.profile_id ?? "").trim() || "unknown";
+    const exportProfile: Record<string, string> = {};
+    for (const action of prebuiltActions) {
+      if (action.action === "click") continue;
+      const key = String(action.field || "").trim();
+      const val = String(action.value ?? "").trim();
+      if (key && val) exportProfile[key] = val;
+    }
+    exportFillProfileToDataDir({
+      profileId: fillProfileId,
+      profile: Object.keys(exportProfile).length > 0 ? exportProfile : mergedProfile,
+      url: page.url(),
+      logger,
+    });
     return;
   }
 
@@ -838,6 +861,12 @@ async function runLegacyFillBody(
     userDataDir,
     directMappingOnly: directFill,
     pressEnterAfterFill,
+  });
+  exportFillProfileToDataDir({
+    profileId: String(payload.profileId ?? payload.profile_id ?? "").trim() || "unknown",
+    profile: mergedProfile,
+    url: page.url(),
+    logger,
   });
 }
 
@@ -1055,6 +1084,13 @@ async function runSmartElementFillBody(
     pressEnterAfterFill: resolvePressEnterAfterFill(payload),
   });
 
+  exportFillProfileToDataDir({
+    profileId: String(payload.profileId ?? payload.profile_id ?? "").trim() || "unknown",
+    profile: prepared.fillProfile,
+    url: page.url(),
+    logger,
+  });
+
   logger.result("smart_element_fill_complete", {
     filledFieldCount: prepared.filledFieldCount,
     actionCount: actions.length,
@@ -1114,6 +1150,7 @@ function rejectAllAgentPendings(reason: string): void {
   }
   // 释放全部挂起锁，避免 Agent abort 后 Promise 永挂
   clearUserPauseRequest();
+  clearUserSuccessRequest();
   resumePause(null);
   void reason;
 }
@@ -1194,6 +1231,7 @@ async function handleAgentStart(
   agentAbortController = new AbortController();
   agentRunning = true;
   clearUserPauseRequest();
+  clearUserSuccessRequest();
 
   try {
     // 新任务从「第一个标签」开始：清掉上一次任务/命令留下的 switch 绑定。
@@ -1875,6 +1913,7 @@ async function handleTrajectoryReplay(
 
   try {
     let steps: TrajectoryStep[] = [];
+    let replayHintsNote = "";
     const filePath = String(payload.filePath ?? payload.file_path ?? "").trim();
     if (filePath) {
       const loaded = await loadTrajectoryFromFile(filePath);
@@ -1882,18 +1921,37 @@ async function handleTrajectoryReplay(
       if (!goal) {
         goal = String(loaded.goal ?? loaded.title ?? title).trim();
       }
+      const hints = loaded.replayHints;
+      if (hints?.needsHuman || hints?.nonMechanical) {
+        replayHintsNote =
+          ` · 难点：${(hints.reasons || []).join("/") || "需人工"}（不宜纯机械批量）`;
+        logger.agentProgress(
+          `本轨迹含非机械难点（${(hints.reasons || []).join("、") || "需人工"}）：验证码/OTP 等不会自动复现；定位失败时会尝试单步 AI 愈合后再交回机械`,
+          { ...engineTag, phase: "replay_hints", replayHints: hints },
+        );
+      }
       logger.agentState("running", {
         ...engineTag,
         step: 0,
         msg: `开始回放「${loaded.title || title}」· ${steps.length} 步` +
-          (trajectoryNeedsAiDelivery(goal) ? " · 完成后将 AI 交付" : ""),
+          (trajectoryNeedsAiDelivery(goal) ? " · 完成后将 AI 交付" : "") +
+          replayHintsNote,
       });
     } else {
       const rawActions = payload.actions;
       if (!Array.isArray(rawActions)) {
         throw new Error("缺少 filePath 或 actions");
       }
-      steps = rawActions as TrajectoryStep[];
+      const unpacked = unpackActionsWithReplayHints(rawActions);
+      steps = unpacked.actions;
+      if (unpacked.hints?.needsHuman || unpacked.hints?.nonMechanical) {
+        replayHintsNote =
+          ` · 难点：${(unpacked.hints.reasons || []).join("/") || "需人工"}`;
+        logger.agentProgress(
+          `本轨迹含非机械难点（${(unpacked.hints.reasons || []).join("、") || "需人工"}）：脱敏字段须有覆盖值，验证码不会自动复现`,
+          { ...engineTag, phase: "replay_hints", replayHints: unpacked.hints },
+        );
+      }
       if (!goal) {
         goal = title;
       }
@@ -1901,7 +1959,8 @@ async function handleTrajectoryReplay(
         ...engineTag,
         step: 0,
         msg: `开始回放「${title}」· ${steps.length} 步` +
-          (trajectoryNeedsAiDelivery(goal) ? " · 完成后将 AI 交付" : ""),
+          (trajectoryNeedsAiDelivery(goal) ? " · 完成后将 AI 交付" : "") +
+          replayHintsNote,
       });
     }
 
@@ -1964,6 +2023,41 @@ async function handleTrajectoryReplay(
       run: runIdentity,
       data: dataRow,
       clip: replayClipValues,
+    });
+
+    // 本轮回放数据 →「数据目录」：数据集行 / 人设 / 实际填入值
+    const personaFlat = (() => {
+      if (!replayPersonaTemplate || typeof replayPersonaTemplate !== "object") {
+        return {} as Record<string, string>;
+      }
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(replayPersonaTemplate as Record<string, unknown>)) {
+        if (value == null) continue;
+        if (typeof value === "object") continue;
+        const text = String(value).trim();
+        if (text) out[key] = text;
+      }
+      return out;
+    })();
+    const dataFlat: Record<string, string> = {};
+    if (dataRow) {
+      for (const [key, value] of Object.entries(dataRow)) {
+        const text = String(value ?? "").trim();
+        if (text) dataFlat[key] = text;
+      }
+    }
+    const fillDataLedger = createFillDataLedger({
+      profileId: profileId || "unknown",
+      runId: `replay-r${round + 1}-${runIdentity.uniqueId ?? Date.now()}`,
+      logger,
+      filePrefix: "replay-fill",
+      meta: {
+        kind: "replay",
+        round: round + 1,
+        goal: goal.slice(0, 500),
+        dataRow: dataFlat,
+        persona: personaFlat,
+      },
     });
 
     /*
@@ -2036,12 +2130,27 @@ async function handleTrajectoryReplay(
           },
         });
       },
+      onFillStep: (info) => {
+        fillDataLedger.record({
+          label: info.label || info.selector,
+          value: info.value,
+          fieldType: info.fieldType,
+          url: info.url,
+          source: info.type === "select" ? "replay_select" : "replay_fill",
+          step: info.step,
+        });
+      },
       resolveContext: {
         geo: payload.geoContext ?? payload.geo_context ?? null,
         persona: replayPersonaTemplate,
         aiSettings,
         templateExtra,
         logger,
+      },
+      aiHeal: (payload.replayAiHeal ?? payload.replay_ai_heal ?? {}) as {
+        enabled?: boolean;
+        maxPerRun?: number;
+        allowDismissBlocker?: boolean;
       },
       onProgress: (event) => {
         if (event.status === "start") {
@@ -2055,10 +2164,12 @@ async function handleTrajectoryReplay(
             },
           );
         } else if (event.status === "ok") {
-          logger.agentProgress(`回放第 ${event.step} 步完成 [${event.type}]`, {
+          const detail = event.message ? ` · ${event.message}` : "";
+          logger.agentProgress(`回放第 ${event.step} 步完成 [${event.type}]${detail}`, {
             ...engineTag,
             step: event.step,
             type: event.type,
+            message: event.message ?? null,
           });
         } else if (event.status === "fail") {
           logger.agentState("failed", {
@@ -2085,6 +2196,78 @@ async function handleTrajectoryReplay(
         failedStep: result.failedStep ?? null,
         error: result.error ?? "回放失败",
         aborted,
+      });
+      return;
+    }
+
+    // P2：支付收尾闸（目标要求付掉时，机械回放不得报成功冒充已付款）
+    try {
+      const { goalDemandsHumanPayment, loadCompletionLexicon } = await import(
+        "./core/completion_evidence.js"
+      );
+      const demand = goalDemandsHumanPayment(goal, loadCompletionLexicon());
+      if (demand) {
+        const message =
+          `回放机械步已走完，但目标含「${demand}」：回放不会自动完成支付（R1）。请人工支付后改用 Agent，或去掉「付掉/支付成功」类目标词。`;
+        logger.agentState("failed", {
+          ...engineTag,
+          step: result.completedSteps,
+          msg: message,
+          phase: "replay_payment_credential_gate",
+        });
+        logger.result("trajectory_replay_done", {
+          ok: false,
+          completedSteps: result.completedSteps,
+          error: message,
+          aborted: false,
+        });
+        return;
+      }
+    } catch (gateErr) {
+      logger.warn("replay_payment_credential_gate_failed", {
+        error: gateErr instanceof Error ? gateErr.message : String(gateErr),
+      });
+    }
+
+    // 人机验证收尾闸：步数跑完但页面仍停在「證明您是人類 / 長按」等，禁止报成功
+    try {
+      const { probeBlockingCaptchaOnPage } = await import("./bu_agent/captcha_dispatch.js");
+      const captchaBlock = await probeBlockingCaptchaOnPage(page);
+      if (captchaBlock.blocked) {
+        const message =
+          captchaBlock.reason ||
+          "回放机械步已走完，但页面仍停在人机验证，禁止报成功";
+        logger.agentState("failed", {
+          ...engineTag,
+          step: result.completedSteps,
+          msg: message,
+          phase: "replay_captcha_gate",
+          captchaStrategy: captchaBlock.strategy,
+          captchaMatched: captchaBlock.matched,
+        });
+        logger.result("trajectory_replay_done", {
+          ok: false,
+          completedSteps: result.completedSteps,
+          error: message,
+          aborted: false,
+        });
+        return;
+      }
+    } catch (gateErr) {
+      // 探测本身失败 → fail-closed（读不到就不敢声称已过码）
+      const detail = gateErr instanceof Error ? gateErr.message : String(gateErr);
+      const message = `回放收尾无法确认是否已过验证码（${detail}）：禁止报成功，请人工核对页面`;
+      logger.agentState("failed", {
+        ...engineTag,
+        step: result.completedSteps,
+        msg: message,
+        phase: "replay_captcha_gate",
+      });
+      logger.result("trajectory_replay_done", {
+        ok: false,
+        completedSteps: result.completedSteps,
+        error: message,
+        aborted: false,
       });
       return;
     }
@@ -2289,6 +2472,32 @@ function handleAgentImmediateCommand(payload: Record<string, unknown>): boolean 
     }
     requestUserPause();
     logger.status("agent_pause_requested", { profileId: String(payload.profileId ?? "") });
+    return true;
+  }
+
+  if (command === "agent_success") {
+    if (!agentRunning) {
+      logger.warn("agent_success_ignored", { reason: "agent_not_running" });
+      return true;
+    }
+    requestUserSuccess();
+    // 解开暂停与挂起的 HITL，让主循环尽快读到成功闸
+    clearUserPauseRequest();
+    resumePause(userPauseLockId(String(payload.profileId ?? "")));
+    resumePause(null);
+    for (const [id, resolver] of pendingConfirmResolvers) {
+      pendingConfirmResolvers.delete(id);
+      resolver({ approved: false });
+    }
+    for (const [id, resolver] of pendingAskResolvers) {
+      pendingAskResolvers.delete(id);
+      resolver("（用户已标记成功）");
+    }
+    logger.agentProgress("已请求标记成功 · 当前步结束后收尾并写入轨迹（若已勾选录制）", {
+      phase: "user_success",
+      profileId: String(payload.profileId ?? ""),
+    });
+    logger.status("agent_success_requested", { profileId: String(payload.profileId ?? "") });
     return true;
   }
 

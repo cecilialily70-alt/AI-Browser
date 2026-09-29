@@ -378,6 +378,12 @@ test("聊天形态源码级静音：不截图 / 不全景 / 不 SoM / 不 a11y �
     "overlay_probe",
     "obstacle_arbiter",
     "interactive_elements",
+    // Agent Event SSOT / RunBrief / 动作证据：聊天形态不得引用（ChatFireWall）
+    "action_evidence",
+    "run_brief",
+    "emitAgentEvent",
+    "beginActionEvidence",
+    "buildRunBrief",
   ];
   for (const file of files) {
     const source = readFileSync(file, "utf8");

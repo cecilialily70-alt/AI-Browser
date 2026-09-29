@@ -556,7 +556,19 @@ impl From<&ReplayEditBody> for crate::replay_job::PlanEdit {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ReplayRequestBody {
+    /// 库内轨迹 id；文件轨迹可传 ≤0 并配 `filePath` / `actions`
+    #[serde(default)]
     trajectory_id: i64,
+    /// 磁盘轨迹（须在 agent_exports/trajectories/）；与 UI 沙盘同口径
+    #[serde(default, alias = "file_path")]
+    file_path: Option<String>,
+    /// 已解析的轨迹步（与 UI 一致）；有则不再强制查库
+    #[serde(default)]
+    actions: Option<Vec<Value>>,
+    #[serde(default)]
+    goal: Option<String>,
+    #[serde(default)]
+    trajectory_title: Option<String>,
     profile_ids: Vec<String>,
     #[serde(default = "default_repeat_count")]
     repeat_count: u32,
@@ -868,8 +880,41 @@ async fn prepare_plan(
         .unwrap_or("snapshot")
         .to_owned();
 
-    // 轨迹：只认库里已录制的 id（**不接受** actions 数组）
-    let (actions, goal, title) = {
+    // 轨迹：与 UI 同口径 —— 有 actions / filePath / id≤0 时不强制查库；否则按 id 读库
+    let file_path = request
+        .file_path
+        .as_ref()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let request_actions = request
+        .actions
+        .clone()
+        .filter(|entries| !entries.is_empty());
+    let (actions, goal, title) = if crate::replay_plan::should_skip_trajectory_db(
+        Some(request.trajectory_id),
+        &request_actions,
+        file_path.as_deref(),
+    ) {
+        if let Some(entries) = request_actions {
+            (
+                Value::Array(entries),
+                request.goal.clone().unwrap_or_default(),
+                request.trajectory_title.clone().unwrap_or_default(),
+            )
+        } else if let Some(ref path) = file_path {
+            let (file_title, file_goal, file_actions) =
+                crate::trajectory_files::load_trajectory_file(path)?;
+            (
+                Value::Array(file_actions),
+                request.goal.clone().unwrap_or(file_goal),
+                request.trajectory_title.clone().unwrap_or(file_title),
+            )
+        } else {
+            return Err(AppError::Validation(
+                "文件轨迹需要 filePath 或非空 actions（trajectoryId≤0 时不查库）".to_owned(),
+            ));
+        }
+    } else {
         let Some(db_state) = app.try_state::<crate::AppState>() else {
             return Err(AppError::State("宿主数据库不可用".to_owned()));
         };
@@ -890,6 +935,7 @@ async fn prepare_plan(
         trajectory_id: Some(request.trajectory_id),
         trajectory_title: title.clone(),
         actions: Some(actions.as_array().cloned().unwrap_or_default()),
+        file_path: file_path.clone(),
         goal: goal.clone(),
         profile_ids: request.profile_ids.clone(),
         repeat_count: request.repeat_count,
@@ -1085,7 +1131,7 @@ async fn handle_replay_meta(State(state): State<DataApiState>) -> axum::response
             ],
             "notes": [
                 "POST /v1/replay/plan 干跑出预检单（不碰浏览器）；POST /v1/replay 按预检单执行（须带 planHash）",
-                "只接受轨迹 id + 数据 + planHash：不接受 actions / steps / script / selector / url / click / evaluate",
+                "接受轨迹 id / filePath / 轨迹步 actions + 数据 + planHash；不接受 steps / script / selector / url / click / evaluate",
                 "预检单不能预授权支付：执行阶段支付/凭证闸门照旧（会停在人工确认）",
                 "轮次结果不含任何字段值 / 剪贴板内容 / 验证码明文",
             ],
@@ -1133,7 +1179,7 @@ async fn handle_replay_start(State(state): State<DataApiState>, body: String) ->
             return api_error(
                 StatusCode::BAD_REQUEST,
                 &format!(
-                    "请求体不合法（不接受 actions / steps / script / selector / url / click / evaluate 等命令字段）：{error}"
+                    "请求体不合法（不接受 steps / script / selector / url / click / evaluate 等命令字段）：{error}"
                 ),
             )
         }
@@ -1501,9 +1547,9 @@ mod tests {
 
     #[test]
     fn replay_request_rejects_command_keys() {
-        // 只传数据 + 轨迹 id：任何「命令/动作」键都必须解析失败（400），而不是被忽略。
+        // 只传数据 + 轨迹 id：危险「命令」键必须解析失败（400）。
+        // actions / filePath 与 UI 同口径，允许用于文件轨迹预检（不是 click/evaluate 类命令）。
         for payload in [
-            r##"{"trajectoryId":1,"profileIds":["3"],"actions":[{"click":"#go"}]}"##,
             r##"{"trajectoryId":1,"profileIds":["3"],"steps":[]}"##,
             r##"{"trajectoryId":1,"profileIds":["3"],"script":"1+1"}"##,
             r##"{"trajectoryId":1,"profileIds":["3"],"selector":"#go"}"##,
@@ -1516,6 +1562,22 @@ mod tests {
                 "命令键必须被拒绝：{payload}"
             );
         }
+    }
+
+    #[test]
+    fn replay_request_accepts_file_path_and_actions() {
+        let with_file: ReplayRequestBody = serde_json::from_str(
+            r#"{"trajectoryId":-9,"profileIds":["3"],"filePath":"E:/Browser/sidecar/agent_exports/trajectories/a.json"}"#,
+        )
+        .expect("filePath 必须可解析");
+        assert_eq!(with_file.trajectory_id, -9);
+        assert!(with_file.file_path.is_some());
+
+        let with_actions: ReplayRequestBody = serde_json::from_str(
+            r##"{"trajectoryId":0,"profileIds":["3"],"actions":[{"type":"click","selector":"#go"}]}"##,
+        )
+        .expect("轨迹步 actions 必须可解析");
+        assert_eq!(with_actions.actions.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

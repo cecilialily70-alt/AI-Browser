@@ -1,5 +1,6 @@
 import {
   Bot,
+  CheckCircle2,
   ChevronDown,
   ClipboardList,
   History,
@@ -64,6 +65,7 @@ import {
   startAutonomousAgent,
   abortAutonomousAgent,
   pauseAutonomousAgent,
+  markAgentSuccess,
   continueAgentHandover,
 } from "../lib/tauri";
 import type {
@@ -87,7 +89,7 @@ import { AgentOpenTabsBar, type AgentOpenTabItem } from "./AgentOpenTabsBar";
 import { TrajectoryMemoryPanel } from "./TrajectoryMemoryPanel";
 import { AgentRunHistoryPanel } from "./AgentRunHistoryPanel";
 import { type RpaUiState } from "../lib/rpaState";
-import { inferAgentLineKind } from "../lib/agentThoughtChain";
+import { inferAgentLineKind, resolveAgentLineKind } from "../lib/agentThoughtChain";
 import { useInterventionCenter } from "./InterventionCenterProvider";
 
 const logger = createLogger("AIFillDrawer");
@@ -1212,6 +1214,9 @@ export function AIFillDrawer({
       engine?: string;
       /** 终态交付物正文（信息型任务的结论就写在这里） */
       summary?: string;
+      /** AgentEvent SSOT：协议语义 kind（≠ TerminalLine.kind） */
+      eventKind?: string;
+      phase?: string;
     }>("agent-state", (event) => {
       const eventProfileId = String(event.payload.profileId ?? "").trim();
       // 严防串号：禁止回退到当前 Tab
@@ -1222,6 +1227,7 @@ export function AIFillDrawer({
       const state = event.payload.state ?? "";
       const msg = event.payload.msg ?? "";
       const engine = String(event.payload.engine ?? "");
+      const eventKind = String(event.payload.eventKind ?? "").trim() || undefined;
       const isTrajectory =
         engine === "trajectory_replay" || trajectoryBusyEnvIdsRef.current.includes(eventProfileId);
 
@@ -1276,7 +1282,9 @@ export function AIFillDrawer({
         if (isTrajectory) {
           pushReplayLineFor(eventProfileId, tone, text);
         } else {
-          const kindExtra = inferAgentLineKind(text, tone, state);
+          // C6：eventKind → TerminalLine.kind 映射；禁止协议串直灌
+          const kindExtra =
+            resolveAgentLineKind(text, tone, state, eventKind) ?? inferAgentLineKind(text, tone, state);
           pushAgentLineFor(eventProfileId, tone, text, kindExtra);
         }
       }
@@ -1989,6 +1997,24 @@ export function AIFillDrawer({
           pushAgentLineFor(id, "info", "已请求暂停 · 当前步结束后挂起");
         } catch (error) {
           pushAgentLineFor(id, "error", `暂停失败：${formatInvokeError(error)}`);
+        }
+      }),
+    );
+  };
+
+  /** 用户标记成功：当前步结束后以成功收尾（若已勾选录制则写入轨迹） */
+  const handleMarkAgentSuccess = async () => {
+    const ids = agentBusyEnvIds;
+    if (ids.length === 0) {
+      return;
+    }
+    await Promise.allSettled(
+      ids.map(async (id) => {
+        try {
+          await markAgentSuccess(id);
+          pushAgentLineFor(id, "info", "已请求标记成功 · 当前步结束后收尾");
+        } catch (error) {
+          pushAgentLineFor(id, "error", `标记成功失败：${formatInvokeError(error)}`);
         }
       }),
     );
@@ -2717,6 +2743,15 @@ export function AIFillDrawer({
                       继续
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className="btn btn-outline h-8 shrink-0 px-3 text-ui text-success"
+                    onClick={() => void handleMarkAgentSuccess()}
+                    title="当前步结束后标记成功：任务完成，若已勾选录制则写入轨迹记忆；回放在此结束"
+                  >
+                    <CheckCircle2 size={13} />
+                    成功
+                  </button>
                   <button
                     type="button"
                     className="btn btn-outline h-8 shrink-0 px-3 text-ui"

@@ -99,6 +99,11 @@ export interface StateMessageInput {
    * 已自带 <user_rules> / <user_persona> / <user_attachments> 标签，直接作为独立小节注入。
    */
   taskBrief?: string;
+  /**
+   * Agent RunBrief 六槽态势（run_brief.ts）。叠加进 user 消息，禁止写入 system。
+   * 已自带 <run_brief> 标签。
+   */
+  runBrief?: string;
   /** 用户附件里的图片（dataURL）：只作任务参考资料，禁止当验证码/短信码来源（R2 / B7） */
   taskAttachmentImages?: string[];
 }
@@ -112,6 +117,9 @@ export function buildUserStateMessage(input: StateMessageInput): {
   sections.push(`<user_request>\n${input.userRequest}\n</user_request>`);
   if (input.taskBrief?.trim()) {
     sections.push(input.taskBrief.trim());
+  }
+  if (input.runBrief?.trim()) {
+    sections.push(input.runBrief.trim());
   }
   sections.push(`<agent_history>\n${formatHistory(input.history, input.compactedMemory)}\n</agent_history>`);
   sections.push(

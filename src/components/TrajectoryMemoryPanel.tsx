@@ -9,6 +9,10 @@ import {
 } from "react";
 
 import { domainMatchesTemplate, normalizeDomain } from "../lib/domain";
+import {
+  parseTrajectoryActionsJson,
+  replayHardCaseBanner,
+} from "../lib/replayHints";
 import type { AgentTrajectory, Profile, TerminalLine } from "../types";
 import { useAppDialog } from "./AppDialogProvider";
 import { BatchReplaySandbox } from "./BatchReplaySandbox";
@@ -74,6 +78,11 @@ const ACTION_KIND_LABELS: Record<string, string> = {
   press: "按键",
   keypress: "按键",
   scroll: "滚动",
+  solve_captcha: "验证码",
+  wait_for_page: "等页面",
+  clipboard_read: "剪贴板",
+  download: "下载",
+  user_success: "成功",
 };
 
 interface ParsedActionStep {
@@ -142,13 +151,7 @@ function formatActionDetail(raw: unknown, kind: string): string {
 
 /** 展开轨迹中的每一步动作（不再汇总成「填写×N」）。 */
 function listActionSteps(row: AgentTrajectory): ParsedActionStep[] {
-  let parsed: unknown[] = [];
-  try {
-    const raw = JSON.parse(row.actions) as unknown;
-    parsed = Array.isArray(raw) ? raw : [];
-  } catch {
-    parsed = [];
-  }
+  const { actions: parsed } = parseTrajectoryActionsJson(row.actions);
 
   return parsed.map((raw, index) => {
     const kind = actionKind(raw);
@@ -441,6 +444,7 @@ export function TrajectoryMemoryPanel({
                 const intent = row.goal || row.title || row.file_name || "未命名轨迹";
                 const domainLabel = normalizeHost(row.domain) || row.domain || "unknown";
                 const pinned = Boolean(currentDomain) && isDomainMatch(currentDomain, row.domain);
+                const hardBanner = replayHardCaseBanner(parseTrajectoryActionsJson(row.actions).hints);
 
                 return (
                   <li
@@ -467,12 +471,25 @@ export function TrajectoryMemoryPanel({
                             {domainLabel}
                           </span>
                           {pinned ? <span className="badge badge-primary shrink-0">同站置顶</span> : null}
+                          {hardBanner ? (
+                            <span
+                              className="badge shrink-0 bg-warning/15 text-warning"
+                              title={hardBanner}
+                            >
+                              非纯机械
+                            </span>
+                          ) : null}
                         </div>
                         <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
                           {stepTotal} 步
                         </span>
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{intent}</div>
+                      {hardBanner ? (
+                        <p className="mt-1 rounded-md bg-warning/10 px-1.5 py-1 text-[10px] leading-4 text-warning">
+                          {hardBanner}
+                        </p>
+                      ) : null}
                       {steps.length > 0 ? (
                         <ol className="mt-1.5 space-y-0.5">
                           {steps.map((step) => (
@@ -522,7 +539,7 @@ export function TrajectoryMemoryPanel({
                               ? "请先在左侧选择或启动环境后再单开回放"
                               : executeLocked
                                 ? `当前环境正忙${busyReason ? `（${busyReason}）` : ""}`
-                                : "跳过 LLM，在当前绑定环境回放"
+                                : "默认机械回放；交付词 / AI 盲盒 / 视觉规则除外"
                           }
                           onClick={(event) => {
                             event.stopPropagation();

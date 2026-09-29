@@ -1,8 +1,9 @@
 /**
  * 长按按钮验证码（策略 press_hold_captcha）—— 微软 / Arkose FunCaptcha「按住不放」等。
  *
- * 主方案：定位验证码挑战区内的长按按钮 → 鼠标移到按钮中心 → 按下左键并保持
- *        （**时长不固定**：由页面反馈决定何时松手，见 holdButton）→ 松开 → 轮询验收。
+ * 主方案：定位验证码挑战区内的长按按钮 → 鼠标移到按钮中心 → 只按下一次并保持
+ *        （按住期间不再移动；**时长不固定**：进度须在本次按住中涨满，且页面不再要求按住，才松手）
+ *        → 松开 → 轮询验收。
  * 备用方案：主方案未过时，点无障碍入口 → 在该入口所在框架内点击/长按 → 验收。
  *
  * 设计原则（面向任意站点）：**形状与结构是主判据，文案只是加分项。**
@@ -40,21 +41,25 @@ export interface PressHoldSolveResult {
 /**
  * 按住时长**不是固定值**：真实站点进度条快慢不一（实测同族站点 3s~8s 都有）。
  * 因此只设下限与上限，实际松手时机由页面反馈决定：
- *   · 下限：先按住这么久，避免一按就走；
- *   · 上限：防呆保险丝（仍在反馈就继续按，到顶才强制松开）。
+ *   · 下限：先按住这么久，避免一按就走；进度看起来满了也不提前松。
+ *   · 上限：防呆保险丝（仍在提示按住、或进度还没在本次按住中涨满，就继续按，到顶才松开）。
+ * 优先级：仍提示按住则继续；进度必须是按住过程中从不满涨到满（一开始就满的装饰条不算）；
+ * 涨满且页面不再要求按住后，再保持 HOLD_COMPLETE_GRACE_MS。
  */
-const HOLD_MIN_MS = 3000;
-const HOLD_MAX_MS = 15_000;
+export const HOLD_MIN_MS = 3000;
+export const HOLD_MAX_MS = 15_000;
 /** 按住期间反馈轮询间隔（一次轮询同时读 token/文案/进度条）。 */
 const HOLD_POLL_MS = 400;
 /** 松手后的验收轮询：成功确认可能比松手晚几秒（轮询到明确结论或超时）。 */
 const VERIFY_BUDGET_MS = 7000;
 const VERIFY_POLL_MS = 600;
 /**
- * 进度条填满后再多保持一会儿才松手：有的站点在「松手」时结算，
+ * 进度在本次按住中涨满、且题面不再要求按住之后，再多保持一会儿才松手。
  * 卡在 95% 就松手可能被判中途放弃（等于自己取消）。
  */
-const HOLD_COMPLETE_GRACE_MS = 700;
+export const HOLD_COMPLETE_GRACE_MS = 700;
+/** 进度比例达到该值视为「满」。 */
+const PROGRESS_FULL_RATIO = 0.95;
 /** 单帧探测超时：某帧 evaluate 卡住不得拖垮整轮求解。 */
 const FRAME_PROBE_MS = 2000;
 /** 每帧回传的候选元素上限（防止大体量页面的探测负载）。 */
@@ -113,8 +118,6 @@ type FrameProbe = {
   elements: ProbeElement[];
 };
 
-export type { FrameProbe, ProbeElement };
-
 type Classified = Box & { label: string; score: number; why: string; progress: boolean };
 
 type FrameLocated = {
@@ -122,8 +125,6 @@ type FrameLocated = {
   accessibility: Classified | null;
   action: Classified | null;
 };
-
-export type { FrameLocated, Classified };
 
 type LocatedButton = Classified & {
   /** 主文档为 ""；嵌套文档为框架 URL（用于之后判定框架是否被拆除） */
@@ -178,7 +179,18 @@ function probeDocument(): unknown {
     }
   };
 
-  /** 元素是否处在 captcha/challenge 语义容器内（向上找有限层，避免整树遍历）。 */
+  const parentOf = (el: Element): Element | null => {
+    if (el.parentElement) return el.parentElement;
+    try {
+      const root = el.getRootNode();
+      const host = (root as ShadowRoot).host;
+      return host instanceof Element ? host : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /** 元素是否处在 captcha/challenge 语义容器内（向上找有限层，含开放 shadow 的宿主）。 */
   const inChallenge = (el: Element): boolean => {
     let cur: Element | null = el;
     for (let i = 0; i < 6 && cur; i++) {
@@ -186,19 +198,56 @@ function probeDocument(): unknown {
         typeof (cur as HTMLElement).className === "string" ? (cur as HTMLElement).className : "";
       const blob = `${cur.id || ""} ${cls} ${cur.getAttribute("data-testid") || ""} ${cur.getAttribute("aria-label") || ""}`;
       if (
-        /captcha|challenge|arkose|funcaptcha|fc[-_]|puzzle|verify|verification|gate|press|hold|人机|驗證|验证/i.test(
+        /captcha|challenge|arkose|funcaptcha|arkoselabs|px-captcha|perimeterx|fc[-_]|puzzle|verify|verification|gate|press|hold|人机|驗證|验证/i.test(
           blob,
         )
       ) {
         return true;
       }
-      cur = cur.parentElement;
+      cur = parentOf(cur);
     }
     return false;
   };
 
+  /**
+   * querySelector 进不了开放 shadow。验证按钮常挂在 shadow 里，
+   * 这里有限深度往下走；封闭 shadow 穿不透，调用方不得猜坐标。
+   */
+  const queryDeep = (selector: string, limit: number): Element[] => {
+    const out: Element[] = [];
+    const seen = new Set<Element>();
+    const visit = (root: ParentNode, depth: number): void => {
+      if (depth > 4 || out.length >= limit) return;
+      let matched: Element[] = [];
+      try {
+        matched = Array.from(root.querySelectorAll(selector));
+      } catch {
+        matched = [];
+      }
+      for (const el of matched) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        out.push(el);
+        if (out.length >= limit) return;
+      }
+      let hosts: Element[] = [];
+      try {
+        hosts = Array.from(root.querySelectorAll("*"));
+      } catch {
+        hosts = [];
+      }
+      for (const host of hosts) {
+        if (out.length >= limit) return;
+        const sr = (host as HTMLElement).shadowRoot;
+        if (sr) visit(sr, depth + 1);
+      }
+    };
+    visit(document, 0);
+    return out;
+  };
+
   // 候选来源：① 天然可交互元素；② 形似主按钮/图标的 div/span（class 语义命中）。
-  // 不整树扫 div/span（会在大页面上爆炸），只挑语义命中的那一批。
+  // 不整树扫 div/span（会在大页面上爆炸），只挑语义命中的那一批。开放 shadow 一并纳入。
   const nodes: Element[] = [];
   const seen = new Set<Element>();
   const add = (el: Element): void => {
@@ -206,16 +255,15 @@ function probeDocument(): unknown {
     seen.add(el);
     nodes.push(el);
   };
-  for (const el of Array.from(
-    document.querySelectorAll(
-      "button,[role='button'],[role='checkbox'],input[type=button],input[type=submit],input[type=image],label,a[href],summary,[tabindex],[aria-label],[title]",
-    ),
+  for (const el of queryDeep(
+    "button,[role='button'],[role='checkbox'],input[type=button],input[type=submit],input[type=image],label,a[href],summary,[tabindex],[aria-label],[title]",
+    800,
   )) {
     add(el);
   }
-  for (const el of Array.from(document.querySelectorAll("div,span,svg"))) {
+  for (const el of queryDeep("div,span,svg", 2500)) {
     const cls = `${el.id || ""} ${typeof (el as HTMLElement).className === "string" ? (el as HTMLElement).className : ""} ${el.getAttribute("data-testid") || ""}`;
-    if (/btn|button|captcha|challenge|puzzle|press|hold|verify|arkose|\bfc\b|submit|continue|primary|icon|arrow/i.test(cls)) {
+    if (/btn|button|captcha|challenge|puzzle|press|hold|verify|arkose|px-captcha|\bfc\b|submit|continue|primary|icon|arrow/i.test(cls)) {
       add(el);
     }
   }
@@ -251,12 +299,16 @@ function probeDocument(): unknown {
       ].join(" "),
       200,
     );
-    // 进度条语义：按住时是否「看得见进度」——决定松手时机能否按反馈自适应。
+    // 进度条语义：只认 progressbar / aria / progress 类。裸 bar/fill 装饰条不算。
     const progressSel =
-      '[role="progressbar"],[aria-valuenow],[class*="progress"],[class*="Progress"],[class*="fill"],[class*="Fill"],[class*="bar"]';
+      '[role="progressbar"],[aria-valuenow],[class*="progress"],[class*="Progress"]';
     let progress = false;
     try {
-      progress = el.matches(progressSel) || el.querySelector(progressSel) != null;
+      progress =
+        el.matches(progressSel) ||
+        el.querySelector(progressSel) != null ||
+        (!!(el as HTMLElement).shadowRoot &&
+          (el as HTMLElement).shadowRoot!.querySelector(progressSel) != null);
     } catch {
       progress = false;
     }
@@ -316,7 +368,7 @@ function overlapRatio(a: Box, b: Box): number {
  * 导出给离线回归测试用（`tests/press-hold-locate.mjs`）：裁决逻辑与 DOM 探测分离，
  * 因此可以用「真实站点形状」的合成 fixture 直接验证，不必起浏览器。
  */
-export function classifyFrame(probe: FrameProbe): FrameLocated {
+function classifyFrame(probe: FrameProbe): FrameLocated {
   const fw = Math.max(1, probe.w);
   const fh = Math.max(1, probe.h);
   const elems = Array.isArray(probe.elements) ? probe.elements : [];
@@ -342,6 +394,10 @@ export function classifyFrame(probe: FrameProbe): FrameLocated {
 
   let press: Classified | null = null;
   let pressScore = -1;
+  // 同帧里只要有「按住/長按」文案候选，就禁止用无文案宽条（装饰 pill / 进度轨）抢主按钮
+  const anyCopyPress = elems.some((el) =>
+    PRESS_COPY_RE.test(`${el.label} ${el.aria}`),
+  );
   for (const el of elems) {
     if (accessibility && overlapRatio(el, accessibility) > 0.5) continue;
     const aspect = el.w / Math.max(1, el.h);
@@ -349,6 +405,7 @@ export function classifyFrame(probe: FrameProbe): FrameLocated {
     const copyPress = PRESS_COPY_RE.test(`${el.label} ${el.aria}`);
     const pill = aspect >= 1.8 && el.w >= 100 && el.h >= 20 && el.h <= 160 && wideRatio >= 0.22;
     if (!copyPress && !pill) continue;
+    if (anyCopyPress && !copyPress) continue;
     let score = copyPress ? 100 : 30;
     const why = copyPress ? "press-copy" : "pill";
     if (pill) score += 30 + Math.min(18, Math.round(wideRatio * 20));
@@ -503,7 +560,10 @@ async function readTexts(page: Page, frameUrls: string[]): Promise<string> {
     if (frame === page.mainFrame()) continue;
     const url = frame.url();
     const wanted =
-      frameUrls.includes(url) || /arkose|funcaptcha|\bfc\b|captcha|challenge|verify/i.test(url);
+      frameUrls.includes(url) ||
+      /arkose|funcaptcha|arkoselabs|\bfc\b|captcha|challenge|verify|px-captcha|perimeterx|humansecurity/i.test(
+        url,
+      );
     if (!wanted) continue;
     const t = await withTimeout(
       frame.evaluate(() => String(document.body?.innerText || "").slice(0, 2000)).catch(() => ""),
@@ -552,7 +612,7 @@ async function isChallengeCleared(
   const stillHasChallenge = await page
     .evaluate(() => {
       const sel =
-        "#arkose,#fc-iframe,iframe[src*='arkose'],iframe[src*='funcaptcha'],iframe[src*='recaptcha'],iframe[src*='hcaptcha'],iframe[src*='turnstile']";
+        "#arkose,#fc-iframe,#px-captcha,[id*='px-captcha'],iframe[src*='arkose'],iframe[src*='funcaptcha'],iframe[src*='arkoselabs'],iframe[src*='px-captcha'],iframe[src*='perimeterx'],iframe[src*='humansecurity'],iframe[src*='recaptcha'],iframe[src*='hcaptcha'],iframe[src*='turnstile']";
       for (const el of Array.from(document.querySelectorAll(sel))) {
         const r = (el as HTMLElement).getBoundingClientRect();
         const st = window.getComputedStyle(el as HTMLElement);
@@ -573,75 +633,199 @@ async function isChallengeCleared(
 }
 
 /**
- * 页内探测：挑战区内的进度条是否已填满（按住时进度 = 松手时机）。
+ * 页内探测：进度条当前填充比例（0~1），没有可读进度则 null。
  * 只看结构（aria-valuenow / 宽度占比 / transform scaleX），不看站点文案。
+ * 开放 shadow 一并纳入。一开始就满的轨道也会读成 1，是否「本次按住中涨满」由 Node 侧判定。
  */
-function probeProgressComplete(): string {
-  const nodes = document.querySelectorAll(
-    '[role="progressbar"],[aria-valuenow],[class*="progress"],[class*="Progress"],[class*="fill"],[class*="Fill"],[class*="bar"]',
-  );
-  for (const el of Array.from(nodes)) {
-    const now = el.getAttribute("aria-valuenow");
-    if (now != null && Number(now) >= 99) return "complete";
-
-    let r: DOMRect;
+function probeProgressRatio(): number | null {
+  const sel =
+    '[role="progressbar"],[aria-valuenow],[class*="progress"],[class*="Progress"]';
+  const nodes: Element[] = [];
+  const seen = new Set<Element>();
+  const visit = (root: ParentNode, depth: number): void => {
+    if (depth > 4 || nodes.length >= 40) return;
+    let matched: Element[] = [];
     try {
-      r = el.getBoundingClientRect();
+      matched = Array.from(root.querySelectorAll(sel));
     } catch {
-      continue;
+      matched = [];
     }
-    if (r.width < 4) continue;
-    const parent = el.parentElement;
-    if (parent) {
-      const pr = parent.getBoundingClientRect();
-      if (pr.width > 8 && r.width / pr.width >= 0.95) return "complete";
+    for (const el of matched) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      nodes.push(el);
+      if (nodes.length >= 40) return;
     }
-    const tr = window.getComputedStyle(el).transform;
-    const m = tr && tr.startsWith("matrix") ? tr.match(/matrix\(([^)]+)\)/) : null;
-    if (m) {
-      const sx = Number(m[1].split(",")[0]);
-      if (Number.isFinite(sx) && sx >= 0.95) return "complete";
+    let hosts: Element[] = [];
+    try {
+      hosts = Array.from(root.querySelectorAll("*"));
+    } catch {
+      hosts = [];
     }
+    for (const host of hosts) {
+      if (nodes.length >= 40) return;
+      const sr = (host as HTMLElement).shadowRoot;
+      if (sr) visit(sr, depth + 1);
+    }
+  };
+  visit(document, 0);
+
+  const clamp = (n: number): number => Math.max(0, Math.min(1, n));
+  let best: number | null = null;
+  for (const el of nodes) {
+    let ratio: number | null = null;
+    const now = el.getAttribute("aria-valuenow");
+    if (now != null && String(now).trim() !== "") {
+      const n = Number(now);
+      const maxAttr = el.getAttribute("aria-valuemax");
+      const m = maxAttr != null && String(maxAttr).trim() !== "" ? Number(maxAttr) : 100;
+      if (Number.isFinite(n) && Number.isFinite(m) && m > 0) ratio = clamp(n / m);
+    }
+    if (ratio == null) {
+      try {
+        const tr = window.getComputedStyle(el).transform;
+        const m = tr && tr.startsWith("matrix") ? tr.match(/matrix\(([^)]+)\)/) : null;
+        if (m) {
+          const sx = Number(m[1].split(",")[0]);
+          if (Number.isFinite(sx) && sx >= 0 && sx <= 1.05) ratio = clamp(sx);
+        }
+      } catch {
+        ratio = null;
+      }
+    }
+    if (ratio == null) {
+      try {
+        const r = el.getBoundingClientRect();
+        const parent = el.parentElement;
+        if (parent && r.width >= 1) {
+          const pr = parent.getBoundingClientRect();
+          if (pr.width > 8) ratio = clamp(r.width / pr.width);
+        }
+      } catch {
+        ratio = null;
+      }
+    }
+    if (ratio == null) continue;
+    best = best == null ? ratio : Math.min(best, ratio);
   }
-  return "unknown";
+  return best;
 }
 
-/** 进度条是否已填满（在承载按钮的框架内看）。 */
-async function readProgressState(page: Page, frameUrls: string[]): Promise<"complete" | "unknown"> {
+/** 承载按钮的框架里，进度条当前填充比例；读不到则为 null。多条取最小，避免一条满的装饰条盖住还在涨的那条。 */
+async function readProgressRatio(page: Page, frameUrls: string[]): Promise<number | null> {
+  let best: number | null = null;
   for (const frame of page.frames()) {
     const url = frame === page.mainFrame() ? "" : frame.url();
     if (frameUrls.length > 0 && !frameUrls.includes(url)) continue;
     const state = await withTimeout(
-      frame.evaluate(probeProgressComplete).catch(() => "unknown"),
+      frame.evaluate(probeProgressRatio).catch(() => null),
       800,
-      "unknown",
+      null as number | null,
     );
-    if (state === "complete") return "complete";
+    if (typeof state === "number" && Number.isFinite(state)) {
+      best = best == null ? state : Math.min(best, state);
+    }
   }
-  return "unknown";
+  return best;
 }
 
 /**
- * 按住期间的**一次**综合反馈（token / 文案 / 进度条各读一次，避免多轮 evaluate）。
- * `progress` 决定「能否按反馈延长按住」，`signal` 决定是否立即松手。
+ * 页面是否还在要求按住。
+ * 按钮自己的文案（「Press and hold」/「按住」）只去掉一次：只剩按钮标签时不算仍在要求，
+ * 题面里还有另一处同类提示则继续按。
+ */
+export function instructionStillAsksHold(frameText: string, buttonLabel: string): boolean {
+  const text = String(frameText ?? "").replace(/\s+/g, " ").trim();
+  if (!PRESS_HOLD_COPY_RE.test(text)) return false;
+  const label = String(buttonLabel ?? "").replace(/\s+/g, " ").trim();
+  if (label.length < 2 || !PRESS_HOLD_COPY_RE.test(label)) return true;
+  const idx = text.toLowerCase().indexOf(label.toLowerCase());
+  if (idx < 0) return true;
+  const rest = `${text.slice(0, idx)} ${text.slice(idx + label.length)}`.trim();
+  return PRESS_HOLD_COPY_RE.test(rest);
+}
+
+export interface ProgressSampleState {
+  /** 本次按住见过的最小填充比例；null = 还没读到。 */
+  minRatio: number | null;
+  /** 见过低于满，之后又到满。 */
+  filledDuringHold: boolean;
+}
+
+/**
+ * 记一次进度读数。一开始就满（min 从未低于满）不算「本次按住中涨满」。
+ */
+export function noteProgressSample(
+  state: ProgressSampleState,
+  ratio: number | null,
+): ProgressSampleState & { atFull: boolean } {
+  if (ratio == null || !Number.isFinite(ratio)) {
+    return { minRatio: state.minRatio, filledDuringHold: state.filledDuringHold, atFull: false };
+  }
+  const minRatio = state.minRatio == null ? ratio : Math.min(state.minRatio, ratio);
+  const atFull = ratio >= PROGRESS_FULL_RATIO;
+  const filledDuringHold =
+    state.filledDuringHold || (minRatio < PROGRESS_FULL_RATIO && atFull);
+  return { minRatio, filledDuringHold, atFull };
+}
+
+type HoldReleaseReason =
+  | "keep"
+  | "success"
+  | "fail"
+  | "progress_complete"
+  | "no_hold_feedback"
+  | "max_hold";
+
+/**
+ * 松手判定（纯函数，供离线测试）。
+ * 成功/失败可立即松；其余不到下限不松。仍要求按住则继续。
+ * 进度须在本次按住中涨满并稳住宽限期，且题面不再要求按住，才因进度松手。
+ * 按住中途框架消失不在这里判通过。
+ */
+export function decideHoldRelease(input: {
+  elapsedMs: number;
+  signal: "success" | "fail" | "holding" | "unknown";
+  filledDuringHold: boolean;
+  progressStableMs: number;
+  hasProgress: boolean;
+  minRatio: number | null;
+}): HoldReleaseReason {
+  if (input.signal === "success") return "success";
+  if (input.signal === "fail") return "fail";
+  if (input.elapsedMs >= HOLD_MAX_MS) return "max_hold";
+  if (input.elapsedMs < HOLD_MIN_MS) return "keep";
+  if (input.signal === "holding") return "keep";
+  if (input.filledDuringHold && input.progressStableMs >= HOLD_COMPLETE_GRACE_MS) {
+    return "progress_complete";
+  }
+  const progressMoving = input.minRatio != null && input.minRatio < PROGRESS_FULL_RATIO;
+  if (!input.filledDuringHold && !progressMoving && !input.hasProgress) {
+    return "no_hold_feedback";
+  }
+  return "keep";
+}
+
+/**
+ * 按住期间的**一次**综合反馈（token / 文案 / 进度比例各读一次）。
+ * 某个 iframe 消失不当作通过：失败换题也会拆框架。是否拆除只在松手后的验收里判断。
  */
 async function readHoldFeedback(input: {
   page: Page;
   frameUrls: string[];
+  buttonLabel: string;
 }): Promise<{
-  signal: "success" | "fail" | "dismissed" | "holding" | "unknown";
-  progress: "complete" | "unknown";
+  signal: "success" | "fail" | "holding" | "unknown";
+  ratio: number | null;
 }> {
-  if (await readArkoseToken(input.page)) return { signal: "success", progress: "unknown" };
-  if (input.frameUrls.some((u) => isFrameGone(input.page, u))) {
-    return { signal: "dismissed", progress: "unknown" };
-  }
+  if (await readArkoseToken(input.page)) return { signal: "success", ratio: null };
   const text = await readTexts(input.page, input.frameUrls);
   const { verdict } = classifyCaptchaOutcomeText(text);
-  if (verdict === "success") return { signal: "success", progress: "unknown" };
-  if (verdict === "fail") return { signal: "fail", progress: "unknown" };
-  const progress = await readProgressState(input.page, input.frameUrls);
-  return { signal: PRESS_HOLD_COPY_RE.test(text) ? "holding" : "unknown", progress };
+  if (verdict === "success") return { signal: "success", ratio: null };
+  if (verdict === "fail") return { signal: "fail", ratio: null };
+  const ratio = await readProgressRatio(input.page, input.frameUrls);
+  const signal = instructionStillAsksHold(text, input.buttonLabel) ? "holding" : "unknown";
+  return { signal, ratio };
 }
 
 async function readOutcome(
@@ -681,18 +865,22 @@ async function verifyWithPolling(input: {
 
 /**
  * 按下并保持 —— **时长不固定**，由页面反馈驱动：
- *   · 出现成功/失败/框架拆除信号 → 立即松手；
- *   · 进度条已填满 → 立即松手（真实站点松手即提交）；
- *   · 页面仍提示「长按」或控件带进度条可观测 → 继续按住（上限 HOLD_MAX_MS 保险丝）；
- *   · 既无「仍要按住」的反馈、也无进度条可观测（可能误判控件）→ 按住下限后收手。
+ *   · 出现成功/失败信号 → 立即松手（失败不假装通过）；
+ *   · 进度在本次按住中从不满涨到满，且页面不再要求按住 → 稳住约 0.7s 后松手；
+ *   · 页面仍提示按住，或进度还在涨 → 继续按住（上限 HOLD_MAX_MS）；
+ *   · 既无「仍要按住」、也没有可观测的进度变化（可能误判控件）→ 按住下限后收手。
+ * 按住前不点按（点一下会把长按判失败）。左键按下之后不再 mouse.move：
+ * 内核会把移动做成带摆幅的轨迹，按住时一挪就拖出按钮。
  * 必须保证任何异常路径都松开鼠标，否则残留 pressed 会污染后续所有动作。
  */
 async function holdButton(input: {
   page: Page;
   point: { x: number; y: number };
   frameUrls: string[];
-  /** 目标控件是否带进度条语义（决定能否按反馈延长按住） */
+  /** 目标控件是否带进度条语义（决定「完全读不到进度」时能否提前收手） */
   hasProgress: boolean;
+  /** 按钮自身文案。只出现这一句时，不算「页面仍在要求按住」。 */
+  buttonLabel: string;
   signal?: AbortSignal;
 }): Promise<{ holdMs: number; signal: string; releaseReason: string }> {
   const { page } = input;
@@ -703,41 +891,46 @@ async function holdButton(input: {
 
   let signal = "unknown";
   let releaseReason = "max_hold";
-  let progressDoneAt: number | null = null;
+  let progress: ProgressSampleState = { minRatio: null, filledDuringHold: false };
+  let progressFullSince: number | null = null;
   try {
     for (;;) {
       if (input.signal?.aborted) {
         releaseReason = "aborted";
         throw new Error("Agent 已中止");
       }
+      const feedback = await readHoldFeedback({
+        page,
+        frameUrls: input.frameUrls,
+        buttonLabel: input.buttonLabel,
+      });
+      signal = feedback.signal;
+      const noted = noteProgressSample(progress, feedback.ratio);
+      progress = { minRatio: noted.minRatio, filledDuringHold: noted.filledDuringHold };
+      if (noted.filledDuringHold && noted.atFull) {
+        progressFullSince = progressFullSince ?? Date.now();
+      } else {
+        progressFullSince = null;
+      }
       const elapsed = Date.now() - started;
-      if (elapsed >= HOLD_MAX_MS) {
+      const decision = decideHoldRelease({
+        elapsedMs: elapsed,
+        signal: feedback.signal,
+        filledDuringHold: progress.filledDuringHold,
+        progressStableMs: progressFullSince == null ? 0 : Date.now() - progressFullSince,
+        hasProgress: input.hasProgress,
+        minRatio: progress.minRatio,
+      });
+      if (decision !== "keep") {
+        releaseReason = decision;
+        break;
+      }
+      const remain = HOLD_MAX_MS - (Date.now() - started);
+      if (remain <= 0) {
         releaseReason = "max_hold";
         break;
       }
-      await sleep(HOLD_POLL_MS);
-      const feedback = await readHoldFeedback({ page, frameUrls: input.frameUrls });
-      signal = feedback.signal;
-      if (signal === "success" || signal === "fail" || signal === "dismissed") {
-        releaseReason = signal;
-        break;
-      }
-      if (feedback.progress === "complete") {
-        // 进度条满了也再多保持一瞬（松手时刻常是站点结算时刻），期间若出成功信号则立即松手。
-        progressDoneAt = progressDoneAt ?? Date.now();
-        if (Date.now() - progressDoneAt >= HOLD_COMPLETE_GRACE_MS) {
-          releaseReason = "progress_complete";
-          break;
-        }
-      } else {
-        progressDoneAt = null;
-      }
-      const elapsedNow = Date.now() - started;
-      if (elapsedNow >= HOLD_MIN_MS && signal !== "holding" && !input.hasProgress) {
-        // 页面没有再要求按住、也没有进度可观测：可能在误判的控件上长按，见好就收。
-        releaseReason = "no_hold_feedback";
-        break;
-      }
+      await sleep(Math.min(HOLD_POLL_MS, remain));
     }
   } finally {
     await page.mouse.up().catch(() => undefined);
@@ -909,6 +1102,7 @@ export async function solvePressHoldCaptcha(input: {
       point: located.press.point,
       frameUrls: [located.press.frameUrl],
       hasProgress: located.press.progress,
+      buttonLabel: located.press.label,
       signal: input.signal,
     });
     holdMs = Math.round(held.holdMs);
@@ -982,6 +1176,7 @@ export async function solvePressHoldCaptcha(input: {
           point: next.point,
           frameUrls: [next.frameUrl],
           hasProgress: next.progress,
+          buttonLabel: next.label,
           signal: input.signal,
         });
         holdMs = Math.round(held.holdMs);
@@ -1010,6 +1205,57 @@ export async function solvePressHoldCaptcha(input: {
         { phase: "press_hold_captcha", stage: "verify", attempt: 2, verified: outcome.verified },
       );
     }
+  }
+
+  // ——— 同题追加长按：一次工具调用内最多再试 2 次（对齐「不满 3 次可重试」）———
+  // 外层 Agent / 回放还会再调 solve_captcha；这里避免「按一次就走」浪费次数。
+  let extraHold = 0;
+  while (outcome.verified !== true && extraHold < 2) {
+    if (input.signal?.aborted) throw new Error("Agent 已中止");
+    extraHold += 1;
+    await sleep(700 + Math.floor(Math.random() * 500));
+    input.logger.agentProgress(
+      `⑦ 同题再试长按（本轮第 ${attempts + 1} 次按住，追加 ${extraHold}/2）…`,
+      { phase: "press_hold_captcha", stage: "retry_hold", extra: extraHold, attempts },
+    );
+    const again = await locateButtons(input.page, vp);
+    if (!again.press) {
+      input.logger.agentProgress("追加重试时未再见到长按按钮，停止同题追加", {
+        phase: "press_hold_captcha",
+        stage: "retry_hold_miss",
+      });
+      break;
+    }
+    attempts += 1;
+    method = accessibilityUsed ? "retry_hold_after_accessibility" : "retry_hold";
+    input.logger.agentProgress(
+      `已重新定位 [${again.press.why}]「${again.press.label}」@(${again.press.point.x},${again.press.point.y})` +
+        (again.press.frameUrl ? " · 嵌套框架" : ""),
+      { phase: "press_hold_captcha", stage: "retry_located", why: again.press.why },
+    );
+    const held = await holdButton({
+      page: input.page,
+      point: again.press.point,
+      frameUrls: [again.press.frameUrl],
+      hasProgress: again.press.progress,
+      buttonLabel: again.press.label,
+      signal: input.signal,
+    });
+    holdMs = Math.round(held.holdMs);
+    input.logger.agentProgress(
+      `⑧ 追加按住 ${(held.holdMs / 1000).toFixed(1)}s 后松开（${held.releaseReason}），等待验收…`,
+      {
+        phase: "press_hold_captcha",
+        stage: "retry_released",
+        holdMs: held.holdMs,
+        releaseReason: held.releaseReason,
+      },
+    );
+    outcome = await verifyWithPolling({ page: input.page, frameUrls: [again.press.frameUrl] });
+    input.logger.agentProgress(
+      `⑨ 验收#${attempts}：verified=${String(outcome.verified)} signal=${outcome.signal}`,
+      { phase: "press_hold_captcha", stage: "verify", attempt: attempts, verified: outcome.verified },
+    );
   }
 
   const verified = outcome.verified;

@@ -8,6 +8,7 @@ import type { ArtifactRecord } from "../core/deliverable_verify.js";
 import type { DeliverableLedger } from "./task_contract.js";
 import type { FailureLedger } from "../core/action_feedback.js";
 import type { TaskPolicyState } from "../core/page_policy.js";
+import type { FillDataLedger } from "../core/fill_data_export.js";
 import { PLAN_TOOL_NAME } from "./plan_expects.js";
 
 export const TERMINATES_SEQUENCE = new Set([
@@ -37,6 +38,11 @@ export interface ActionContext {
   browserState: BrowserStateSummary;
   fileSystem: AgentFileSystem;
   profileId?: string;
+  /**
+   * 本任务填表数据账本：成功 input / select 后写入「数据目录」，
+   * 方便用户打开目录核对邮箱/密码/账户等实际填入值。
+   */
+  fillDataLedger?: FillDataLedger;
   goal: string;
   /** 本步序号（主循环注入）；单测直调 action 时可缺省。 */
   step?: number;
@@ -134,6 +140,11 @@ export interface ActionContext {
    * 缺省 = 用户没配规则 → done 闸门与主循环巡检都跳过，行为与改造前一致。
    */
   taskRules?: import("../core/task_rules.js").TaskRulesRuntime | null;
+  /**
+   * 录制难点采集（service 注入）：验证码 / OTP / 接管等非机械可回放标记。
+   * 缺省（单测）不采集。
+   */
+  recordingHardCases?: Set<string>;
 }
 
 export type ActionHandler = (

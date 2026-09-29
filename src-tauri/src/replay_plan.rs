@@ -40,6 +40,10 @@ pub struct ReplayPlanRequest {
     /// 轨迹步。前端已解析好直接传；缺省时按 `trajectoryId` 从库读。
     #[serde(default)]
     pub actions: Option<Vec<Value>>,
+    /// 磁盘轨迹路径（仅 `agent_exports/trajectories/`）；有则跳过库查找。
+    /// 同时接受 `filePath`（camelCase）与 `file_path`（snake_case）。
+    #[serde(default, alias = "file_path")]
+    pub file_path: Option<String>,
     /// 轨迹目标（critical 判定只为日志可追溯：critical 不因目标豁免）
     #[serde(default)]
     pub goal: String,
@@ -72,6 +76,25 @@ pub struct ReplayPlanRequest {
     pub job_title: Option<String>,
     #[serde(default)]
     pub run_seed: Option<i64>,
+}
+
+/// 何时跳过 `get_agent_trajectory`：文件轨迹（id≤0）、请求已带步、或声明了磁盘路径。
+pub(crate) fn should_skip_trajectory_db(
+    trajectory_id: Option<i64>,
+    actions: &Option<Vec<Value>>,
+    file_path: Option<&str>,
+) -> bool {
+    let id = trajectory_id.unwrap_or(0);
+    let has_actions = actions.as_ref().is_some_and(|entries| !entries.is_empty());
+    let has_file = file_path.is_some_and(|path| !path.trim().is_empty());
+    id <= 0 || has_actions || has_file
+}
+
+fn normalize_file_path(file_path: &Option<String>) -> Option<String> {
+    file_path
+        .as_ref()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 /// 列名：优先用请求里声明的，否则按数据行出现顺序推导（去重）
@@ -136,27 +159,47 @@ pub async fn build_plan_from_request(
     manager: &RpaSessionManager,
     request: ReplayPlanRequest,
 ) -> Result<RunPlan, AppError> {
-    // ① 轨迹步：前端给就用前端的；只给了 id 就从库读（外部 API 走这条）
-    let (actions, stored_title, stored_goal) = {
+    // ① 轨迹步：前端给就用前端的；文件轨迹 / 已带 actions / filePath → 绝不查库（负 id 会 NotFound）
+    let file_path = normalize_file_path(&request.file_path);
+    let (actions, stored_title, stored_goal) = if should_skip_trajectory_db(
+        request.trajectory_id,
+        &request.actions,
+        file_path.as_deref(),
+    ) {
+        let mut actions = request.actions.clone().unwrap_or_default();
+        let mut title = request.trajectory_title.clone();
+        let mut goal = request.goal.clone();
+        if actions.is_empty() {
+            if let Some(ref path) = file_path {
+                let (file_title, file_goal, file_actions) =
+                    crate::trajectory_files::load_trajectory_file(path)?;
+                actions = file_actions;
+                if title.trim().is_empty() {
+                    title = file_title;
+                }
+                if goal.trim().is_empty() {
+                    goal = file_goal;
+                }
+            }
+        }
+        (actions, title, goal)
+    } else {
         let connection = db_state
             .database
             .lock()
             .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
-        let mut actions = request.actions.clone();
-        let mut title = String::new();
-        let mut goal = String::new();
-        if let Some(id) = request.trajectory_id {
-            let needs_load = actions.is_none();
-            let trajectory = crate::db::get_agent_trajectory(&connection, id)?;
-            title = trajectory.title.clone();
-            goal = trajectory.goal.clone();
-            if needs_load {
-                actions = serde_json::from_str::<Value>(&trajectory.actions)
-                    .ok()
-                    .and_then(|value| value.as_array().cloned());
-            }
-        }
-        (actions.unwrap_or_default(), title, goal)
+        let id = request.trajectory_id.unwrap_or(0);
+        let trajectory = crate::db::get_agent_trajectory(&connection, id)?;
+        let title = trajectory.title.clone();
+        let goal = trajectory.goal.clone();
+        let actions = match request.actions.clone().filter(|entries| !entries.is_empty()) {
+            Some(entries) => entries,
+            None => serde_json::from_str::<Value>(&trajectory.actions)
+                .ok()
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default(),
+        };
+        (actions, title, goal)
     };
 
     // ② 环境状态：不运行 / 正忙都在预检阶段就变成红条（S5 互斥）
@@ -316,5 +359,63 @@ mod tests {
         assert!(request.open_in_new_tab, "默认每轮新标签（N4）");
         assert_eq!(request.edits.len(), 1);
         assert_eq!(request.dataset.rows.len(), 1);
+    }
+
+    #[test]
+    fn deserializes_file_path_aliases() {
+        let camel: ReplayPlanRequest = serde_json::from_value(json!({
+            "trajectoryId": -42,
+            "filePath": "E:/Browser/sidecar/agent_exports/trajectories/demo.json",
+            "actions": [{"type": "click"}]
+        }))
+        .expect("filePath camelCase");
+        assert_eq!(
+            camel.file_path.as_deref(),
+            Some("E:/Browser/sidecar/agent_exports/trajectories/demo.json")
+        );
+
+        let snake: ReplayPlanRequest = serde_json::from_value(json!({
+            "trajectoryId": -1,
+            "file_path": "E:/Browser/sidecar/agent_exports/trajectories/demo.json"
+        }))
+        .expect("file_path snake_case alias");
+        assert!(snake.file_path.is_some());
+    }
+
+    #[test]
+    fn skip_db_for_file_trajectory_id_actions_or_file_path() {
+        let step = vec![json!({"type": "click"})];
+        assert!(
+            should_skip_trajectory_db(Some(-9), &None, None),
+            "负 id（文件轨迹）不得查库"
+        );
+        assert!(
+            should_skip_trajectory_db(Some(0), &None, None),
+            "id=0 不得查库"
+        );
+        assert!(
+            should_skip_trajectory_db(None, &None, None),
+            "缺省 id 不得查库"
+        );
+        assert!(
+            should_skip_trajectory_db(Some(12), &Some(step.clone()), None),
+            "已有非空 actions 不得查库"
+        );
+        assert!(
+            should_skip_trajectory_db(Some(12), &None, Some("E:/x/trajectories/a.json")),
+            "声明 filePath 不得查库"
+        );
+        assert!(
+            !should_skip_trajectory_db(Some(12), &None, None),
+            "正 id 且无 actions/filePath → 仍走库"
+        );
+        assert!(
+            !should_skip_trajectory_db(Some(12), &Some(vec![]), None),
+            "空 actions 不算「已有步」"
+        );
+        assert!(
+            !should_skip_trajectory_db(Some(12), &None, Some("  ")),
+            "空白 filePath 不算"
+        );
     }
 }

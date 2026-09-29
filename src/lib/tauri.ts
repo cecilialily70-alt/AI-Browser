@@ -235,6 +235,11 @@ export async function openPathInOs(path: string): Promise<void> {
   await invoke("open_path_in_os", { path });
 }
 
+/** 打开「常规下载目录」或「数据目录」根路径（不存在则先创建）。 */
+export async function openDownloadDir(track: "browser" | "scraper"): Promise<string> {
+  return invoke<string>("open_download_dir", { track });
+}
+
 /** Write text into `{browser|scraper download root}/{profileId}/{filename}`. */
 export async function exportTextToDownloadDir(input: {
   track: "browser" | "scraper";
@@ -880,6 +885,11 @@ export async function pauseAutonomousAgent(profileId: string): Promise<void> {
   return invoke("pause_autonomous_agent", { profileId });
 }
 
+/** 用户标记成功：当前步结束后以成功收尾（若已勾选录制则写入轨迹） */
+export async function markAgentSuccess(profileId: string): Promise<void> {
+  return invoke("mark_agent_success", { profileId });
+}
+
 export async function abortAutonomousAgent(profileId: string): Promise<void> {
   return invoke("abort_autonomous_agent", { profileId });
 }
@@ -1028,7 +1038,12 @@ export async function replayAgentTrajectory(
  * 任何参数变化都要重新调用本函数拿新的 `planHash` —— 不要在前端自己拼 hash。
  */
 export async function buildReplayRunPlan(request: ReplayPlanRequest): Promise<ReplayRunPlan> {
-  return invoke<ReplayRunPlan>("build_replay_run_plan", { request });
+  return invoke<ReplayRunPlan>("build_replay_run_plan", {
+    request: {
+      ...request,
+      filePath: request.filePath ?? null,
+    },
+  });
 }
 
 export async function planBatchReplayData(input: {

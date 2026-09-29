@@ -295,7 +295,7 @@ export const PROMPT_TOOL_CATALOG = `## 【工具目录与调用规则】
 - **滑块缺口**（「请按住滑块」/topic/2）：单独一步 \`solve_captcha\` → \`slider_gap_drag\`。
 - **静态算式图**（「验证答案」/topic/3，含四则/阶乘!/sin·cos·tan）：单独一步 \`solve_captcha\` → \`math_image_solve\`（读算式纯文本→本地求值→填入→点「验证答案」）。
 - **点选 / 顺序点击**（「请按顺序点击」/「请点击…」/topic/4）：单独一步 \`solve_captcha\` → \`point_select_click\`（裁剪验证区→多模态 JSON 坐标→拟人贝塞尔点击）；**禁止** \`ask_user\` 代点。
-- **长按按钮**（微软 / Arkose FunCaptcha「按住不放」/「長按按鈕」/「Press and hold」）：单独一步 \`solve_captcha\` → \`press_hold_captcha\`（定位 iframe 内的长按按钮→按住直到进度条填满/出信号才松手（**时长不固定**，最短约 3s、最长约 15s）→轮询验收；未过则自动点无障碍图标重试）。**禁止**手点一下了事（点一下就必然失败）。**组件是异步渲染的**：题面先出现、按钮几秒后才注入，工具会自己等待（默认最多 30s）后定位 —— 因此「刚出现验证界面就返回找不到」属正常，**不要立刻重发 \`solve_captcha\` 顶次数、不要自己 wait 后硬重试**，等工具这一步跑完再说。
+- **长按按钮**（微软 / Arkose FunCaptcha「按住不放」/「長按按鈕」/「Press and hold」）：单独一步 \`solve_captcha\` → \`press_hold_captcha\`（定位 iframe 内的长按按钮→按住期间指针不动，直到进度在这次按住里涨满且页面不再要求按住才松手（**时长不固定**，最短约 3s、最长约 15s）→轮询验收；未过则自动点无障碍图标重试）。**禁止**手点一下了事（点一下就必然失败），也禁止自己按住时挪鼠标。**组件是异步渲染的**：题面先出现、按钮几秒后才注入，工具会自己等待（默认最多 30s）后定位 —— 因此「刚出现验证界面就返回找不到」属正常，**不要立刻重发 \`solve_captcha\` 顶次数、不要自己 wait 后硬重试**，等工具这一步跑完再说。
 - **Token 挑战**（Turnstile / reCAPTCHA / hCaptcha）：单独一步 \`solve_captcha\` → \`token_challenge_remote\`（须设置启用第三方；未配置或失败 → HITL）。**禁止**编造 token。
 - **别名**（\`solve_math_captcha\` / \`solve_slider_captcha\` / \`solve_animated_captcha\` / \`solve_point_select_captcha\`）与 \`solve_captcha\` 分发后**同路径**。失败后**禁止**换别名顶次数；继续只用 \`solve_captcha\`，满 3 次再 HITL。
 - **运行期闸门**：页面若是**整页人机验证**，运行时会自动把本步动作收敛为 \`solve_captcha\`（无法求解则转人工），与你的目标措辞无关；请配合它，不要把验证码页当成目标页直接 \`done\`。表单里嵌着的验证码控件不会被接管，正常推进流程、需要时用 \`solve_captcha\` 即可。

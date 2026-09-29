@@ -21,7 +21,15 @@ export type TrajectoryActionType =
   | "keypress"
   | "scroll"
   /** N5 / N6：运行途中读一次剪贴板（页面通道优先，失败降级系统通道，见 §6.2） */
-  | "clipboard_read";
+  | "clipboard_read"
+  /** P2：回放桥接 Layer1 solve_captcha（不录 physics） */
+  | "solve_captcha"
+  /** P2：切标签 / 弹窗后等待目标页（保留 hash） */
+  | "wait_for_page"
+  /** P2：下载不可机械复现；回放 fail-closed 明示 */
+  | "download"
+  /** 用户运行中点「成功」：回放遇到即正常结束 */
+  | "user_success";
 
 export type { SemanticContext };
 
@@ -83,6 +91,91 @@ export interface AgentTrajectoryPayload {
   savedAt?: string;
   /** 落盘相对路径或绝对路径 */
   filePath?: string;
+  /** 难点提示：非纯机械可回放（验证码/OTP/接管等） */
+  replayHints?: TrajectoryReplayHints;
+}
+
+/** 录制难点 → 回放「先说后跑」 */
+export interface TrajectoryReplayHints {
+  needsHuman: boolean;
+  nonMechanical: boolean;
+  reasons: string[];
+}
+
+/** 嵌在 actions JSON 数组首项的元数据（DB 无新列时仍可被前端/回放识别） */
+export const REPLAY_HINTS_MARKER = "_replayHints";
+
+export function buildReplayHintsFromReasons(reasons: Iterable<string>): TrajectoryReplayHints {
+  const list = Array.from(
+    new Set(
+      [...reasons]
+        .map((r) => String(r ?? "").trim())
+        .filter(Boolean),
+    ),
+  ).sort();
+  const nonMechanical = list.some((r) =>
+    /^(captcha|otp|handover|ask_user|download|custom_dropdown|switch_tab)$/.test(r),
+  );
+  const needsHuman = list.some((r) => /^(captcha|otp|handover|ask_user)$/.test(r));
+  return { needsHuman, nonMechanical, reasons: list };
+}
+
+/** 把 hints 塞进 actions 数组首项（兼容旧解析：跳过带 _replayHints 的项） */
+export function packActionsWithReplayHints(
+  actions: TrajectoryStep[],
+  hints: TrajectoryReplayHints | null | undefined,
+): unknown[] {
+  if (!hints || (!hints.needsHuman && !hints.nonMechanical && hints.reasons.length === 0)) {
+    return actions;
+  }
+  return [
+    {
+      [REPLAY_HINTS_MARKER]: true,
+      needsHuman: hints.needsHuman,
+      nonMechanical: hints.nonMechanical,
+      reasons: hints.reasons,
+    },
+    ...actions,
+  ];
+}
+
+export function unpackActionsWithReplayHints(raw: unknown): {
+  actions: TrajectoryStep[];
+  hints: TrajectoryReplayHints | null;
+} {
+  if (!Array.isArray(raw)) {
+    return { actions: [], hints: null };
+  }
+  let hints: TrajectoryReplayHints | null = null;
+  const actions: TrajectoryStep[] = [];
+  for (const item of raw) {
+    if (
+      item &&
+      typeof item === "object" &&
+      (item as Record<string, unknown>)[REPLAY_HINTS_MARKER] === true
+    ) {
+      const rec = item as Record<string, unknown>;
+      const reasons = Array.isArray(rec.reasons)
+        ? rec.reasons.map((r) => String(r)).filter(Boolean)
+        : [];
+      hints = {
+        needsHuman: rec.needsHuman === true,
+        nonMechanical: rec.nonMechanical === true,
+        reasons,
+      };
+      continue;
+    }
+    actions.push(item as TrajectoryStep);
+  }
+  // 启发式：旧轨迹无 marker 时，脱敏填值也视为 needsHuman
+  if (!hints && actions.some((s) => s?.redacted === true)) {
+    hints = {
+      needsHuman: true,
+      nonMechanical: true,
+      reasons: ["redacted_fill"],
+    };
+  }
+  return { actions, hints };
 }
 
 export interface TrajectoryFileMeta {
@@ -95,6 +188,7 @@ export interface TrajectoryFileMeta {
   stepCount: number;
   savedAt: string;
   actions: TrajectoryStep[];
+  replayHints?: TrajectoryReplayHints | null;
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -196,6 +290,82 @@ export function normalizeTrajectoryStepForPersist(step: TrajectoryStep): Traject
 }
 
 /**
+ * 单步是否可落库。返回拒绝原因；`null` = 可落库。
+ * 与 assertPersistableTrajectorySteps 同一份口径（临时 ID / fill·select 空 selector / click 无锚点）。
+ */
+export function unpersistableTrajectoryStepReason(
+  step: TrajectoryStep,
+  index = 0,
+): string | null {
+  const stepNo = step.step ?? index + 1;
+  const type = String(step.type ?? "").trim();
+  const raw = (step as TrajectoryStep & { selector?: unknown }).selector;
+
+  if (raw === null) {
+    return `step=${stepNo} selector 为 null，拒绝落库`;
+  }
+  if (raw !== undefined && typeof raw !== "string") {
+    return `step=${stepNo} selector 类型非法(${typeof raw})，拒绝落库`;
+  }
+  const selector = typeof raw === "string" ? raw.trim() : "";
+  if (isTempIdSelector(selector)) {
+    return `轨迹含临时 ID selector（step=${stepNo} selector=${selector}），拒绝落库`;
+  }
+  if ((type === "fill" || type === "select") && !selector) {
+    return `step=${stepNo} ${type} 缺少有效 selector，拒绝落库`;
+  }
+  if (type === "fill" || type === "select") {
+    const label = String(step.semanticLabel ?? step.label ?? "").trim();
+    if (!label) {
+      // 软警告：不拒绝落库，但沙盘将降级到 selector 片段
+      logger.warn("trajectory_missing_semantic_label", { step: stepNo, type });
+    }
+  }
+  if (type === "click") {
+    const primary = String(step.primarySelector ?? step.fallbackSelector ?? selector).trim();
+    const hasCoords = hasFiniteCoords(step.fallbackCoordinates, step.x, step.y);
+    if (!primary && !hasCoords) {
+      return `step=${stepNo} click 缺少 primarySelector/selector 与坐标，拒绝落库`;
+    }
+  }
+  if (type === "click_point") {
+    const fallback = String(step.fallbackSelector ?? step.primarySelector ?? "").trim();
+    const hasHeal = Boolean(selector || fallback);
+    const hasCoords = hasFiniteCoords(step.fallbackCoordinates, step.x, step.y);
+    if (!hasHeal && !hasCoords) {
+      return `step=${stepNo} click_point 缺少 fallbackSelector/selector 与坐标，拒绝落库`;
+    }
+  }
+  // user_success / wait / navigate / solve_captcha / download / wait_for_page / keypress / scroll / clipboard_read：允许空 selector
+  return null;
+}
+
+/**
+ * 过滤不可落库步骤（临时 ID / 残缺 click 等），重编号；不抛错。
+ * 用于录制收尾：坏步丢弃，保留可回放步 + user_success，避免整条轨迹因一步被拒。
+ */
+export function filterPersistableTrajectorySteps(actions: TrajectoryStep[]): {
+  actions: TrajectoryStep[];
+  dropped: Array<{ step: number; reason: string }>;
+} {
+  const dropped: Array<{ step: number; reason: string }> = [];
+  const kept: TrajectoryStep[] = [];
+  if (!Array.isArray(actions)) {
+    return { actions: kept, dropped };
+  }
+  for (let index = 0; index < actions.length; index += 1) {
+    const step = actions[index];
+    const reason = unpersistableTrajectoryStepReason(step, index);
+    if (reason) {
+      dropped.push({ step: step.step ?? index + 1, reason });
+      continue;
+    }
+    kept.push({ ...step, step: kept.length + 1 });
+  }
+  return { actions: kept, dropped };
+}
+
+/**
  * 落库前强校验：拒绝 null / 临时 ID / fill·click·select 空 selector；
  * click 必须具备 primarySelector（或 selector）或 fallbackCoordinates。
  */
@@ -204,49 +374,9 @@ export function assertPersistableTrajectorySteps(actions: TrajectoryStep[]): voi
     throw new Error("轨迹为空，拒绝落库");
   }
   for (let index = 0; index < actions.length; index += 1) {
-    const step = actions[index] as TrajectoryStep & { selector?: unknown };
-    const stepNo = step.step ?? index + 1;
-    const type = String(step.type ?? "").trim();
-    const raw = step.selector;
-
-    if (raw === null) {
-      throw new Error(`step=${stepNo} selector 为 null，拒绝落库`);
-    }
-    if (raw !== undefined && typeof raw !== "string") {
-      throw new Error(`step=${stepNo} selector 类型非法(${typeof raw})，拒绝落库`);
-    }
-    const selector = typeof raw === "string" ? raw.trim() : "";
-    if (isTempIdSelector(selector)) {
-      throw new Error(
-        `轨迹含临时 ID selector（step=${stepNo} selector=${selector}），拒绝落库`,
-      );
-    }
-    if ((type === "fill" || type === "select") && !selector) {
-      throw new Error(`step=${stepNo} ${type} 缺少有效 selector，拒绝落库`);
-    }
-    if (type === "fill" || type === "select") {
-      const label = String(step.semanticLabel ?? step.label ?? "").trim();
-      if (!label) {
-        // 软警告：不拒绝落库，但沙盘将降级到 selector 片段
-        logger.warn("trajectory_missing_semantic_label", { step: stepNo, type });
-      }
-    }
-    if (type === "click") {
-      const primary = String(step.primarySelector ?? step.fallbackSelector ?? selector).trim();
-      const hasCoords = hasFiniteCoords(step.fallbackCoordinates, step.x, step.y);
-      if (!primary && !hasCoords) {
-        throw new Error(`step=${stepNo} click 缺少 primarySelector/selector 与坐标，拒绝落库`);
-      }
-    }
-    if (type === "click_point") {
-      const fallback = String(step.fallbackSelector ?? step.primarySelector ?? "").trim();
-      const hasHeal = Boolean(selector || fallback);
-      const hasCoords = hasFiniteCoords(step.fallbackCoordinates, step.x, step.y);
-      if (!hasHeal && !hasCoords) {
-        throw new Error(
-          `step=${stepNo} click_point 缺少 fallbackSelector/selector 与坐标，拒绝落库`,
-        );
-      }
+    const reason = unpersistableTrajectoryStepReason(actions[index], index);
+    if (reason) {
+      throw new Error(reason);
     }
   }
 }
@@ -277,16 +407,19 @@ export function buildTrajectoryPayload(input: {
   startUrl: string;
   actions: TrajectoryStep[];
   domain?: string;
+  replayHints?: TrajectoryReplayHints | null;
 }): AgentTrajectoryPayload {
   const domain = input.domain ?? domainFromUrl(input.startUrl);
+  const redactedActions = redactTrajectorySecrets(input.actions);
   return {
     domain,
     title: buildTrajectoryTitle(input.goal, domain),
     goal: input.goal,
     startUrl: input.startUrl,
     // 出口统一脱敏：磁盘文件与 IPC/DB 上报复用同一份 actions，避免两处漂移
-    actions: redactTrajectorySecrets(input.actions),
+    actions: redactedActions,
     savedAt: new Date().toISOString(),
+    ...(input.replayHints ? { replayHints: input.replayHints } : {}),
   };
 }
 
@@ -374,11 +507,16 @@ function resolveInsideTrajectories(filePath: string): string {
 export async function loadTrajectoryFromFile(filePath: string): Promise<AgentTrajectoryPayload> {
   const resolved = resolveInsideTrajectories(filePath);
   const raw = await readFile(resolved, "utf8");
-  const parsed = JSON.parse(raw) as AgentTrajectoryPayload;
+  const parsed = JSON.parse(raw) as AgentTrajectoryPayload & { actions?: unknown };
   if (!Array.isArray(parsed.actions)) {
     throw new Error(`轨迹文件缺少 actions: ${resolved}`);
   }
-  return parsed;
+  const unpacked = unpackActionsWithReplayHints(parsed.actions);
+  return {
+    ...parsed,
+    actions: unpacked.actions,
+    replayHints: parsed.replayHints ?? unpacked.hints ?? undefined,
+  };
 }
 
 export async function deletePersistedTrajectory(filePath: string): Promise<void> {

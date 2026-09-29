@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ClipboardEvent } from "react";
 import { GitBranch, List, Plus, Upload, Webhook } from "lucide-react";
 
 import {
@@ -9,7 +9,13 @@ import {
   formatInvokeError,
   proxyLabel,
 } from "../../lib/tauri";
-import { applyRegionToApiUrl, parseBatchProxyLines, PROXY_REGION_OPTIONS } from "../../lib/proxy";
+import {
+  applyRegionToApiUrl,
+  extractRegionFromApiUrl,
+  parseBatchProxyLines,
+  parsePastedProxyFields,
+  PROXY_REGION_OPTIONS,
+} from "../../lib/proxy";
 import type { AddProxyInput, Proxy } from "../../types";
 import { createToast } from "../../lib/toast";
 import type { ToastMessage } from "../../lib/toast";
@@ -47,7 +53,7 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
   const [rangeEnd, setRangeEnd] = useState(5510);
   const [apiUrl, setApiUrl] = useState("");
   const [apiProtocol, setApiProtocol] = useState<"HTTP" | "SOCKS5">("HTTP");
-  const [apiRegion, setApiRegion] = useState("hk");
+  const [apiRegion, setApiRegion] = useState("");
   const [apiLabel, setApiLabel] = useState("API 动态提取");
 
   const allSelected = proxies.length > 0 && selectedIds.length === proxies.length;
@@ -57,6 +63,7 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
     [batchText, proxyType],
   );
 
+  const urlRegion = useMemo(() => (apiUrl.trim() ? extractRegionFromApiUrl(apiUrl) : null), [apiUrl]);
   const apiPreviewUrl = useMemo(
     () => (apiUrl.trim() ? applyRegionToApiUrl(apiUrl, apiRegion) : ""),
     [apiUrl, apiRegion],
@@ -210,6 +217,24 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
     }
   };
 
+  const handlePackedProxyPaste = (event: ClipboardEvent<HTMLInputElement>) => {
+    const text = event.clipboardData.getData("text");
+    const parsed = parsePastedProxyFields(text);
+    if (!parsed) {
+      return;
+    }
+    event.preventDefault();
+    const explicitScheme = /^[a-z0-9]+:\/\//i.test(text.trim());
+    setSingleForm((current) => ({
+      ...current,
+      type: explicitScheme ? parsed.type : current.type,
+      host: parsed.host,
+      port: parsed.port,
+      username: parsed.username ?? current.username,
+      password: parsed.username != null ? (parsed.password ?? "") : current.password,
+    }));
+  };
+
   return (
     <div className="space-y-4">
       <div className="segmented">
@@ -320,6 +345,7 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
               className="field-input"
               type="number"
               value={singleForm.port}
+              onPaste={handlePackedProxyPaste}
               onChange={(event) => {
                 const next = Number(event.target.value);
                 if (Number.isFinite(next)) {
@@ -329,10 +355,12 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
             />
           </label>
           <label className="field-label col-span-2">
-            主机 IP
+            主机（IP 或域名）
             <input
               className="field-input"
               value={singleForm.host}
+              placeholder="可直接粘贴 主机:端口:账号:密码"
+              onPaste={handlePackedProxyPaste}
               onChange={(event) => setSingleForm((current) => ({ ...current, host: event.target.value }))}
             />
           </label>
@@ -341,6 +369,7 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
             <input
               className="field-input"
               value={singleForm.username ?? ""}
+              onPaste={handlePackedProxyPaste}
               onChange={(event) => setSingleForm((current) => ({ ...current, username: event.target.value }))}
             />
           </label>
@@ -350,6 +379,7 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
               className="field-input"
               type="password"
               value={singleForm.password ?? ""}
+              onPaste={handlePackedProxyPaste}
               onChange={(event) => setSingleForm((current) => ({ ...current, password: event.target.value }))}
             />
           </label>
@@ -486,9 +516,10 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
               className="field-input"
               value={apiRegion}
               onChange={(event) => setApiRegion(event.target.value)}
+              disabled={Boolean(urlRegion)}
             >
               {PROXY_REGION_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
+                <option key={option.value || "follow"} value={option.value}>
                   {option.label}
                 </option>
               ))}
@@ -502,8 +533,21 @@ export function ProxyPoolTab({ proxies, onReload, onToast, onError }: ProxyPoolT
               onChange={(event) => setApiLabel(event.target.value)}
             />
           </label>
+          {urlRegion ? (
+            <p className="text-[11px] text-muted-foreground">
+              链接已含地区 <span className="font-mono">{urlRegion}</span>，将原样请求，不会被上方选项覆盖。
+            </p>
+          ) : apiRegion ? (
+            <p className="text-[11px] text-muted-foreground">
+              链接未含地区参数，保存时会追加 <span className="font-mono">region={apiRegion}</span>。
+            </p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              链接未含地区参数；选择「跟随链接」则不追加 region，也可在下方选一个地区后追加。
+            </p>
+          )}
           {apiPreviewUrl ? (
-            <p className="text-[11px] text-muted-foreground">实际请求 URL：{apiPreviewUrl}</p>
+            <p className="text-[11px] text-muted-foreground break-all">实际请求 URL：{apiPreviewUrl}</p>
           ) : null}
           <p className="text-[11px] text-muted-foreground">
             启动前会请求该 API，将返回的 IP:Port 注入浏览器。

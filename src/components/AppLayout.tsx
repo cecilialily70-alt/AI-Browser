@@ -653,7 +653,7 @@ export function AppLayout() {
 
       {bannerNotice ? (
         <div
-          className={`banner shrink-0 ${
+          className={`banner pointer-events-auto fixed inset-x-0 top-0 z-[100] shadow-pop ${
             bannerNotice.tone === "success"
               ? " bg-success/10 text-success"
               : bannerNotice.tone === "info"

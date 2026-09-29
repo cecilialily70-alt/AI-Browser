@@ -859,13 +859,17 @@ pub fn reset_stale_running_profiles(connection: &Connection) -> Result<u64, AppE
 
 pub fn list_proxies(connection: &Connection) -> Result<Vec<Proxy>, AppError> {
     reencrypt_plaintext_proxy_secrets(connection)?;
+    let transaction = connection.unchecked_transaction()?;
+    compact_proxy_ids(&transaction)?;
     let sql = format!("SELECT {PROXY_COLUMNS} FROM proxies ORDER BY id DESC");
-    let mut statement = connection.prepare(&sql)?;
+    let mut statement = transaction.prepare(&sql)?;
     let rows = statement.query_map([], proxy_from_row)?;
     let mut proxies = Vec::new();
     for row in rows {
         proxies.push(row?);
     }
+    drop(statement);
+    transaction.commit()?;
     Ok(proxies)
 }
 
@@ -926,10 +930,15 @@ pub fn insert_dynamic_api_proxy(
     label: Option<&str>,
 ) -> Result<Proxy, AppError> {
     let api_url = apply_region_to_api_url(api_url, region);
+    // 优先记链接里真实生效的地区，便于列表展示；链接无 region 时才用下拉所选
+    let stored_region = proxy::extract_region_from_api_url(&api_url)
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| region.trim().to_ascii_lowercase());
     let config = serde_json::json!({
         "api_url": api_url,
         "protocol": proxy::normalize_proxy_type(protocol),
-        "region": region.trim().to_ascii_lowercase(),
+        "region": stored_region,
         "label": label.unwrap_or("API 动态提取"),
     });
     let config_text = serde_json::to_string(&config)
@@ -1430,6 +1439,8 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "agent_persona_selection",
     // 聊天模式（独立执行形态的配置：总开关 + 目标 + 回访节奏 + 每环境对象）
     "chat_mode",
+    // 回放单步 AI 愈合（机械穷尽后的有界兜底；默认开）
+    "replay_ai_heal",
 ];
 
 pub fn seed_default_settings(connection: &Connection) -> Result<(), AppError> {
@@ -1467,6 +1478,8 @@ pub fn seed_default_settings(connection: &Connection) -> Result<(), AppError> {
         // 聊天模式：默认「关」且没有任何目标。空对象即前端默认值（总开关 false），
         // 这样读设置的人不必区分「键不存在」与「全默认」两种情形。
         ("chat_mode", "{}"),
+        // 回放 AI 步愈合：空对象 = sidecar 默认（enabled=true, maxPerRun=3）
+        ("replay_ai_heal", "{}"),
     ];
     for (key, value) in defaults {
         connection.execute(
@@ -1668,8 +1681,93 @@ pub fn batch_delete_proxies(connection: &Connection, ids: &[i64]) -> Result<usiz
         let affected = transaction.execute("DELETE FROM proxies WHERE id = ?1", params![id])?;
         deleted += affected;
     }
+    compact_proxy_ids(&transaction)?;
     transaction.commit()?;
     Ok(deleted)
+}
+
+/// 删除后把剩余代理收成 1、2、3…，并改写环境上的 `proxy_id`。
+/// SQLite 的 AUTOINCREMENT 只升不降，不收编的话删光再加仍会从旧高位继续。
+fn compact_proxy_ids(connection: &Connection) -> Result<(), AppError> {
+    let mut statement = connection.prepare("SELECT id FROM proxies ORDER BY id ASC")?;
+    let ids: Vec<i64> = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let already_dense = ids
+        .iter()
+        .enumerate()
+        .all(|(index, id)| *id == index as i64 + 1);
+    if already_dense {
+        sync_proxy_id_sequence(connection, ids.last().copied().unwrap_or(0))?;
+        return Ok(());
+    }
+
+    let mut link_stmt = connection.prepare(
+        "SELECT id, proxy_id FROM profiles WHERE proxy_id IS NOT NULL",
+    )?;
+    let links: Vec<(i64, i64)> = link_stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(link_stmt);
+
+    connection.execute(
+        "UPDATE profiles SET proxy_id = NULL WHERE proxy_id IS NOT NULL",
+        [],
+    )?;
+    connection.execute("UPDATE proxies SET id = -id WHERE id > 0", [])?;
+    for (index, old_id) in ids.iter().enumerate() {
+        let new_id = index as i64 + 1;
+        connection.execute(
+            "UPDATE proxies SET id = ?1 WHERE id = ?2",
+            params![new_id, -old_id],
+        )?;
+    }
+    for (profile_id, old_proxy_id) in links {
+        let Some(index) = ids.iter().position(|id| *id == old_proxy_id) else {
+            continue;
+        };
+        connection.execute(
+            "UPDATE profiles SET proxy_id = ?1 WHERE id = ?2",
+            params![index as i64 + 1, profile_id],
+        )?;
+    }
+    sync_proxy_id_sequence(connection, ids.len() as i64)?;
+    Ok(())
+}
+
+/// 空表时清掉自增水位，下一条从 1 开始；否则水位跟当前最大 id 对齐。
+fn sync_proxy_id_sequence(connection: &Connection, max_id: i64) -> Result<(), AppError> {
+    let has_sequence = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !has_sequence {
+        return Ok(());
+    }
+    if max_id <= 0 {
+        connection.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'proxies'",
+            [],
+        )?;
+    } else {
+        let updated = connection.execute(
+            "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'proxies'",
+            params![max_id],
+        )?;
+        if updated == 0 {
+            connection.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES ('proxies', ?1)",
+                params![max_id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub fn save_form_template(
@@ -3435,5 +3533,63 @@ mod tests {
         assert!(resolve_agent_persona_for_profile(&connection, "7")
             .expect("resolve")
             .is_none());
+    }
+
+    #[test]
+    fn deleted_proxy_ids_compact_back_to_one() {
+        let connection = Connection::open_in_memory().expect("open memory db");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE proxies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host TEXT NOT NULL
+                 );
+                 CREATE TABLE profiles (
+                    id INTEGER PRIMARY KEY,
+                    proxy_id INTEGER REFERENCES proxies(id) ON DELETE SET NULL
+                 );",
+            )
+            .expect("schema");
+        connection
+            .execute(
+                "INSERT INTO proxies (id, host) VALUES (10, 'us.novproxy.io')",
+                [],
+            )
+            .expect("seed proxy");
+        connection
+            .execute("INSERT INTO profiles (id, proxy_id) VALUES (3, 10)", [])
+            .expect("seed profile");
+
+        compact_proxy_ids(&connection).expect("compact");
+
+        let proxy_id: i64 = connection
+            .query_row("SELECT id FROM proxies", [], |row| row.get(0))
+            .expect("proxy id");
+        let linked: i64 = connection
+            .query_row("SELECT proxy_id FROM profiles WHERE id = 3", [], |row| row.get(0))
+            .expect("profile link");
+        let seq: i64 = connection
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'proxies'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sequence");
+        assert_eq!(proxy_id, 1);
+        assert_eq!(linked, 1);
+        assert_eq!(seq, 1);
+
+        connection
+            .execute("INSERT INTO proxies (host) VALUES ('next.example')", [])
+            .expect("next insert");
+        let next_id: i64 = connection
+            .query_row(
+                "SELECT id FROM proxies WHERE host = 'next.example'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("next id");
+        assert_eq!(next_id, 2);
     }
 }

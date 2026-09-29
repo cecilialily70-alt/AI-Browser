@@ -1,6 +1,7 @@
 import { reportOrFallback } from "./ipc_client.js";
 import { redactSecretText, redactSecrets } from "./secret_redaction.js";
 import { ENV_LOG_LEVEL, readAppEnv } from "./app_env.js";
+import { slimAgentEventForHuman } from "./bu_agent/agent_events.js";
 
 export type JsonLogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
@@ -90,6 +91,8 @@ function emitFatalKeepAlive(kind: string, errorMessage: string): void {
     type: "agent_state",
     state: "failed",
     step: 0,
+    eventKind: "run_failed",
+    phase: "error",
     msg: `Sidecar 捕获致命错误（进程保持存活）: ${errorMessage}`,
     actions: [],
     ts,
@@ -218,6 +221,8 @@ export class JsonLogger {
    *
    * `preserveFull`：交付物正文（如 done 的结论）要完整送给监视器，
    * 由前端自己决定折叠多少；其余进度仍按 AGENT_STATE_MSG_MAX 截短，避免刷爆 stdout。
+   *
+   * 语义 `type` 折叠进 `eventKind`（C7），禁止顶掉协议顶层 type。
    */
   agentProgress(message: string, data?: Record<string, unknown>): void {
     const text = String(message ?? "").trim();
@@ -229,18 +234,64 @@ export class JsonLogger {
       (typeof data?.profileId === "string" && data.profileId.trim()) ||
       (typeof data?.profile_id === "string" && data.profile_id.trim()) ||
       undefined;
-    // 勿把 plan/截图等大字段塞进 agent_state（stdout 行）
-    const slim: Record<string, unknown> = {};
-    if (data) {
-      for (const key of ["phase", "step", "engine", "url", "elements", "error", "type", "selector"]) {
-        if (data[key] !== undefined) slim[key] = data[key];
-      }
+    // 勿把 plan/截图等大字段塞进 agent_state（stdout 行）——走 agent_events SSOT
+    const slim = slimAgentEventForHuman(data);
+    if (data && slim.eventKind == null && typeof data.type === "string" && data.type.trim()) {
+      // 兼容旧调用：data.type 当语义 kind，但不写入顶层 type
+      slim.eventKind = data.type.trim();
     }
     const msgLimit = data?.preserveFull ? AGENT_STATE_DELIVERABLE_MAX : AGENT_STATE_MSG_MAX;
     this.agentState("running", {
       ...slim,
       ...(profileId ? { profileId } : {}),
       msg: text.slice(0, msgLimit),
+    });
+  }
+
+  /**
+   * AgentEvent SSOT 发射（仅 Agent）。顶层 type 恒为 agent_state；语义进 eventKind（C7）。
+   * 人视瘦字段；DOM/JSON 等重载荷不得经此写入 stdout（应只留内存 → RunBrief）。
+   */
+  emitAgentEvent(input: {
+    eventKind: string;
+    msg: string;
+    phase?: string;
+    step?: number;
+    state?: string;
+    profileId?: string;
+    engine?: string;
+    summary?: string;
+    waitId?: string;
+    data?: Record<string, unknown>;
+  }): void {
+    const text = String(input.msg ?? "").trim();
+    if (!text) {
+      return;
+    }
+    const eventKind =
+      (typeof input.eventKind === "string" && input.eventKind.trim()) || "note";
+    const profileId =
+      (typeof input.profileId === "string" && input.profileId.trim()) ||
+      (typeof input.data?.profileId === "string" && String(input.data.profileId).trim()) ||
+      undefined;
+    const slim = slimAgentEventForHuman(input.data);
+    // 终端排查行（progress）可带同样摘要
+    this.progress(text, {
+      eventKind,
+      phase: input.phase,
+      step: input.step,
+      ...slim,
+    });
+    this.agentState(input.state ?? "running", {
+      ...slim,
+      eventKind,
+      ...(input.phase ? { phase: input.phase } : {}),
+      ...(input.step != null ? { step: input.step } : {}),
+      ...(input.engine ? { engine: input.engine } : {}),
+      ...(input.summary ? { summary: input.summary } : {}),
+      ...(input.waitId ? { waitId: input.waitId } : {}),
+      ...(profileId ? { profileId } : {}),
+      msg: text.slice(0, AGENT_STATE_MSG_MAX),
     });
   }
 
@@ -365,18 +416,30 @@ export class JsonLogger {
     }
   }
 
-  /** 遗留 agent_state 事件格式（IPC 致命错误兜底仍可能输出） */
+  /**
+   * agent_state 协议事件。
+   * C7：先展开 data，再强制写入顶层 type，禁止 data.type 顶掉协议 type（对齐 chatProgress）。
+   */
   agentState(state: string, data?: Record<string, unknown>): void {
     const waitId =
       (typeof data?.waitId === "string" && data.waitId.trim()) ||
       getActiveCommandWaitId() ||
       undefined;
+    const { type: _ignoredType, ...rest } = (data ?? {}) as Record<string, unknown> & {
+      type?: unknown;
+    };
+    // 若调用方误把语义 type 放进 data，折进 eventKind
+    const eventKind =
+      (typeof rest.eventKind === "string" && rest.eventKind.trim()) ||
+      (typeof _ignoredType === "string" && _ignoredType.trim()) ||
+      undefined;
     writeRedacted({
-      type: "agent_state",
+      ...rest,
+      ...(eventKind ? { eventKind } : {}),
+      ...(waitId ? { waitId } : {}),
       state,
       ts: new Date().toISOString(),
-      ...(waitId ? { waitId } : {}),
-      ...data,
+      type: "agent_state",
     });
     if (state === "complete" || state === "failed") {
       clearActiveCommandWaitId(typeof data?.waitId === "string" ? data.waitId : waitId);

@@ -15,6 +15,7 @@ import {
   type ImageTextSolveResult,
 } from "./animated_captcha.js";
 import {
+  detectCaptchaGate,
   detectCaptchaStrategy,
   SUPPORTED_CAPTCHA_STRATEGIES,
   type CaptchaStrategyId,
@@ -133,6 +134,52 @@ async function collectCaptchaPageText(page: Page): Promise<string> {
     if (parts.join("\n").length > 6000) break;
   }
   return parts.join("\n").slice(0, 6000);
+}
+
+/**
+ * 回放收尾闸：机械步跑完后页面若仍停在人机验证（含 iframe 内 Arkose 长按），
+ * 不得报「回放成功」。主文档文案可能只有邮箱胶囊，题面在 iframe，必须扫框架。
+ */
+export async function probeBlockingCaptchaOnPage(page: Page): Promise<{
+  blocked: boolean;
+  reason: string | null;
+  strategy: CaptchaStrategyId | null;
+  matched: string | null;
+}> {
+  const pageText = await collectCaptchaPageText(page);
+  const pageUrl = (() => {
+    try {
+      return page.url();
+    } catch {
+      return "";
+    }
+  })();
+  const title = await page.title().catch(() => "");
+  const gate = detectCaptchaGate({ pageText, pageUrl, title });
+  if (!gate.present) {
+    return { blocked: false, reason: null, strategy: null, matched: null };
+  }
+  // 整页闸门、长按、或明确匹配到验证语义 → 拦成功（fail-closed）
+  const isHold =
+    gate.strategy === "press_hold_captcha" ||
+    /長按|长按|按住|press\s*(and|&)\s*hold|證明您是人類|证明您是人类/i.test(
+      `${gate.matched ?? ""}\n${pageText}`,
+    );
+  if (gate.interstitial || isHold || gate.matched) {
+    const hint = gate.matched || gate.strategy || "人机验证";
+    return {
+      blocked: true,
+      reason: `页面仍停在人机验证（${hint}），注册/登录尚未真正完成；请人工过码或改用 Agent 求解后再继续`,
+      strategy: gate.strategy,
+      matched: gate.matched,
+    };
+  }
+  return {
+    blocked: false,
+    reason: null,
+    strategy: gate.strategy,
+    matched: gate.matched,
+  };
 }
 
 export async function solveCaptcha(input: {

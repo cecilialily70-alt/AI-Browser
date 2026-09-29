@@ -239,3 +239,40 @@ pub fn path_is_under_trajectories(file_path: &str) -> bool {
             .zip(root.canonicalize().ok())
             .is_some_and(|(file, base)| file.starts_with(base))
 }
+
+/// 从磁盘轨迹 JSON 读取 title / goal / actions（须在 trajectories 目录内）。
+pub fn load_trajectory_file(file_path: &str) -> Result<(String, String, Vec<Value>), AppError> {
+    let trimmed = file_path.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Validation("file_path cannot be empty".to_owned()));
+    }
+    if !path_is_under_trajectories(trimmed) {
+        return Err(AppError::Validation(
+            "file_path 必须位于 agent_exports/trajectories/".to_owned(),
+        ));
+    }
+    let raw = fs::read_to_string(trimmed).map_err(|error| {
+        AppError::Validation(format!("读取轨迹文件失败: {error}"))
+    })?;
+    let parsed: Value = serde_json::from_str(&raw).map_err(|error| {
+        AppError::Validation(format!("轨迹文件 JSON 无效: {error}"))
+    })?;
+    let title = parsed
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let goal = parsed
+        .get("goal")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let actions = parsed
+        .get("actions")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok((title, goal, actions))
+}

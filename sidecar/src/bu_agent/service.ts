@@ -43,6 +43,9 @@ import { findIndexByTextHint } from "./captcha_form_hints.js";
 import {
   assertPersistableTrajectorySteps,
   buildTrajectoryPayload,
+  buildReplayHintsFromReasons,
+  filterPersistableTrajectorySteps,
+  packActionsWithReplayHints,
   domainFromUrl,
   persistTrajectoryToDisk,
   type TrajectoryStep,
@@ -65,6 +68,7 @@ import {
   markNavigationReached,
   recordStepEvidence,
 } from "../core/completion_evidence.js";
+import { createFillDataLedger } from "../core/fill_data_export.js";
 import { findPendingHumanCredentials } from "../core/human_credential.js";
 import {
   attachmentImageParts,
@@ -97,6 +101,9 @@ import { AgentFileSystem } from "./filesystem.js";
 import { decideCompletionAsk, judgeTaskComplete, judgeTrace, shouldSkipJudge } from "./judge.js";
 import { MessageManager } from "./message_manager.js";
 import { multiAct } from "./multi_act.js";
+import { beginActionEvidence, summarizeEvidenceForBrief } from "./action_evidence.js";
+import { buildRunBrief, EvidenceRing } from "./run_brief.js";
+import { consumeUserSuccessRequest } from "./user_success_gate.js";
 import {
   agentOutputFromToolCalls,
   agentOutputJsonSchema,
@@ -122,7 +129,7 @@ import {
 import { verifyDeliverables } from "../core/deliverable_verify.js";
 import type { ArtifactRecord } from "../core/deliverable_verify.js";
 import type { EvidenceLedger } from "../core/completion_evidence.js";
-import { attachArtifactTracker } from "../core/artifact_tracker.js";
+import { attachArtifactTracker, awaitPendingArtifacts } from "../core/artifact_tracker.js";
 import {
   absorbPlanDeliverables,
   countProgressFacts,
@@ -412,8 +419,16 @@ async function runBuAutonomousAgentLoopInner(
   const enableRecording = deps.enableRecording === true;
   /** 勾选「录制执行轨迹」时由网关收集；成功后落库 + 推送轨迹记忆 */
   const recordedSteps: Omit<TrajectoryStep, "step">[] = [];
+  /** 录制难点（验证码/OTP/接管…）→ 轨迹 replayHints */
+  const recordingHardCases = new Set<string>();
   /** P4.3：与录制解耦的 Run History（起止强制落摘要） */
   const agentRunId = createAgentRunId();
+  /** 成功填写的邮箱/密码/账户等 → 写入「数据目录」，方便用户核对 */
+  const fillDataLedger = createFillDataLedger({
+    profileId,
+    runId: agentRunId,
+    logger: deps.logger,
+  });
   const thoughtLines: AgentRunThoughtLine[] = [];
   let hitlOccurred = false;
   let savedTrajectoryId: number | null = null;
@@ -467,6 +482,8 @@ async function runBuAutonomousAgentLoopInner(
   let doneSummary = "";
   let doneSuccess = false;
   let finished = false;
+  /** 用户点「成功」收尾：与 doneSummary 文案解耦，录制收尾可靠识别 */
+  let userMarkedSuccess = false;
   /** 完成度证据台账：done 验收的客观依据（缺证据则驳回 done，让模型继续） */
   const evidenceLedger = await createEvidenceLedger(activePage);
   /** 失败台账：按「目标 × 失败因」累计，撞墙后在同一步直接禁止重复 */
@@ -731,6 +748,8 @@ async function runBuAutonomousAgentLoopInner(
     // （否则它永远是「还差一项」，done 被反复驳回 —— P9）
     const deliverableLedger = createDeliverableLedger(analyzed.contract, startUrl);
     const artifacts: ArtifactRecord[] = [];
+    /** 近步 DOM/JSON 证据环（只进 RunBrief，不过 Host） */
+    const evidenceRing = new EvidenceRing(12);
     /** MACRO_ANALYZE 富计划：SubTask 切换时刷新 todo；REPLAN 时同步 plan.json */
     let activeMacroPlan: MacroPlan | null = analyzed.macroPlan;
     let lastMacroPlanIndex = 0;
@@ -815,6 +834,7 @@ async function runBuAutonomousAgentLoopInner(
           browserState: bootState,
           fileSystem,
           profileId,
+          fillDataLedger,
           goal: deps.goal,
           taskPolicy,
           otpChannel: deps.otpChannel,
@@ -1019,6 +1039,38 @@ async function runBuAutonomousAgentLoopInner(
       return true;
     };
 
+    /** 用户点「成功」：当前步闸门后以成功收尾（录制则写入轨迹） */
+    const tryUserSuccessFinish = (): boolean => {
+      if (!consumeUserSuccessRequest()) return false;
+      const urlNow = (() => {
+        try {
+          return activePage.url();
+        } catch {
+          return startUrl;
+        }
+      })();
+      userMarkedSuccess = true;
+      if (enableRecording) {
+        const already = recordedSteps.some((s) => s.type === "user_success");
+        if (!already) {
+          recordedSteps.push({
+            type: "user_success",
+            selector: "",
+            label: "用户标记成功",
+            url: urlNow,
+          });
+        }
+      }
+      doneSummary = "用户标记成功（人工确认完成）";
+      doneSuccess = true;
+      finished = true;
+      deps.logger.agentProgress("用户标记成功 · 结束任务并写入轨迹（若已勾选录制）", {
+        phase: "user_success",
+      });
+      noteThought("用户标记成功");
+      return true;
+    };
+
     for (let step = 1; step <= maxSteps; step++) {
       if (deps.signal?.aborted) {
         throw new Error("Agent 已中止");
@@ -1027,6 +1079,7 @@ async function runBuAutonomousAgentLoopInner(
       if (deps.awaitUserPauseGate && (await deps.awaitUserPauseGate())) {
         forceObserveNext = true;
       }
+      if (tryUserSuccessFinish()) break;
       currentStepForArtifacts = step;
       arbiterSkipLlm = false;
       expectsSkipLlm = false;
@@ -1899,6 +1952,20 @@ async function runBuAutonomousAgentLoopInner(
 
       const wantVision = visionImages.length > 0;
       if (wantVision) lastVisionObservationStep = step;
+      const runBriefText = buildRunBrief({
+        goal: deps.goal,
+        stepNumber: step,
+        maxSteps,
+        ledger: deliverableLedger,
+        recentEvidence: evidenceRing.list(),
+        pageFitsGoal: queryMatched ? "current_page_matches_query" : null,
+        stopWhenMet: "交付物台账清空且支付/凭证闸门通过",
+        mustNot: [
+          "禁止无人支付/自动扣款",
+          "禁止编造 OTP/验证码 token",
+          "禁止为过检测改指纹",
+        ],
+      });
       const userMsg = buildUserStateMessage({
         userRequest:
           deps.goal + personaHint + newTabHint + (taskAttachmentText ? `\n\n${taskAttachmentText}` : ""),
@@ -1915,6 +1982,7 @@ async function runBuAutonomousAgentLoopInner(
         visionImages,
         nudges,
         taskBrief: buildTaskBriefForStep(),
+        runBrief: runBriefText,
         taskAttachmentImages:
           step <= ATTACHMENT_IMAGE_STEPS ? taskAttachmentImages : [],
       });
@@ -2229,10 +2297,13 @@ async function runBuAutonomousAgentLoopInner(
       );
 
       // P4.5：暂停后不继续 multi_act；继续后从观察步恢复（丢弃本步已决策动作）
+      let pausedBeforeAct = false;
       if (deps.awaitUserPauseGate && (await deps.awaitUserPauseGate())) {
         forceObserveNext = true;
-        continue;
+        pausedBeforeAct = true;
       }
+      if (tryUserSuccessFinish()) break;
+      if (pausedBeforeAct) continue;
 
       /*
        * 本步动作**开始前**的 URL。
@@ -2250,6 +2321,34 @@ async function runBuAutonomousAgentLoopInner(
       // id 是按「页序号」生成的，新页永远追加在末尾，所以只比较数量即可拿到新增标签。
       const tabCountBefore = countLivePages(activePage);
 
+      // L1 动作证据旁路：仅 Agent multiAct；不进 prepareObservation / 聊天
+      const actionSelector =
+        actions
+          .map((a) => {
+            const p = a.params as Record<string, unknown> | undefined;
+            return typeof p?.cssSelector === "string"
+              ? p.cssSelector
+              : typeof p?.selector === "string"
+                ? p.selector
+                : "";
+          })
+          .find((s) => s.trim().length > 0) ?? null;
+      let evidenceHandle: ReturnType<typeof beginActionEvidence> | null = null;
+      try {
+        evidenceHandle = beginActionEvidence(activePage, { selector: actionSelector });
+      } catch {
+        evidenceHandle = null;
+      }
+
+      deps.logger.emitAgentEvent({
+        eventKind: "step_action",
+        msg: `第 ${step} 步执行：${actions.map((a) => a.name).join(", ")}`,
+        phase: "act",
+        step,
+        profileId,
+        data: { actionName: actions.map((a) => a.name).join(",") },
+      });
+
       const results = await multiAct(actions, {
         page: activePage,
         logger: deps.logger,
@@ -2257,6 +2356,7 @@ async function runBuAutonomousAgentLoopInner(
         browserState,
         fileSystem,
         profileId,
+        fillDataLedger,
         goal: deps.goal,
         step,
         requestConfirm: async (req) => {
@@ -2346,6 +2446,7 @@ async function runBuAutonomousAgentLoopInner(
         resolveCaptchaSecret: deps.resolveCaptchaSecret,
         // 用户自定义规则运行态：done 闸门（actions.done）与主循环巡检共用同一份命中记录
         taskRules,
+        recordingHardCases: enableRecording ? recordingHardCases : undefined,
         // 本步页面事实：当前页是否就是任务检索词的结果页（done 闸门的 submitted 核销要用）
         pageFacts: { serpForQuery: pageKind.serpLike && queryMatched },
         // 每步一次的「视觉找回」预算：index 失效时用来把目标从画面上找回来，用尽即回到普通失败
@@ -2353,6 +2454,52 @@ async function runBuAutonomousAgentLoopInner(
         screenshotAfterMutation: () =>
           lastVisionObservationStep >= 0 && lastVisionObservationStep > evidenceLedger.lastMutationStep,
       });
+
+      // C4：动作后等副作用（下载落盘），再进台账核销
+      try {
+        const side = await awaitPendingArtifacts(activePage.context(), { timeoutMs: 5_000 });
+        if (side.pendingLeft > 0) {
+          deps.logger.emitAgentEvent({
+            eventKind: "note",
+            msg: `下载尚未全部落盘（仍有 ${side.pendingLeft} 项在途），本步台账可能未齐`,
+            phase: "settle",
+            step,
+            profileId,
+          });
+        }
+      } catch {
+        /* best_effort */
+      }
+
+      // L1 证据收尾 → 只进内存 ring / RunBrief
+      if (evidenceHandle) {
+        try {
+          const evidence = await evidenceHandle.settle();
+          const summary = summarizeEvidenceForBrief(evidence);
+          evidenceRing.push({
+            step,
+            actionNames: actions.map((a) => a.name),
+            summary: results.some((r) => r.error)
+              ? `fail:${String(results.find((r) => r.error)?.error ?? "").slice(0, 80)}`
+              : "ok",
+            verifyVerdict: results.some((r) => r.error) ? "error" : "ok",
+            domBefore: typeof summary.domBefore === "string" ? summary.domBefore : undefined,
+            domAfter: typeof summary.domAfter === "string" ? summary.domAfter : undefined,
+            networkJson: summary.networkJson,
+            domCapture: typeof summary.domCapture === "string" ? summary.domCapture : undefined,
+            networkCapture: typeof summary.networkCapture === "string" ? summary.networkCapture : undefined,
+          });
+        } catch {
+          evidenceHandle.dispose();
+          evidenceRing.push({
+            step,
+            actionNames: actions.map((a) => a.name),
+            summary: "evidence_unavailable",
+            domCapture: "unavailable",
+            networkCapture: "empty",
+          });
+        }
+      }
 
       for (const r of results) {
         if (r.error) {
@@ -2415,6 +2562,7 @@ async function runBuAutonomousAgentLoopInner(
 
       // 契约逐项核销：每步都用**确定性验证器**过一遍剩余交付物，
       // 已完成的当场勾掉（下一轮提示词里的清单会同步变短），done 时只剩真正没做的项。
+      const pendingBeforeSettle = listPendingDeliverables(deliverableLedger).length;
       recordDeliverableProgress({
         ledger: deliverableLedger,
         evidence: evidenceLedger,
@@ -2435,6 +2583,45 @@ async function runBuAutonomousAgentLoopInner(
           .slice(0, 120),
         logger: deps.logger,
       });
+
+      // Phase 4：本步把台账从「有待办」核销到空 → 引擎达成即停（支付/凭证闸门仍最先）
+      const pendingAfterSettle = listPendingDeliverables(deliverableLedger).length;
+      if (!finished && pendingBeforeSettle > 0 && pendingAfterSettle === 0) {
+        const credentialSnapshot = browserState?.selectorMap
+          ? [...browserState.selectorMap.values()]
+          : null;
+        const credentialProbeFailed = credentialSnapshot == null;
+        const hasPendingCredential = credentialProbeFailed
+          ? true
+          : findPendingHumanCredentials(credentialSnapshot).length > 0;
+        const blocked = blocksRuleAutoComplete({
+          goal: deps.goal,
+          lexicon: loadCompletionLexicon(),
+          humanPaymentConfirmed: evidenceLedger.humanPaymentConfirmed === true,
+          hasPendingCredential,
+        });
+        if (!blocked && !credentialProbeFailed && !hasPendingCredential) {
+          doneSuccess = true;
+          doneSummary = "交付物台账已全部核销，引擎达成即停。";
+          finished = true;
+          deps.logger.emitAgentEvent({
+            eventKind: "deliverable_done",
+            msg: doneSummary,
+            phase: "done",
+            step,
+            profileId,
+            state: "complete",
+          });
+        } else if (blocked) {
+          deps.logger.emitAgentEvent({
+            eventKind: "gate_reject",
+            msg: `台账已空但仍被红线闸门拦住：${blocked}`,
+            phase: "verify",
+            step,
+            profileId,
+          });
+        }
+      }
 
       // 用户自定义规则巡检：DOM 规则每步核对；命中「完成条件 + 命中即完成」时主动收尾。
       // 图片类规则按预算抽样（每任务默认 8 次），避免把模型调用烧穿；
@@ -2856,7 +3043,14 @@ async function runBuAutonomousAgentLoopInner(
   }
 
   if (settings.useJudge && messageManager.history.length > 0 && !completionAsked) {
-    if (
+    // 用户点「成功」已人工确认完成：跳过 LLM 评判（避免「解析失败」误伤标题，也省一轮 token）
+    if (userMarkedSuccess) {
+      deps.logger.agentProgress("验收评判：跳过（用户标记成功）", {
+        phase: "judge",
+        skipped: true,
+        reason: "user_success",
+      });
+    } else if (
       shouldSkipJudge({
         successClaimed: doneSuccess,
         history: messageManager.history,
@@ -2905,67 +3099,156 @@ async function runBuAutonomousAgentLoopInner(
   }
 
   // 勾选录制且任务成功：经 agentTrajectory → Rust 落库 → 前端「轨迹记忆」
+  // enableRecording=false 时绝不写盘/落库（禁止强制录制）
   if (enableRecording) {
     if (!doneSuccess) {
       deps.logger.agentProgress("任务未成功，未写入轨迹记忆", {
         phase: "record",
         skipped: true,
       });
-    } else if (recordedSteps.length === 0) {
-      deps.logger.agentProgress(
-        "录制已开启但无可用步骤（可能均为临时 ID 选择器被过滤）",
-        { phase: "record", skipped: true },
-      );
     } else {
-      try {
-        const actions: TrajectoryStep[] = recordedSteps.map((s, i) => ({
-          ...s,
-          step: i + 1,
-        }));
-        assertPersistableTrajectorySteps(actions);
-        const domainHint =
-          actions.find((a) => a.type === "navigate" && a.url)?.url ||
-          actions.find((a) => a.url)?.url ||
-          startUrl;
-        const payload = buildTrajectoryPayload({
-          goal: deps.goal,
-          startUrl: startUrl || domainHint,
-          actions,
-          domain: domainFromUrl(domainHint),
+      // 用户点「成功」：收尾前再确保有 user_success 终点步（缺则补）
+      if (userMarkedSuccess && !recordedSteps.some((s) => s.type === "user_success")) {
+        const urlNow = (() => {
+          try {
+            return activePage.url();
+          } catch {
+            return startUrl;
+          }
+        })();
+        recordedSteps.push({
+          type: "user_success",
+          selector: "",
+          label: "用户标记成功",
+          url: urlNow,
         });
-        // 先磁盘（强校验）再 DB/事件，避免库里留下不可回放脏数据
-        let filePath: string | undefined;
-        try {
-          filePath = await persistTrajectoryToDisk(payload);
-        } catch (diskErr) {
-          deps.logger.agentProgress(
-            `轨迹磁盘写入失败，仍尝试落库：${
-              diskErr instanceof Error ? diskErr.message : String(diskErr)
-            }`.slice(0, 180),
-            { phase: "record", warn: true },
-          );
-        }
-        deps.logger.agentTrajectory({
-          ...payload,
-          profileId,
-          runId: agentRunId,
-          ...(filePath ? { filePath } : {}),
-        });
+      }
+
+      const rawActions: TrajectoryStep[] = recordedSteps.map((s, i) => ({
+        ...s,
+        step: i + 1,
+      }));
+      const filtered = filterPersistableTrajectorySteps(rawActions);
+      if (filtered.dropped.length > 0) {
         deps.logger.agentProgress(
-          `轨迹已录制 ${actions.length} 步 · ${payload.title}`,
+          `录制跳过 ${filtered.dropped.length} 个不可落库步骤（临时 ID / 残缺锚点等）`,
           {
             phase: "record",
-            domain: payload.domain,
-            steps: actions.length,
-            filePath: filePath ?? null,
+            warn: true,
+            dropped: filtered.dropped.slice(0, 12),
           },
         );
-        noteThought(`轨迹已录制 ${actions.length} 步`);
-      } catch (err) {
+      }
+
+      // assert 仍失败时：再滤一次；至少保留 user_success（用户标记成功）后重试一次
+      const ensurePersistable = (actions: TrajectoryStep[]): TrajectoryStep[] => {
+        try {
+          assertPersistableTrajectorySteps(actions);
+          return actions;
+        } catch (firstErr) {
+          const retry = filterPersistableTrajectorySteps(actions);
+          if (userMarkedSuccess && !retry.actions.some((a) => a.type === "user_success")) {
+            const urlNow = (() => {
+              try {
+                return activePage.url();
+              } catch {
+                return startUrl;
+              }
+            })();
+            retry.actions.push({
+              step: retry.actions.length + 1,
+              type: "user_success",
+              selector: "",
+              label: "用户标记成功",
+              url: urlNow,
+            });
+            // 重编号
+            for (let i = 0; i < retry.actions.length; i += 1) {
+              retry.actions[i] = { ...retry.actions[i], step: i + 1 };
+            }
+          }
+          if (retry.actions.length === 0) {
+            throw firstErr instanceof Error
+              ? firstErr
+              : new Error(String(firstErr ?? "轨迹无可落库步骤"));
+          }
+          assertPersistableTrajectorySteps(retry.actions);
+          deps.logger.agentProgress(
+            `轨迹校验失败后已丢弃坏步并重试落库（保留 ${retry.actions.length} 步）`,
+            {
+              phase: "record",
+              warn: true,
+              reason: firstErr instanceof Error ? firstErr.message : String(firstErr),
+            },
+          );
+          return retry.actions;
+        }
+      };
+
+      if (filtered.actions.length === 0) {
         deps.logger.agentProgress(
-          `轨迹落库失败：${err instanceof Error ? err.message : String(err)}`.slice(0, 200),
-          { phase: "record", error: true },
+          "录制已开启但无可用步骤（可能均为临时 ID 选择器被过滤），未写入轨迹记忆",
+          { phase: "record", skipped: true, error: true },
         );
+      } else {
+        try {
+          const actions = ensurePersistable(filtered.actions);
+          const domainHint =
+            actions.find((a) => a.type === "navigate" && a.url)?.url ||
+            actions.find((a) => a.url)?.url ||
+            startUrl;
+          const replayHints = buildReplayHintsFromReasons(recordingHardCases);
+          const payload = buildTrajectoryPayload({
+            goal: deps.goal,
+            startUrl: startUrl || domainHint,
+            actions,
+            domain: domainFromUrl(domainHint),
+            replayHints,
+          });
+          // 先磁盘（强校验）再 DB/事件，避免库里留下不可回放脏数据
+          let filePath: string | undefined;
+          try {
+            filePath = await persistTrajectoryToDisk(payload);
+          } catch (diskErr) {
+            deps.logger.agentProgress(
+              `轨迹磁盘写入失败，仍尝试落库：${
+                diskErr instanceof Error ? diskErr.message : String(diskErr)
+              }`.slice(0, 180),
+              { phase: "record", warn: true, error: true },
+            );
+          }
+          // DB/IPC 的 actions：首项嵌入 replayHints（无 schema 迁移）；必须发 agent_trajectory 事件
+          deps.logger.agentTrajectory({
+            ...payload,
+            actions: packActionsWithReplayHints(payload.actions, replayHints),
+            profileId,
+            runId: agentRunId,
+            ...(filePath ? { filePath } : {}),
+          });
+          const hintNote =
+            replayHints.needsHuman || replayHints.nonMechanical
+              ? ` · 含难点（${replayHints.reasons.join("/") || "需人工"}），不宜当纯机械批量`
+              : "";
+          deps.logger.agentProgress(
+            `轨迹已录制 ${actions.length} 步 · ${payload.title}${hintNote}${
+              filePath ? ` · ${filePath}` : ""
+            }`,
+            {
+              phase: "record",
+              domain: payload.domain,
+              steps: actions.length,
+              filePath: filePath ?? null,
+              replayHints,
+              userMarkedSuccess,
+            },
+          );
+          noteThought(`轨迹已录制 ${actions.length} 步`);
+        } catch (err) {
+          deps.logger.agentProgress(
+            `轨迹落库失败：${err instanceof Error ? err.message : String(err)}`.slice(0, 200),
+            { phase: "record", error: true },
+          );
+        }
       }
     }
   }

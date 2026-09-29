@@ -949,7 +949,7 @@ export class OmniActionGateway {
   recordClick(partial: {
     selector: string;
     label?: string;
-    coords?: { x: number; y: number };
+    coords?: TrajectoryCoord;
     postCondition?: TrajectoryPostCondition;
   }): void {
     this.pushTrajectory(

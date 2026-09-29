@@ -279,6 +279,38 @@ pub fn export_text_to_download_dir(
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// 打开「常规下载目录」或「数据目录」根路径（不存在则先创建）。
+/// `track`: `"browser"` | `"scraper"`（兼容别名 `"download"` / `"data"`）。
+#[tauri::command]
+pub fn open_download_dir(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    track: String,
+) -> Result<String, AppError> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+    let (browser, scraper) = crate::storage_paths::resolve_download_roots(&app, &connection)?;
+    drop(connection);
+    let normalized = track.trim().to_ascii_lowercase();
+    let path = match normalized.as_str() {
+        "scraper" | "data" => scraper,
+        "browser" | "download" | "downloads" => browser,
+        other => {
+            return Err(AppError::Validation(format!(
+                "unknown download track: {other} (use browser or scraper)"
+            )));
+        }
+    };
+    std::fs::create_dir_all(&path).map_err(|error| {
+        AppError::Filesystem(format!("create download dir failed: {error}"))
+    })?;
+    let path_str = path.to_string_lossy().into_owned();
+    open_path_in_os(path_str.clone())?;
+    Ok(path_str)
+}
+
 #[tauri::command]
 pub fn get_proxies(state: State<'_, AppState>) -> Result<Vec<Proxy>, AppError> {
     let connection = state

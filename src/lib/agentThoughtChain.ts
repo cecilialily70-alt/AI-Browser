@@ -32,6 +32,21 @@ const ALERT_RE =
 const JUDGE_RE = /bu_agent_judge|验收评判/i;
 
 /**
+ * 评判行是否失败：优先看「未通过」与通过/跳过标记；禁止裸匹配「失败」
+ * （「解析失败，回退…」是成功回退路径，不是整步失败）。
+ */
+function judgeLineFailed(text: string): boolean {
+  const raw = String(text ?? "");
+  if (/未通过/.test(raw)) return true;
+  if (/通过|跳过/.test(raw) && !/未通过/.test(raw)) return false;
+  if (/解析失败[，,]\s*回退/.test(raw)) return false;
+  if (/\bfalse\b/i.test(raw) && !/通过/.test(raw)) return true;
+  // 裸「失败」仅在没有通过/回退语境时算失败（如「验收评判：失败」）
+  if (/失败/.test(raw)) return !/通过|跳过|回退/.test(raw);
+  return false;
+}
+
+/**
  * 去掉【…】标注块：标注属于元数据，不参与**动作词**判定。
  * 否则「【页面阅读·…·无需滚动】」里的「滚动」会把一次页面阅读误判成滚动动作。
  * 注意只用于动作判定：类型信号（如「页面阅读」本身）仍要从全文里读。
@@ -150,7 +165,7 @@ export function classifyAgentMonitorLine(line: TerminalLine): ClassifiedAgentLin
 
   // 自动验收评判 ≠ 人工协同
   if (JUDGE_RE.test(text)) {
-    const failed = /未通过|false|失败/i.test(text);
+    const failed = judgeLineFailed(text);
     return {
       kind: failed ? "error" : "success",
       title: "验收评判",
@@ -268,6 +283,11 @@ export function inferAgentLineKind(
     return undefined;
   }
   const actionProbe = stripAnnotations(raw);
+  // 评判行优先于 tone=error（避免「解析失败，回退」被标成整步失败）
+  if (JUDGE_RE.test(raw)) {
+    const failed = judgeLineFailed(raw);
+    return { kind: failed ? "error" : "success", meta: { tool: "judge" } };
+  }
   if (tone === "error" || state === "failed") {
     return { kind: "error" };
   }
@@ -292,10 +312,6 @@ export function inferAgentLineKind(
   if (ANALYZE_RE.test(raw)) {
     return { kind: "thought", meta: { tool: "analyze", detail: raw } };
   }
-  if (JUDGE_RE.test(raw)) {
-    const failed = /未通过|false|失败/i.test(raw);
-    return { kind: failed ? "error" : "success", meta: { tool: "judge" } };
-  }
   if (THOUGHT_RE.test(raw) && !ACTION_RE.test(actionProbe)) {
     return { kind: "thought", meta: { detail: raw } };
   }
@@ -312,4 +328,54 @@ export function inferAgentLineKind(
     };
   }
   return undefined;
+}
+
+/**
+ * 协议 eventKind → TerminalLine.kind（C6：禁止协议串直灌 UI kind）。
+ * 未知 eventKind 返回 undefined，交由文案正则回落。
+ */
+function mapAgentEventKindToLineKind(
+  eventKind: string | undefined | null,
+): AgentThoughtKind | undefined {
+  const k = String(eventKind ?? "").trim();
+  if (!k) return undefined;
+  switch (k) {
+    case "step_observe":
+      return "perceive";
+    case "step_start":
+    case "note":
+    case "deliverable_progress":
+      return "thought";
+    case "step_action":
+    case "action_ok":
+      return "action";
+    case "action_blocked":
+    case "gate_reject":
+    case "hitl":
+      return "alert";
+    case "action_fail":
+    case "run_failed":
+      return "error";
+    case "deliverable_done":
+    case "run_complete":
+      return "success";
+    case "run_aborted":
+      return "system";
+    default:
+      return undefined;
+  }
+}
+
+/** 优先 eventKind 映射，否则文案推断 */
+export function resolveAgentLineKind(
+  text: string,
+  tone: TerminalLine["tone"],
+  state?: string,
+  eventKind?: string | null,
+): Pick<TerminalLine, "kind" | "meta"> | undefined {
+  const mapped = mapAgentEventKindToLineKind(eventKind);
+  if (mapped) {
+    return { kind: mapped };
+  }
+  return inferAgentLineKind(text, tone, state);
 }

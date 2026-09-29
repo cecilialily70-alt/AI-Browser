@@ -247,7 +247,7 @@ export function detectCaptchaStrategy(input: {
  * 避免把普通页面误当成闸门而劫持任务。
  */
 const CAPTCHA_GATE_RE =
-  /captcha|验证码|人机验证|安全验证|安全校验|滑块验证|点选验证|拖动滑块|按住滑块|按顺序点击|请依次点击|完成验证|验证失败|环境异常|访问验证|长按(按钮|按鈕)|長按(按鈕|按鍵)|按住(按钮|按鈕|不放|別放|别放)|按著不放|press\s*(and|&)\s*hold|touch\s*(and|&)\s*hold|arkose|funcaptcha|fc-iframe|verify\s*you\s*are\s*human|are\s*you\s*a\s*robot|checking\s*your\s*browser|just\s*a\s*moment|cf[- ]?challenge/i;
+  /captcha|验证码|人机验证|安全验证|安全校验|滑块验证|点选验证|拖动滑块|按住滑块|按顺序点击|请依次点击|完成验证|验证失败|环境异常|访问验证|长按(按钮|按鈕)|長按(按鈕|按鍵)|按住(按钮|按鈕|不放|別放|别放)|按著不放|press\s*(and|&)\s*hold|touch\s*(and|&)\s*hold|arkose|funcaptcha|fc-iframe|verify\s*you\s*are\s*human|are\s*you\s*a\s*robot|checking\s*your\s*browser|just\s*a\s*moment|cf[- ]?challenge|證明您是人類|证明您是人类|讓我們證明您是|让我们证明您是|prove\s*(that\s*)?you\s*(are\s*)?(a\s*)?human/i;
 
 export interface CaptchaGateSignal {
   /** 当前页是否出现人机验证语义 */

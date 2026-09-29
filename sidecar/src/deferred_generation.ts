@@ -18,8 +18,6 @@ import {
 import { formatConstraintForInputType } from "./semantic_sniff.js";
 import { hash32 } from "./core/hash32.js";
 
-export { hash32 };
-
 export type FieldOverrideMode = "fixed" | "ai_prompt";
 
 export interface FieldOverrideSpec {
@@ -151,6 +149,238 @@ export function interpolateTemplate(
     return lookupPath(ctx, path);
   });
 }
+
+function fieldSemanticsHint(label: string, inputType?: string): string {
+  return `${label} ${inputType ?? ""}`.trim();
+}
+
+/** 密码 / OTP / 卡号等：禁止 AI 盲盒，空值须用户在沙盘或数据集提供（R2） */
+export function isMustUserProvideField(label: string, inputType?: string): boolean {
+  const type = String(inputType ?? "").trim().toLowerCase();
+  if (type === "password") {
+    return true;
+  }
+  return /password|passwd|pwd|otp|token|card|cvv|ssn|密码|密碼|驗證|验证码|口令|pin\b/i.test(
+    fieldSemanticsHint(label, inputType),
+  );
+}
+
+/**
+ * 一次性码 / 卡号等：回放也绝不可本地编造（R2）。
+ * 普通「注册密码」除外——录制值已脱敏，回放可用确定性测试密码开新号。
+ */
+export function isOneTimeOrPaymentSecretField(label: string, inputType?: string): boolean {
+  const type = String(inputType ?? "").trim().toLowerCase();
+  if (type === "password") {
+    return false;
+  }
+  return /otp|token|card|cvv|ssn|totp|sms|驗證碼|验证码|校验码|校驗碼|卡号|卡號|信用卡/i.test(
+    fieldSemanticsHint(label, inputType),
+  );
+}
+
+/** 是否像「注册/登录用的密码框」（可走确定性回放密码） */
+export function isReplayablePasswordField(label: string, inputType?: string): boolean {
+  const type = String(inputType ?? "").trim().toLowerCase();
+  if (type === "password") {
+    return !isOneTimeOrPaymentSecretField(label, inputType);
+  }
+  const hint = fieldSemanticsHint(label, inputType);
+  if (/otp|token|cvv|驗證碼|验证码/i.test(hint)) {
+    return false;
+  }
+  return /password|passwd|pwd|密码|密碼|口令/i.test(hint);
+}
+
+/** 邮箱 / 用户名：回放注册场景允许确定性本地兜底（非 OTP） */
+export function isEmailOrUsernameField(label: string, inputType?: string): boolean {
+  const type = String(inputType ?? "").trim().toLowerCase();
+  if (type === "email") {
+    return true;
+  }
+  return /email|e-?mail|郵箱|邮箱|電子郵件|电子邮箱|username|user[_-]?name|帳號|账号|用户名|登入名|登录名/i.test(
+    fieldSemanticsHint(label, inputType),
+  );
+}
+
+/**
+ * 姓名类（姓氏/名字/姓名）：回放注册允许确定性本地兜底。
+ * 排除用户名/显示名/昵称，避免和邮箱用户名兜底抢语义。
+ */
+export function isPersonNameField(label: string, inputType?: string): boolean {
+  const hint = fieldSemanticsHint(label, inputType);
+  if (
+    /username|user[_-]?name|display[_-]?name|顯示名|显示名|昵称|暱稱|公司名|店铺名|店名|商品名/i.test(
+      hint,
+    )
+  ) {
+    return false;
+  }
+  return /姓氏|名字|姓名|完整姓名|first[_-]?name|last[_-]?name|given[_-]?name|sur[_-]?name|family[_-]?name|full[_-]?name|lastNameInput|firstNameInput|\blastname\b|\bfirstname\b/i.test(
+    hint,
+  );
+}
+
+export type PersonNameKind = "last" | "first" | "full";
+
+export function personNameKind(label: string, inputType?: string): PersonNameKind | null {
+  if (!isPersonNameField(label, inputType)) {
+    return null;
+  }
+  const hint = fieldSemanticsHint(label, inputType);
+  if (/姓氏|last[_-]?name|sur[_-]?name|family[_-]?name|lastNameInput|\blastname\b/i.test(hint)) {
+    return "last";
+  }
+  if (/姓名|full[_-]?name|完整姓名/i.test(hint)) {
+    return "full";
+  }
+  if (/名字|first[_-]?name|given[_-]?name|firstNameInput|\bfirstname\b/i.test(hint)) {
+    return "first";
+  }
+  return "full";
+}
+
+function isEmailSemantics(label: string, inputType?: string): boolean {
+  const type = String(inputType ?? "").trim().toLowerCase();
+  if (type === "email") {
+    return true;
+  }
+  return /email|e-?mail|郵箱|邮箱|電子郵件|电子邮箱/i.test(fieldSemanticsHint(label, inputType));
+}
+
+/** ASCII 姓名表：微软等注册页中英皆可；按 seed 取下标，可复现 */
+const REPLAY_LAST_NAMES = [
+  "Chen",
+  "Lin",
+  "Wang",
+  "Zhang",
+  "Li",
+  "Huang",
+  "Wu",
+  "Liu",
+  "Tsai",
+  "Yang",
+] as const;
+const REPLAY_FIRST_NAMES = [
+  "Ming",
+  "Wei",
+  "Jia",
+  "Ting",
+  "Hao",
+  "Jun",
+  "Mei",
+  "Yu",
+  "Hong",
+  "Han",
+] as const;
+
+function pickBySeed<T extends readonly string[]>(table: T, seed: number): T[number] {
+  const idx = Math.abs(seed) % table.length;
+  return table[idx]!;
+}
+
+function buildDeterministicPersonName(
+  kind: PersonNameKind,
+  templateExtra?: Record<string, unknown> | null,
+  persona?: PersonaData | null,
+): string {
+  const fromPersonaLast = String(persona?.lastName ?? "").trim();
+  const fromPersonaFirst = String(persona?.firstName ?? "").trim();
+  const fromPersonaFull = String(persona?.fullName ?? "").trim();
+  if (kind === "last" && fromPersonaLast) return fromPersonaLast;
+  if (kind === "first" && fromPersonaFirst) return fromPersonaFirst;
+  if (kind === "full" && fromPersonaFull) return fromPersonaFull;
+  if (kind === "full" && fromPersonaFirst && fromPersonaLast) {
+    return `${fromPersonaFirst} ${fromPersonaLast}`.trim();
+  }
+  if (kind === "last" && fromPersonaFull) {
+    const parts = fromPersonaFull.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return parts[parts.length - 1]!;
+  }
+  if (kind === "first" && fromPersonaFull) {
+    const parts = fromPersonaFull.split(/\s+/).filter(Boolean);
+    if (parts.length >= 1) return parts[0]!;
+  }
+
+  const seed =
+    deriveGenerationSeed(templateExtra, `name:${kind}`) ??
+    hash32(`name:${kind}:${String((templateExtra?.run as Record<string, unknown> | undefined)?.uniqueId ?? "0")}`);
+  const last = pickBySeed(REPLAY_LAST_NAMES, seed);
+  const first = pickBySeed(REPLAY_FIRST_NAMES, seed >>> 8);
+  if (kind === "last") return last;
+  if (kind === "first") return first;
+  return `${first} ${last}`;
+}
+
+/**
+ * 回放注册密码：确定性、可复现、满足常见站点复杂度（大写+小写+数字+符号，≥10 位）。
+ * 不是录制原值，也不经 AI（R2：不碰 OTP/token）。
+ */
+export function buildDeterministicReplayPassword(
+  templateExtra?: Record<string, unknown> | null,
+): string {
+  const run =
+    templateExtra?.run && typeof templateExtra.run === "object" && !Array.isArray(templateExtra.run)
+      ? (templateExtra.run as Record<string, unknown>)
+      : {};
+  const uniqueRaw = run.uniqueId ?? run.unique_id;
+  const uniqueId =
+    uniqueRaw != null && String(uniqueRaw).trim() !== "" ? String(uniqueRaw).trim() : null;
+  const seed = deriveGenerationSeed(templateExtra, "password");
+  const id = (uniqueId ?? (seed != null ? String(seed >>> 0) : "0")).replace(/[^a-zA-Z0-9]/g, "");
+  const body = ((id || "0") + "ReplayPad").slice(0, 12);
+  return `Aa1!${body}zZ`;
+}
+
+/**
+ * JIT / fast_text 返回空时的确定性本地值（§5.7）：优先 `run.uniqueId`，否则 seed / seq。
+ * 邮箱 / 用户名 / 姓名；密码请用 buildDeterministicReplayPassword；OTP 不得走此路径。
+ */
+export function buildDeterministicLocalValue(
+  label: string,
+  inputType: string | undefined,
+  templateExtra?: Record<string, unknown> | null,
+  persona?: PersonaData | null,
+): string | null {
+  if (isMustUserProvideField(label, inputType)) {
+    return null;
+  }
+  const nameKind = personNameKind(label, inputType);
+  if (nameKind) {
+    return buildDeterministicPersonName(nameKind, templateExtra, persona);
+  }
+  if (!isEmailOrUsernameField(label, inputType)) {
+    return null;
+  }
+  const run =
+    templateExtra?.run && typeof templateExtra.run === "object" && !Array.isArray(templateExtra.run)
+      ? (templateExtra.run as Record<string, unknown>)
+      : {};
+  const uniqueRaw = run.uniqueId ?? run.unique_id;
+  const uniqueId =
+    uniqueRaw != null && String(uniqueRaw).trim() !== "" ? String(uniqueRaw).trim() : null;
+  const seq = run.seq != null && String(run.seq).trim() !== "" ? String(run.seq).trim() : "0";
+  const envRaw = String(run.envId ?? run.env_id ?? "env").replace(/[^a-zA-Z0-9]/g, "");
+  const envTail = (envRaw || "env").slice(-6);
+  const seed = deriveGenerationSeed(templateExtra, label);
+  const id = uniqueId ?? (seed != null ? String(seed >>> 0) : `${envTail}${seq}`);
+  if (isEmailSemantics(label, inputType)) {
+    return `replay${id}@example.com`;
+  }
+  return `user${id}`;
+}
+
+function throwEmptyJitError(label: string, inputType?: string): never {
+  if (isMustUserProvideField(label, inputType)) {
+    throw new Error(
+      `敏感字段「${label}」AI 盲盒未返回可用值：请在沙盘填固定值或用数据集覆盖（禁止空填/编造 OTP）`,
+    );
+  }
+  throw new Error(
+    `AI 盲盒造数返回空值（${label}）：请改用沙盘固定值（可用 {{run.uniqueId}}）或数据集列覆盖`,
+  );
+}
+
 async function generateJustInTimeValue(input: {
   label: string;
   prompt: string;
@@ -163,8 +393,10 @@ async function generateJustInTimeValue(input: {
   templateExtra?: Record<string, unknown> | null;
 }): Promise<string> {
   const label = input.label.trim() || "字段";
-  if (/password|passwd|otp|token|card|cvv|ssn|密码|驗證|验证码/i.test(label)) {
-    throw new Error(`敏感字段「${label}」禁止 AI 盲盒生成`);
+  if (isMustUserProvideField(label, input.inputType)) {
+    throw new Error(
+      `敏感字段「${label}」禁止 AI 盲盒生成：请在沙盘填固定值或用数据集覆盖`,
+    );
   }
 
   const { route, client } = createModelRouter(input.aiSettings).forIntent(
@@ -224,7 +456,26 @@ async function generateJustInTimeValue(input: {
     .trim()
     .replace(/^["'`]+|["'`]+$/g, "");
   if (!text) {
-    throw new Error(`JIT 造数返回空值（${label}）`);
+    const local = buildDeterministicLocalValue(
+      label,
+      input.inputType,
+      input.templateExtra,
+      input.persona,
+    );
+    if (local) {
+      const kind = local.includes("@")
+        ? "email"
+        : personNameKind(label, input.inputType)
+          ? "name"
+          : "username";
+      input.logger.progress("sandbox_jit_local_fallback", {
+        label,
+        inputType: input.inputType ?? null,
+        kind,
+      });
+      return local;
+    }
+    throwEmptyJitError(label, input.inputType);
   }
   return text;
 }

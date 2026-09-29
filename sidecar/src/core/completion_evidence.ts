@@ -31,6 +31,7 @@ export type EvidenceKind =
   | "choice_changed"
   | "overlay_cleared"
   | "content_extracted"
+  | "items_extracted"
   | "user_answered"
   | "screenshot_after_mutation"
   | "page_digest"
@@ -423,6 +424,35 @@ export function recordStepEvidence(ledger: EvidenceLedger, input: StepEvidenceIn
       const content = String(result?.extractedContent ?? "").trim();
       if (result?.error == null && content.length > 0) {
         ledger.facts.push({ kind: "content_extracted", step, url, detail: `${content.length} chars` });
+        // 数量债：优先读 metadata 条数；否则按 JSON 数组长度 / 换行条目估一记
+        const metaCount = Number(
+          (meta as { itemCount?: unknown; count?: unknown; rows?: unknown }).itemCount ??
+            (meta as { count?: unknown }).count ??
+            (Array.isArray((meta as { rows?: unknown }).rows)
+              ? ((meta as { rows: unknown[] }).rows.length)
+              : NaN),
+        );
+        let count = Number.isFinite(metaCount) && metaCount > 0 ? Math.floor(metaCount) : 0;
+        if (count <= 0) {
+          try {
+            const parsed = JSON.parse(content);
+            if (Array.isArray(parsed)) count = parsed.length;
+            else if (parsed && typeof parsed === "object" && Array.isArray((parsed as { items?: unknown }).items)) {
+              count = ((parsed as { items: unknown[] }).items).length;
+            }
+          } catch {
+            const lines = content.split(/\n+/).map((l) => l.trim()).filter((l) => l.length > 0);
+            count = lines.length >= 2 ? lines.length : 1;
+          }
+        }
+        if (count > 0) {
+          ledger.facts.push({
+            kind: "items_extracted",
+            step,
+            url,
+            detail: String(count),
+          });
+        }
       }
     }
     if (actionName === "ask_user") {

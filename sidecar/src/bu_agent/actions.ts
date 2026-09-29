@@ -108,6 +108,13 @@ import {
 import { CONFIRM_SKIP_THRESHOLD } from "../agent_confidence.js";
 import { PAGE_PIPELINE_CONFIG } from "../page_pipeline/config.js";
 import { registerAction, getActionHandler, type ActionContext } from "./registry.js";
+
+/** 录制难点标记（写入轨迹 hints，回放先说后跑） */
+function noteRecordingHardCase(ctx: ActionContext, reason: string): void {
+  const key = String(reason ?? "").trim();
+  if (!key || !ctx.recordingHardCases) return;
+  ctx.recordingHardCases.add(key);
+}
 import { extractPageReading, formatPageReadingForLlm } from "../page_read.js";
 import { summarizeCurrentPage } from "../core/page_summary.js";
 import { captureScreenshot } from "../core/safe_screenshot.js";
@@ -230,6 +237,37 @@ function elementLabelBlob(el: {
   return [el.text, el.placeholder, el.name, el.role, el.tagName, el.inputType ?? ""]
     .filter(Boolean)
     .join(" ");
+}
+
+/** preciseClick 落盘：优先点击点，否则用 selector 中心 → 相对视口坐标 */
+async function relativeCoordsForRecord(
+  page: Page,
+  point: { x: number; y: number } | null | undefined,
+  selector?: string,
+): Promise<{ x: number; y: number; unit: "relative" } | undefined> {
+  const vp = page.viewportSize();
+  if (!vp || vp.width <= 0 || vp.height <= 0) {
+    return undefined;
+  }
+  let px = point && Number.isFinite(point.x) ? point.x : NaN;
+  let py = point && Number.isFinite(point.y) ? point.y : NaN;
+  if (!Number.isFinite(px) || !Number.isFinite(py)) {
+    const sel = String(selector ?? "").trim();
+    if (!sel) {
+      return undefined;
+    }
+    const box = await page.locator(sel).first().boundingBox().catch(() => null);
+    if (!box) {
+      return undefined;
+    }
+    px = box.x + box.width / 2;
+    py = box.y + box.height / 2;
+  }
+  return {
+    x: Math.min(1, Math.max(0, Number(px) / vp.width)),
+    y: Math.min(1, Math.max(0, Number(py) / vp.height)),
+    unit: "relative",
+  };
 }
 
 /** Playwright 选择器：xpath 路径必须带 xpath= 前缀，否则会被当 CSS 解析失败 */
@@ -446,8 +484,145 @@ function dropdownSelectionApplied(afterShown: string, wanted: string, beforeShow
   return false;
 }
 
+/** 索引元素是否像下拉选项 / 菜单项（含 listbox 下无 role 的 li） */
+function isListOptionRef(el: IndexedElementRef): boolean {
+  const role = String(el.role ?? "").toLowerCase();
+  if (role === "option" || role === "menuitem") return true;
+  const tag = String(el.tagName || "").toUpperCase();
+  return tag === "OPTION";
+}
+
+/** DOM 侧确认：当前节点是可见 listbox/menu 里的选项 */
+async function elementIsListOption(scope: DomScope, playwrightSelector: string): Promise<boolean> {
+  if (!playwrightSelector) return false;
+  try {
+    return await scope.locator(playwrightSelector).first().evaluate((node) => {
+      const el = node as Element;
+      const role = (el.getAttribute("role") || "").toLowerCase();
+      if (role === "option" || role === "menuitem") return true;
+      if (el.tagName === "OPTION") return true;
+      if (el.tagName === "LI") {
+        return Boolean(el.closest('[role="listbox"], [role="menu"], ul[role="listbox"]'));
+      }
+      return false;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 从选项反查所属 combobox / 触发器选择器（用于落值回读）。
+ * 优先 aria-controls / aria-expanded，再近邻祖先内的 combobox。
+ */
+async function resolveOwningComboboxSelector(
+  scope: DomScope,
+  optionPlaywrightSelector: string,
+): Promise<string> {
+  if (!optionPlaywrightSelector) return "";
+  try {
+    return await scope.locator(optionPlaywrightSelector).first().evaluate((node) => {
+      const el = node as HTMLElement;
+      const doc = el.ownerDocument;
+      const cssEscape = (value: string): string => {
+        if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+        return value.replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1");
+      };
+      const buildSelector = (target: Element): string => {
+        const htmlEl = target as HTMLElement;
+        const id = (htmlEl.id || "").trim();
+        if (id && !/^\d+$/.test(id)) {
+          try {
+            if (doc.querySelectorAll(`#${cssEscape(id)}`).length === 1) return `#${cssEscape(id)}`;
+          } catch {
+            /* ignore */
+          }
+        }
+        for (const attr of ["data-testid", "data-test", "name", "aria-label"]) {
+          const value = (target.getAttribute(attr) || "").trim();
+          if (!value) continue;
+          const candidate = `${target.tagName.toLowerCase()}[${attr}="${value.replace(/"/g, '\\"')}"]`;
+          try {
+            if (doc.querySelectorAll(candidate).length === 1) return candidate;
+          } catch {
+            /* ignore */
+          }
+        }
+        const parts: string[] = [];
+        let cur: Element | null = target;
+        while (cur && cur.nodeType === 1 && parts.length < 14) {
+          const tag = cur.tagName.toLowerCase();
+          const parent: Element | null = cur.parentElement;
+          if (!parent) {
+            parts.unshift(tag);
+            break;
+          }
+          const siblings = Array.from(parent.children).filter((c) => c.tagName === cur!.tagName);
+          parts.unshift(siblings.length <= 1 ? tag : `${tag}[${siblings.indexOf(cur) + 1}]`);
+          cur = parent;
+        }
+        return `xpath=/${parts.join("/")}`;
+      };
+
+      const list = el.closest('[role="listbox"], [role="menu"]') as HTMLElement | null;
+      if (list?.id) {
+        const owner = doc.querySelector(
+          `[aria-controls="${cssEscape(list.id)}"], [aria-owns="${cssEscape(list.id)}"]`,
+        );
+        if (owner) return buildSelector(owner);
+      }
+
+      const expanded = Array.from(
+        doc.querySelectorAll(
+          '[role="combobox"][aria-expanded="true"], [aria-haspopup][aria-expanded="true"]',
+        ),
+      );
+      if (expanded.length === 1) return buildSelector(expanded[0]!);
+
+      let container: Element | null = list?.parentElement ?? el.parentElement;
+      for (let depth = 0; container && depth < 6; depth += 1) {
+        const combo = container.querySelector('[role="combobox"], select');
+        if (combo && combo !== el) return buildSelector(combo);
+        container = container.parentElement;
+      }
+      if (expanded.length > 0) return buildSelector(expanded[0]!);
+      const any = doc.querySelector('[role="combobox"], select');
+      return any ? buildSelector(any) : "";
+    });
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 选项 click 后 fail-closed：所属 combobox 展示值须朝向选项文案变化。
+ * 找不到所属栏位时退回整表指纹变化（仍 fail-closed：无变化即失败）。
+ */
+async function verifyOptionSelectionApplied(
+  scope: DomScope,
+  optionPlaywrightSelector: string,
+  optionLabel: string,
+  beforeComboboxShown: string,
+  beforeFormFp: string,
+): Promise<{ ok: boolean; afterShown: string; choiceLabel: string }> {
+  const want = String(optionLabel || "").replace(/\s+/g, " ").trim();
+  const comboSel = await resolveOwningComboboxSelector(scope, optionPlaywrightSelector);
+  if (comboSel) {
+    const afterShown = await readComboboxShownValue(scope, comboSel);
+    const applied = dropdownSelectionApplied(afterShown, want, beforeComboboxShown);
+    return { ok: applied, afterShown, choiceLabel: want.slice(0, 80) };
+  }
+  const afterFp = await readFormValueFingerprint(scope);
+  const changed = Boolean(beforeFormFp && afterFp && beforeFormFp !== afterFp);
+  return {
+    ok: changed,
+    afterShown: changed ? "(form-fingerprint-changed)" : "",
+    choiceLabel: want.slice(0, 80),
+  };
+}
+
 /** 表单可见值指纹：evaluate / 下拉动作前后比对，真改了才算进展 */
-async function readFormValueFingerprint(page: Page): Promise<string> {
+async function readFormValueFingerprint(page: DomScope): Promise<string> {
   try {
     return await page.evaluate(() => {
       const bits: string[] = [];
@@ -1722,7 +1897,20 @@ export function registerAllActions(): void {
     }
 
     // 精确命中闭环：意图关联（复选框/单选框等）→ 命中自检 → 遮挡仲裁自愈 → 结果验证
-    const target = splitPlaywrightSelector(elementPlaywrightSelector(el));
+    const clickedSelector = elementPlaywrightSelector(el);
+    const optionLike =
+      isListOptionRef(el) || (await elementIsListOption(doc.scope, clickedSelector));
+    let beforeComboboxShown = "";
+    let beforeFormFp = "";
+    if (optionLike) {
+      const comboSel = await resolveOwningComboboxSelector(doc.scope, clickedSelector);
+      beforeComboboxShown = comboSel
+        ? await readComboboxShownValue(doc.scope, comboSel)
+        : "";
+      beforeFormFp = await readFormValueFingerprint(doc.scope);
+    }
+
+    const target = splitPlaywrightSelector(clickedSelector);
     const precise = await preciseClick(ctx.page, {
       selector: target.selector,
       xpath: target.xpath,
@@ -1740,7 +1928,50 @@ export function registerAllActions(): void {
       );
     }
     if (precise.ok) {
-      const popup = await ensurePopupOpened(doc.scope, elementPlaywrightSelector(el));
+      // 选项 click：不走「展开下拉」闸门，改走落值 fail-closed（B3）
+      if (optionLike) {
+        await doc.scope.waitForTimeout(200);
+        const verified = await verifyOptionSelectionApplied(
+          doc.scope,
+          clickedSelector,
+          label,
+          beforeComboboxShown,
+          beforeFormFp,
+        );
+        if (!verified.ok) {
+          return fail(
+            `已点击选项 [${index}] ${label}，但下拉栏未落值（当前显示「${(verified.afterShown || "空").slice(0, 40)}」）。请改用 select_dropdown 或重新观察后再点；不要按 Escape（会清空已选）。`,
+          );
+        }
+        ctx.failures?.settle(key);
+        if (paymentSubmitApproved && ctx.evidence) ctx.evidence.humanPaymentConfirmed = true;
+        try {
+          const recordSel = clickedSelector || `text=${label}`.slice(0, 120);
+          const coords = await relativeCoordsForRecord(ctx.page, precise.clickedPoint, recordSel);
+          gw.recordClick({
+            selector: recordSel,
+            label,
+            coords,
+          });
+        } catch {
+          /* 落盘失败不挡主流程 */
+        }
+        noteRecordingHardCase(ctx, "custom_dropdown");
+        return ok(`已选择选项 [${index}] ${label}（${precise.feedback}）`, {
+          metadata: {
+            hitPoint: precise.clickedPoint,
+            clickMethod: precise.method,
+            associated: precise.associated
+              ? { reason: precise.associated.reason, tag: precise.associated.tag }
+              : null,
+            choiceChanged: true,
+            choiceLabel: verified.choiceLabel,
+            clearedOverlay: precise.clearedOverlay,
+          },
+        });
+      }
+
+      const popup = await ensurePopupOpened(doc.scope, clickedSelector);
       if (popup === "closed") {
         return fail(
           `已命中 [${index}] ${label}，但下拉列表没有展开。不要把这一下当成已打开；请改用 select_dropdown(index, text) 直接选中选项，或重新观察后再点。`,
@@ -1749,7 +1980,6 @@ export function registerAllActions(): void {
       ctx.failures?.settle(key);
       if (paymentSubmitApproved && ctx.evidence) ctx.evidence.humanPaymentConfirmed = true;
       // B2：把「真的点过这个元素」记进 must_click 台账（元素级 matches，点击当刻判定）。
-      const clickedSelector = elementPlaywrightSelector(el);
       await noteTaskRuleClick(ctx.taskRules ?? null, {
         step: ctx.step ?? 0,
         label,
@@ -1762,6 +1992,18 @@ export function registerAllActions(): void {
             .catch(() => false);
         },
       }).catch(() => undefined);
+      // 录制完整性：preciseClick 成功不走 gw.click，须显式落 click 步，否则回放缺关键点击
+      try {
+        const recordSel = clickedSelector || `text=${label}`.slice(0, 120);
+        const coords = await relativeCoordsForRecord(ctx.page, precise.clickedPoint, recordSel);
+        gw.recordClick({
+          selector: recordSel,
+          label,
+          coords,
+        });
+      } catch {
+        /* 落盘失败不挡主流程 */
+      }
       const openedNote = popup === "open" ? "，下拉已展开" : "";
       return ok(`已点击 [${index}] ${label}（${precise.feedback}）${openedNote}${describeCompanionHint(el)}`, {
         metadata: {
@@ -1794,7 +2036,7 @@ export function registerAllActions(): void {
 
     // 非遮挡类失败：退回既有选择器点击路径（保持兼容）
     try {
-      await gw.click(elementPlaywrightSelector(el), {
+      await gw.click(clickedSelector, {
         semanticLabel: el.text,
         scope: doc.scope,
         offset: doc.offset,
@@ -1810,9 +2052,33 @@ export function registerAllActions(): void {
         throw err;
       }
     }
+    if (optionLike) {
+      await doc.scope.waitForTimeout(200);
+      const verified = await verifyOptionSelectionApplied(
+        doc.scope,
+        clickedSelector,
+        label,
+        beforeComboboxShown,
+        beforeFormFp,
+      );
+      if (!verified.ok) {
+        return fail(
+          `已点击选项 [${index}] ${label}，但下拉栏未落值（当前显示「${(verified.afterShown || "空").slice(0, 40)}」）。请改用 select_dropdown 或重新观察后再点；不要按 Escape（会清空已选）。`,
+        );
+      }
+      ctx.failures?.settle(key);
+      if (paymentSubmitApproved && ctx.evidence) ctx.evidence.humanPaymentConfirmed = true;
+      noteRecordingHardCase(ctx, "custom_dropdown");
+      return ok(`已选择选项 [${index}] ${label}（兜底选择器路径；${precise.feedback}）`, {
+        metadata: {
+          choiceChanged: true,
+          choiceLabel: verified.choiceLabel,
+        },
+      });
+    }
     ctx.failures?.settle(key);
     if (paymentSubmitApproved && ctx.evidence) ctx.evidence.humanPaymentConfirmed = true;
-    const popup = await ensurePopupOpened(doc.scope, elementPlaywrightSelector(el));
+    const popup = await ensurePopupOpened(doc.scope, clickedSelector);
     if (popup === "closed") {
       return fail(
         `已命中 [${index}] ${label}，但下拉列表没有展开。不要把这一下当成已打开；请改用 select_dropdown(index, text) 直接选中选项，或重新观察后再点。`,
@@ -2128,11 +2394,29 @@ export function registerAllActions(): void {
       ...(channelProvided ? { channelProvided: true } : {}),
     };
     if (verifyHit) {
+      ctx.fillDataLedger?.record({
+        label,
+        value,
+        fieldType: beforeField?.type ?? el.inputType,
+        url: tryPageUrl(ctx.page) || "",
+        source: "agent_input",
+        index,
+        humanOnly: humanCredential || null,
+      });
       return ok(
         `已输入 [${index}]: ${maskSensitive(value, beforeField?.type).slice(0, 80)}${suffix}。下一动作立即 click(index=${verifyHit.index})「${verifyHit.label}」，勿空等、勿再 solve_captcha。`,
         { metadata: fillMeta },
       );
     }
+    ctx.fillDataLedger?.record({
+      label,
+      value,
+      fieldType: beforeField?.type ?? el.inputType,
+      url: tryPageUrl(ctx.page) || "",
+      source: "agent_input",
+      index,
+      humanOnly: humanCredential || null,
+    });
     return ok(`已输入 [${index}]: ${maskSensitive(value, beforeField?.type).slice(0, 80)}${suffix}`, {
       metadata: fillMeta,
     });
@@ -2182,11 +2466,20 @@ export function registerAllActions(): void {
     }
     await target.bringToFront();
     ctx.setActivePage?.(target);
-    // 回放无法复现「切标签」语义，落盘为导航到该标签 URL
+    // P2：落盘为 wait_for_page（保留完整 URL/hash），回放等待或 goto；不再伪造成无语义的 navigate
     const finalUrl = target.url();
     if (finalUrl && !/^about:blank/i.test(finalUrl)) {
-      resolveGateway(target).recordNavigate(finalUrl);
+      const title = await target.title().catch(() => "");
+      resolveGateway(target).recordStep({
+        type: "wait_for_page",
+        selector: "",
+        url: finalUrl,
+        value: finalUrl,
+        label: `切标签·${tabId}`,
+        postCondition: { url: finalUrl, title: String(title || "").slice(0, 120) },
+      });
     }
+    noteRecordingHardCase(ctx, "switch_tab");
     return ok(`已切换到标签 ${tabId}`);
   });
 
@@ -2657,6 +2950,14 @@ export function registerAllActions(): void {
           scope: doc.scope,
           offset: doc.offset,
         });
+        ctx.fillDataLedger?.record({
+          label: String(label || el.tagName),
+          value: text,
+          fieldType: el.inputType,
+          url: tryPageUrl(ctx.page) || "",
+          source: "agent_select",
+          index,
+        });
         return ok(`已选择 [${index}] → ${text}`, {
           metadata: { choiceChanged: true, choiceLabel: text.slice(0, 80) },
         });
@@ -2666,32 +2967,78 @@ export function registerAllActions(): void {
       if (popup !== "open") {
         await target.click({ timeout: 3_000 });
         await doc.scope.waitForTimeout(250);
+        // P2：录下「打开下拉」点击，回放才能先展开再点选项
+        gw.recordClick({
+          selector: locator,
+          label: `${label}·打开下拉`,
+        });
       }
       const beforeShown = await readComboboxShownValue(doc.scope, locator);
 
-      // 真实指针点击（Playwright），不用合成 MouseEvent——Google Material 等自定义
-      // listbox 常忽略合成事件，表现为「回执已选中、栏位仍是占位」。
-      const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const exactRe = new RegExp(`^\\s*${escaped}\\s*$`);
-      const option = doc.scope
-        .locator('[role="option"], [role="menuitem"], [role="listbox"] li, ul[role="listbox"] li')
-        .filter({ hasText: exactRe })
-        .first();
-      try {
-        await option.click({ timeout: 4_000 });
-      } catch (clickErr) {
-        // 宽松回退：子串匹配（「3月」vs「3 月」）
-        const loose = doc.scope
-          .locator('[role="option"], [role="menuitem"], [role="listbox"] li, ul[role="listbox"] li')
-          .filter({ hasText: text })
-          .first();
-        try {
-          await loose.click({ timeout: 3_000 });
-        } catch {
-          const msg = clickErr instanceof Error ? clickErr.message : String(clickErr);
-          return fail(`select_dropdown 未选中「${text}」：${msg.slice(0, 240)}`);
+      // CloakBrowser isolated-world 不支持 Playwright internal:has-text=/…/（filter hasText RegExp）。
+      // 页内 evaluate 找可见选项，再对 ElementHandle 做真实点击。
+      const optionHandle = await doc.scope.evaluateHandle((wanted: string) => {
+        const normalize = (value: string) =>
+          String(value ?? "")
+            .replace(/\s+/g, "")
+            .toLowerCase();
+        const want = normalize(wanted);
+        const wantDigits = want.replace(/[^\d]/g, "");
+        const visible = (node: Element) => {
+          const style = getComputedStyle(node);
+          const rect = (node as HTMLElement).getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 2 &&
+            rect.height > 2
+          );
+        };
+        const textOf = (node: Element) =>
+          (node.textContent || "").replace(/\s+/g, " ").trim();
+        const lists = Array.from(
+          document.querySelectorAll('[role="listbox"], [role="menu"], ul[role="listbox"]'),
+        ).filter(visible);
+        const roots = lists.length > 0 ? lists : [document.body];
+        const candidates: Element[] = [];
+        for (const root of roots) {
+          for (const node of Array.from(
+            root.querySelectorAll('[role="option"], [role="menuitem"], li'),
+          )) {
+            if (visible(node)) candidates.push(node);
+          }
         }
+        let hit: Element | null = null;
+        for (const node of candidates) {
+          if (normalize(textOf(node)) === want) {
+            hit = node;
+            break;
+          }
+        }
+        if (!hit) {
+          for (const node of candidates) {
+            const t = normalize(textOf(node));
+            if (t.includes(want) || (wantDigits.length > 0 && t.includes(wantDigits))) {
+              hit = node;
+              break;
+            }
+          }
+        }
+        return hit;
+      }, text);
+      const optionEl = optionHandle.asElement();
+      if (!optionEl) {
+        await optionHandle.dispose().catch(() => undefined);
+        return fail(`select_dropdown 未找到选项「${text}」（可见 listbox/menu 内无匹配文案）`);
       }
+      try {
+        await optionEl.click({ timeout: 4_000 });
+      } catch (clickErr) {
+        await optionEl.dispose().catch(() => undefined);
+        const msg = clickErr instanceof Error ? clickErr.message : String(clickErr);
+        return fail(`select_dropdown 未选中「${text}」：${msg.slice(0, 240)}`);
+      }
+      await optionEl.dispose().catch(() => undefined);
       await doc.scope.waitForTimeout(200);
 
       const afterShown = await readComboboxShownValue(doc.scope, locator);
@@ -2701,7 +3048,19 @@ export function registerAllActions(): void {
           `select_dropdown 点击了「${text}」但下拉栏未落值（当前显示「${(afterShown || "空").slice(0, 40)}」）。请改点选项的独立 index，或等列表稳定后再试；不要按 Escape（会清空已选）。`,
         );
       }
-      gw.recordClick({ selector: `text=${text}`, label: text });
+      gw.recordClick({
+        selector: `text=${text}`,
+        label: `下拉选项·${text}`,
+      });
+      noteRecordingHardCase(ctx, "custom_dropdown");
+      ctx.fillDataLedger?.record({
+        label: String(label || el.tagName),
+        value: text,
+        fieldType: el.inputType,
+        url: tryPageUrl(ctx.page) || "",
+        source: "agent_select",
+        index,
+      });
       return ok(`已选择 [${index}] → ${text}`, {
         metadata: { choiceChanged: true, choiceLabel: text.slice(0, 80) },
       });
@@ -2800,6 +3159,18 @@ export function registerAllActions(): void {
   });
 
   registerAction("download", async (params, ctx) => {
+    noteRecordingHardCase(ctx, "download");
+    try {
+      resolveGateway(ctx.page).recordStep({
+        type: "download",
+        selector: "",
+        value: str(params.url || params.filename || params.file_name || "").slice(0, 200),
+        label: "下载（机械回放不支持）",
+        url: ctx.page.url(),
+      });
+    } catch {
+      /* ignore */
+    }
     const profileId = String(ctx.profileId || "unknown");
     const ordinal = Math.trunc(num(params.ordinal ?? params.nth));
     const urlParam = str(params.url).trim();
@@ -3023,6 +3394,7 @@ export function registerAllActions(): void {
    * 码不进轨迹/longTermMemory；短信/TOTP/支付 critical/图形验证码均禁止走本动作。
    */
   registerAction("fetch_email_otp", async (params, ctx) => {
+    noteRecordingHardCase(ctx, "otp");
     const channel = parseOtpChannel(ctx.otpChannel);
     if (!isOtpChannelConfigured(channel)) {
       return failKind(ctx, {
@@ -3190,6 +3562,7 @@ export function registerAllActions(): void {
    * 默认关；未启用/失败 → Layer 3 HITL。TOTP/支付 critical/邮箱/图形验证码禁止走本动作。
    */
   registerAction("fetch_sms_otp", async (params, ctx) => {
+    noteRecordingHardCase(ctx, "otp");
     const service = parseSmsOtpService(ctx.smsOtpService);
     if (!isSmsOtpServiceConfigured(service)) {
       return failKind(ctx, {
@@ -3343,6 +3716,7 @@ export function registerAllActions(): void {
   });
 
   registerAction("ask_user", async (params, ctx) => {
+    noteRecordingHardCase(ctx, "ask_user");
     const question = str(params.question || params.text).trim() || "请提供所需信息";
     // 通用：问「点哪个图标/语言球」不是 HITL，禁止空转 ask_user
     if (isVisualTargetQuestion(question)) {
@@ -3400,6 +3774,7 @@ export function registerAllActions(): void {
   });
 
   registerAction("handover_to_human", async (params, ctx) => {
+    noteRecordingHardCase(ctx, "handover");
     const reason = str(params.reason, "需要人工接管");
     const requestId = randomUUID();
     const pageUrl = ctx.page.url();
@@ -3513,6 +3888,20 @@ async function handleSolveCaptcha(
   params: Record<string, unknown>,
   ctx: ActionContext,
 ): Promise<ActionResult> {
+  noteRecordingHardCase(ctx, "captcha");
+  const forceStrategyEarly = str(params.strategy || params.force_strategy || "").slice(0, 64);
+  // P2：落盘占位步（不录 physics）；回放走 Layer1 或明确失败交人工
+  try {
+    resolveGateway(ctx.page).recordStep({
+      type: "solve_captcha",
+      selector: "",
+      value: forceStrategyEarly || "auto",
+      label: "验证码·Layer1",
+      url: ctx.page.url(),
+    });
+  } catch {
+    /* 落盘失败不挡求解 */
+  }
   const throwIfAborted = (signal?: AbortSignal) => {
     if (signal?.aborted) throw new Error("Agent 已中止");
   };
@@ -3520,7 +3909,7 @@ async function handleSolveCaptcha(
   const autoFill = bool(params.auto_fill ?? params.autoFill, true);
   const autoSubmit = bool(params.auto_submit ?? params.autoSubmit, true);
   const pageHint = str(params.page_hint || params.hint || ctx.goal).slice(0, 240);
-  const forceStrategy = str(params.strategy || params.force_strategy || "").slice(0, 64);
+  const forceStrategy = forceStrategyEarly;
 
   let unified;
   try {

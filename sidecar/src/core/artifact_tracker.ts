@@ -26,6 +26,8 @@ export interface ArtifactTrackerOptions {
 }
 
 const attached = new WeakSet<BrowserContext>();
+/** 每 context 的在途下载 Promise（供 awaitPendingArtifacts） */
+const pendingByContext = new WeakMap<BrowserContext, Set<Promise<void>>>();
 
 /**
  * 在一个浏览器上下文上安装下载记账（幂等：同一 context 只装一次）。
@@ -39,10 +41,13 @@ export function attachArtifactTracker(
   if (attached.has(context)) return;
   attached.add(context);
   const timeoutMs = options.pathTimeoutMs ?? 3_000;
+  const pending = new Set<Promise<void>>();
+  pendingByContext.set(context, pending);
 
   const watch = (page: Page): void => {
     page.on("download", (download) => {
-      void (async () => {
+      let job!: Promise<void>;
+      job = (async () => {
         const suggested = String(download.suggestedFilename?.() ?? "").trim();
         const url = String(download.url?.() ?? "");
         let savedPath: string | null = null;
@@ -69,12 +74,38 @@ export function attachArtifactTracker(
           phase: "artifact",
           source: url.slice(0, 120),
         });
-      })().catch(() => undefined);
+      })()
+        .catch(() => undefined)
+        .then(() => {
+          pending.delete(job);
+        });
+      pending.add(job);
     });
   };
 
   for (const page of context.pages()) watch(page);
   context.on("page", (page) => watch(page));
+}
+
+/**
+ * 等待本 context 在途下载落盘（C4）。超时不抛，返回仍未完成的数量。
+ * 未安装 tracker 时立即返回 0。
+ */
+export async function awaitPendingArtifacts(
+  context: BrowserContext,
+  options?: { timeoutMs?: number },
+): Promise<{ pendingLeft: number }> {
+  const pending = pendingByContext.get(context);
+  if (!pending || pending.size === 0) {
+    return { pendingLeft: 0 };
+  }
+  const timeoutMs = options?.timeoutMs ?? 5_000;
+  const snapshot = [...pending];
+  await Promise.race([
+    Promise.allSettled(snapshot),
+    new Promise((r) => setTimeout(r, timeoutMs)),
+  ]);
+  return { pendingLeft: pending.size };
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {

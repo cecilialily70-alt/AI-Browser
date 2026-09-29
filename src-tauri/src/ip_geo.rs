@@ -6,6 +6,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::log_warn;
 use crate::models::ProfileIpGeo;
 use crate::proxy::{self, ResolvedProxy};
 
@@ -392,12 +393,28 @@ fn proxy_env_cache_key(resolved: &ResolvedProxy) -> String {
     }
 }
 
-/// 启动前：代理隧道 ipify 出口 IP + 免费 API 国家/时区（写入 CloakBrowser proxyEnv）。
+/// 启动前：经代理隧道查出口 IP（多查询站）+ 免费 API 国家/时区（写入 CloakBrowser proxyEnv）。
+/// 查询站被代理拒绝、且代理主机本身是公网 IP 时，用该 IP 作为出口（白名单提取常见）。
 pub async fn resolve_proxy_egress_env(resolved: &ResolvedProxy) -> Result<ProxyEnvSync, AppError> {
     let cache_key = proxy_env_cache_key(resolved);
-    let exit_ip = proxy::resolve_egress_ip(resolved).await.map_err(|error| {
-        AppError::Launcher(format!("代理出口 IP 解析失败: {error}"))
-    })?;
+    let exit_ip = match proxy::resolve_egress_ip(resolved).await {
+        Ok(ip) => ip,
+        Err(error) => match proxy::proxy_host_as_egress(resolved) {
+            Some(ip) => {
+                log_warn!(
+                    "出口查询站被代理拒绝，改用代理地址本身作为出口 IP: {ip} ({})",
+                    error.reason()
+                );
+                ip
+            }
+            None => {
+                return Err(AppError::Launcher(format!(
+                    "代理出口 IP 解析失败: {}",
+                    error.reason()
+                )));
+            }
+        },
+    };
     lookup_proxy_env_sync(&cache_key, &exit_ip).await
 }
 
@@ -420,7 +437,7 @@ pub async fn lookup_direct_env_sync() -> Result<ProxyEnvSync, AppError> {
     lookup_proxy_env_sync("direct-egress", &geo.ip).await
 }
 
-/// 操作栏「启动」统一入口：有代理走隧道 ipify，无代理走公网 IP；国家/时区均来自免费 API。
+/// 操作栏「启动」统一入口：有代理经隧道查出口 IP，无代理走公网 IP；国家/时区均来自免费 API。
 pub async fn resolve_profile_launch_env(
     resolved_proxy: Option<&ResolvedProxy>,
     use_geoip: bool,

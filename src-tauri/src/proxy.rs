@@ -93,26 +93,42 @@ pub fn normalize_scheme(raw: &str) -> String {
     }
 }
 
+/// 从 API 链接读出已有的 `region` 参数（多数提取链接本身已带地区）。
+pub fn extract_region_from_api_url(base_url: &str) -> Option<String> {
+    let trimmed = base_url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let idx = lower.find("region=")?;
+    // 要求前面是 ? 或 &，避免误匹配其它参数名
+    if idx > 0 {
+        let prev = trimmed.as_bytes().get(idx - 1).copied()?;
+        if prev != b'?' && prev != b'&' {
+            return None;
+        }
+    }
+    let value_start = idx + "region=".len();
+    let raw = &trimmed[value_start..];
+    let value = raw.split_once('&').map(|(v, _)| v).unwrap_or(raw).trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+/// 把地区写进 API 链接。
+/// 链接已含 `region=` 时原样保留（不覆盖），仅在没有地区参数时才追加所选地区。
 pub fn apply_region_to_api_url(base_url: &str, region: &str) -> String {
     let trimmed = base_url.trim();
+    if extract_region_from_api_url(trimmed).is_some() {
+        return trimmed.to_owned();
+    }
+
     let region = region.trim().to_ascii_lowercase();
     if region.is_empty() {
         return trimmed.to_owned();
     }
 
-    if let Some(idx) = trimmed.find("region=") {
-        let prefix = &trimmed[..idx];
-        let remainder = &trimmed[idx + "region=".len()..];
-        let suffix = remainder
-            .split_once('&')
-            .map(|(_, tail)| tail)
-            .unwrap_or("");
-        if suffix.is_empty() {
-            format!("{prefix}region={region}")
-        } else {
-            format!("{prefix}region={region}&{suffix}")
-        }
-    } else if trimmed.contains('?') {
+    if trimmed.contains('?') {
         format!("{trimmed}&region={region}")
     } else {
         format!("{trimmed}?region={region}")
@@ -569,37 +585,148 @@ pub fn build_reqwest_proxy(resolved: &ResolvedProxy) -> Result<ReqwestProxy, App
     Ok(proxy)
 }
 
+/// 经代理隧道查询出口 IP 的探测站。ipify 单独失败很常见（HTTPS 隧道被拒、站点被拦），
+/// 先走不加密的查询，再换 HTTPS。任一返回公网 IP 即成功。
+const EGRESS_PROBES: &[(&str, EgressBodyKind)] = &[
+    ("http://ip-api.com/json/?fields=status,query", EgressBodyKind::JsonQuery),
+    ("http://checkip.amazonaws.com", EgressBodyKind::Plain),
+    ("https://api.ipify.org?format=json", EgressBodyKind::JsonIp),
+    ("https://icanhazip.com", EgressBodyKind::Plain),
+];
+
+#[derive(Clone, Copy)]
+enum EgressBodyKind {
+    /// `{"ip":"1.2.3.4"}`
+    JsonIp,
+    /// `{"status":"success","query":"1.2.3.4"}`
+    JsonQuery,
+    /// 纯文本一行 IP
+    Plain,
+}
+
+fn reqwest_err_brief(error: &reqwest::Error) -> String {
+    let mut parts = Vec::new();
+    let mut current: Option<&dyn std::error::Error> = Some(error);
+    while let Some(err) = current {
+        let text = err.to_string();
+        if !parts.iter().any(|item: &String| item == &text) {
+            parts.push(text);
+        }
+        current = err.source();
+        if parts.len() >= 3 {
+            break;
+        }
+    }
+    let joined = parts.join(" → ");
+    if joined.chars().count() > 180 {
+        joined.chars().take(180).collect()
+    } else {
+        joined
+    }
+}
+
+/// 只接受公网 IP。内网、回环、空串和网页都不当出口。
+fn accept_public_ip(raw: &str) -> Option<String> {
+    let ip: std::net::IpAddr = raw.trim().parse().ok()?;
+    let public = match ip {
+        std::net::IpAddr::V4(v4) => {
+            !v4.is_private()
+                && !v4.is_loopback()
+                && !v4.is_link_local()
+                && !v4.is_broadcast()
+                && !v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unspecified(),
+    };
+    if public { Some(ip.to_string()) } else { None }
+}
+
+fn parse_egress_ip(body: &str, kind: EgressBodyKind) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() || trimmed.len() > 4000 || trimmed.starts_with('<') {
+        return None;
+    }
+    let raw = match kind {
+        EgressBodyKind::Plain => trimmed.lines().next().unwrap_or("").trim().to_owned(),
+        EgressBodyKind::JsonIp => {
+            let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+            value.get("ip")?.as_str()?.trim().to_owned()
+        }
+        EgressBodyKind::JsonQuery => {
+            let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+            if value.get("status").and_then(|item| item.as_str()) != Some("success") {
+                return None;
+            }
+            value.get("query")?.as_str()?.trim().to_owned()
+        }
+    };
+    accept_public_ip(&raw)
+}
+
+fn egress_failure_is_tunnel(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("sending request")
+        || lower.contains("timed out")
+        || lower.contains("connect")
+        || lower.contains("tunnel")
+        || lower.contains("407")
+        || lower.contains("proxy")
+}
+
 pub async fn resolve_egress_ip(resolved: &ResolvedProxy) -> Result<String, AppError> {
     let client = reqwest::Client::builder()
         .proxy(build_reqwest_proxy(resolved)?)
-        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(8))
         .build()
         .map_err(|error| AppError::FraudCheck(error.to_string()))?;
 
-    let response = client
-        .get("https://api.ipify.org?format=json")
-        .send()
-        .await
-        .map_err(|error| AppError::FraudCheck(format!("proxy egress lookup failed: {error}")))?;
-
-    if !response.status().is_success() {
-        return Err(AppError::FraudCheck(format!(
-            "egress IP endpoint returned {}",
-            response.status()
-        )));
+    let mut failures: Vec<String> = Vec::new();
+    for (url, kind) in EGRESS_PROBES {
+        match client.get(*url).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.text().await {
+                    Ok(body) => {
+                        if let Some(ip) = parse_egress_ip(&body, *kind) {
+                            if !failures.is_empty() {
+                                log_warn!(
+                                    "出口 IP 改用备用查询站成功 proxy={}:{} via={url}",
+                                    resolved.host,
+                                    resolved.port
+                                );
+                            }
+                            return Ok(ip);
+                        }
+                        failures.push(format!("{url}: 响应里没有公网 IP"));
+                    }
+                    Err(error) => failures.push(format!("{url}: {}", reqwest_err_brief(&error))),
+                }
+            }
+            Ok(response) => failures.push(format!("{url}: HTTP {}", response.status())),
+            Err(error) => failures.push(format!("{url}: {}", reqwest_err_brief(&error))),
+        }
     }
 
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|error| AppError::FraudCheck(format!("failed to parse egress IP response: {error}")))?;
+    let detail = failures
+        .iter()
+        .map(|item| item.as_str())
+        .collect::<Vec<_>>()
+        .join("；");
+    let hint = if failures.iter().all(|item| egress_failure_is_tunnel(item)) {
+        "。代理隧道没有连上查询站，请核对协议是 HTTP 还是 SOCKS5、白名单是否包含本机，以及账号密码"
+    } else {
+        ""
+    };
+    Err(AppError::FraudCheck(format!(
+        "proxy egress lookup failed: {detail}{hint}"
+    )))
+}
 
-    body.get("ip")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| AppError::FraudCheck("egress IP response missing ip field".to_owned()))
+/// 提取接口直接返回的 `IP:端口`（白名单网关）本身就是出口地址。
+/// 查询站被代理屏蔽（403 / 隧道失败）时，用这个 IP 继续对齐时区，不再拦启动。
+/// 域名网关（如 us.novproxy.io）不能这么用，因为连上的机器不是出口。
+pub fn proxy_host_as_egress(resolved: &ResolvedProxy) -> Option<String> {
+    accept_public_ip(&resolved.host)
 }
 
 pub async fn test_resolved_proxy(resolved: &ResolvedProxy) -> Result<String, AppError> {
@@ -609,16 +736,6 @@ pub async fn test_resolved_proxy(resolved: &ResolvedProxy) -> Result<String, App
         resolved.chromium_proxy_flag(),
         egress_ip
     ))
-}
-
-pub fn profile_has_proxy(profile: &crate::models::Profile) -> bool {
-    profile
-        .custom_proxy
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-        || profile.proxy_id.is_some()
 }
 
 pub enum ProxyResolutionInput {
@@ -709,6 +826,26 @@ mod tests {
     }
 
     #[test]
+    fn preserves_existing_region_in_api_url() {
+        let url = apply_region_to_api_url(
+            "https://white.novproxy.com/white/api?region=IL&num=1&time=10&format=1&type=txt",
+            "hk",
+        );
+        assert!(url.contains("region=IL"));
+        assert!(!url.contains("region=hk"));
+        assert_eq!(
+            extract_region_from_api_url(&url).as_deref(),
+            Some("IL")
+        );
+    }
+
+    #[test]
+    fn empty_region_leaves_url_unchanged() {
+        let raw = "https://provider.example.com/get?key=abc";
+        assert_eq!(apply_region_to_api_url(raw, ""), raw);
+    }
+
+    #[test]
     fn parses_api_txt_host_port() {
         let body = "1.2.3.4:8080\r\n";
         let resolved = parse_api_txt_proxy_body(body, "HTTP").expect("parse");
@@ -767,5 +904,49 @@ mod tests {
         );
 
         purge_proxy_auth_extension(&profile_id);
+    }
+
+    #[test]
+    fn parses_egress_bodies_and_rejects_private_or_html() {
+        assert_eq!(
+            parse_egress_ip(r#"{"ip":"8.8.8.8"}"#, EgressBodyKind::JsonIp).as_deref(),
+            Some("8.8.8.8")
+        );
+        assert_eq!(
+            parse_egress_ip(
+                r#"{"status":"success","query":"1.1.1.1"}"#,
+                EgressBodyKind::JsonQuery
+            )
+            .as_deref(),
+            Some("1.1.1.1")
+        );
+        assert_eq!(
+            parse_egress_ip("203.0.113.9\n", EgressBodyKind::Plain).as_deref(),
+            Some("203.0.113.9")
+        );
+        assert!(parse_egress_ip(r#"{"ip":"192.168.1.1"}"#, EgressBodyKind::JsonIp).is_none());
+        assert!(parse_egress_ip(r#"{"status":"fail","query":"8.8.8.8"}"#, EgressBodyKind::JsonQuery).is_none());
+        assert!(parse_egress_ip("<html>8.8.8.8</html>", EgressBodyKind::Plain).is_none());
+        assert!(parse_egress_ip("", EgressBodyKind::Plain).is_none());
+    }
+
+    #[test]
+    fn whitelist_proxy_ip_can_stand_in_as_egress() {
+        let resolved = ResolvedProxy {
+            scheme: "http".to_owned(),
+            host: "198.44.167.198".to_owned(),
+            port: 20451,
+            username: None,
+            password: None,
+        };
+        assert_eq!(
+            proxy_host_as_egress(&resolved).as_deref(),
+            Some("198.44.167.198")
+        );
+        let gateway = ResolvedProxy {
+            host: "us.novproxy.io".to_owned(),
+            ..resolved
+        };
+        assert!(proxy_host_as_egress(&gateway).is_none());
     }
 }

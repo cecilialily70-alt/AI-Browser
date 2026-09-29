@@ -68,6 +68,28 @@ export function parseProxyString(raw: string): ParsedProxyLine | null {
   return null;
 }
 
+/**
+ * 粘贴整段 `主机:端口:账号:密码`（或 `主机:端口`）时拆成字段。
+ * 不像代理行（没有点分主机、端口不合法）则返回 null，输入框照常粘贴。
+ */
+export function parsePastedProxyFields(raw: string): ParsedProxyLine | null {
+  const line = raw
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find((part) => part.length > 0 && !part.startsWith("#"));
+  if (!line) {
+    return null;
+  }
+  const parsed = parseProxyString(line);
+  if (!parsed || !Number.isInteger(parsed.port) || parsed.port < 1 || parsed.port > 65535) {
+    return null;
+  }
+  if (!parsed.host.includes(".")) {
+    return null;
+  }
+  return parsed;
+}
+
 /** 从 SQLite 存的 JSON 或用户纯文本还原为结构化代理 */
 export function parseStoredCustomProxy(stored: string): ParsedProxyLine | null {
   const trimmed = stored.trim();
@@ -150,14 +172,33 @@ export function parseBatchProxyLines(raw: string, proxyType: ParsedProxyLine["ty
   return proxies;
 }
 
+/** 从 API 链接里读出已有的 region 参数（多数提取链接本身已带地区）。 */
+export function extractRegionFromApiUrl(baseUrl: string): string | null {
+  const match = baseUrl.trim().match(/[?&]region=([^&]*)/i);
+  if (!match) {
+    return null;
+  }
+  try {
+    const value = decodeURIComponent(match[1] ?? "").trim();
+    return value || null;
+  } catch {
+    const value = String(match[1] ?? "").trim();
+    return value || null;
+  }
+}
+
+/**
+ * 把地区写进 API 链接。
+ * 链接已含 `region=` 时原样保留（不覆盖），仅在没有地区参数时才追加所选地区。
+ */
 export function applyRegionToApiUrl(baseUrl: string, region: string): string {
   const trimmed = baseUrl.trim();
+  if (/[?&]region=/i.test(trimmed)) {
+    return trimmed;
+  }
   const normalizedRegion = region.trim().toLowerCase();
   if (!normalizedRegion) {
     return trimmed;
-  }
-  if (trimmed.includes("region=")) {
-    return trimmed.replace(/region=[^&]*/i, `region=${normalizedRegion}`);
   }
   return trimmed.includes("?")
     ? `${trimmed}&region=${normalizedRegion}`
@@ -165,11 +206,16 @@ export function applyRegionToApiUrl(baseUrl: string, region: string): string {
 }
 
 export const PROXY_REGION_OPTIONS = [
+  { value: "", label: "跟随链接（推荐）" },
   { value: "hk", label: "HK - 香港" },
   { value: "us", label: "US - 美国" },
   { value: "tw", label: "TW - 台湾" },
   { value: "jp", label: "JP - 日本" },
   { value: "sg", label: "SG - 新加坡" },
+  { value: "il", label: "IL - 以色列" },
+  { value: "kr", label: "KR - 韩国" },
+  { value: "uk", label: "UK - 英国" },
+  { value: "de", label: "DE - 德国" },
 ] as const;
 
 export function profileHasProxy(profile: { proxy_id: number | null; custom_proxy?: string | null }): boolean {

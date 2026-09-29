@@ -110,7 +110,7 @@ export interface AppSettings {
   kernel_paths: string;
   /** 常规浏览器下载根目录；空则使用应用数据目录下 downloads/browser */
   browser_download_dir: string;
-  /** 爬虫/AI 抓取下载根目录；空则使用应用数据目录下 downloads/scraper */
+  /** 数据目录（填表记录 / 回放数据 / 采集 / AI 抓取）；空则使用应用数据目录下 downloads/scraper */
   scraper_download_dir: string;
   /** Pro 授权检查走浏览器代理（--license-through-proxy），企业网/受限网络直连授权服务器失败时开启 */
   license_through_proxy: boolean;
@@ -1381,6 +1381,8 @@ export interface ReplayPlanRequest {
   trajectoryId: number | null;
   trajectoryTitle: string;
   actions: unknown[];
+  /** 磁盘轨迹路径（文件源）；有则 Host 跳过库查找 */
+  filePath?: string | null;
   goal: string;
   profileIds: string[];
   repeatCount: number;

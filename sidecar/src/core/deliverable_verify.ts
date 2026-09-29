@@ -225,6 +225,41 @@ function verifyNavigation(spec: DeliverableSpec, ctx: VerifierContext): Verifier
 }
 
 function verifyContentRead(spec: DeliverableSpec, ctx: VerifierContext): VerifierResult {
+  const targetCount = ordinalHint(spec.hints);
+  const extractedFacts = factsOf(ctx.ledger, ["items_extracted"]);
+  const extractedTotal = extractedFacts.reduce((sum, fact) => {
+    const n = Number(String(fact.detail ?? "").trim());
+    return sum + (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+  }, 0);
+
+  // 数量债：「提取前 N / 前 N 条」—— 差 K 条时保持 pending（ok=null），满 N 才核销
+  if (targetCount != null && targetCount > 0) {
+    if (extractedTotal >= targetCount) {
+      return {
+        ok: true,
+        verifier: "content_read",
+        reason: `已提取 ${extractedTotal} 条，满足目标 ${targetCount} 条`,
+      };
+    }
+    if (extractedTotal > 0) {
+      return {
+        ok: null,
+        verifier: "content_read",
+        reason: `已提取 ${extractedTotal}/${targetCount} 条，还差 ${targetCount - extractedTotal} 条`,
+      };
+    }
+    // 有内容提取事实但未计出条数 → 不谎报完成数量债
+    const fact = lastFact(ctx.ledger, ["content_extracted", "page_digest"]);
+    if (fact) {
+      return {
+        ok: null,
+        verifier: "content_read",
+        reason: `已取得页面内容，但数量债目标 ${targetCount} 条尚未计满（当前 0）`,
+      };
+    }
+    return { ok: null, verifier: "content_read", reason: `数量债目标 ${targetCount} 条，尚未提取` };
+  }
+
   const fact = lastFact(ctx.ledger, ["content_extracted", "page_digest"]);
   if (fact) return { ok: true, verifier: "content_read", reason: `已取得页面内容（第 ${fact.step} 步：${fact.detail || "读取成功"}）` };
   if (ctx.ledger.pageDigestChars > 0) {

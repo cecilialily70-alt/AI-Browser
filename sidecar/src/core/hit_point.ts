@@ -347,15 +347,38 @@ function RESOLVE_HIT_POINTS_SCRIPT(request: {
    * 意图关联查找：从「文本/容器元素」找真正的交互靶点。
    * 全部为结构依据，不依赖任何站点文案。
    */
+  /** 列表选项：必须点自身，禁止误关联到同行 input[type=number] / spinbutton（生日月下拉等） */
+  function isListOption(el: Element): boolean {
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (role === "option" || role === "menuitem") return true;
+    if (el.tagName === "OPTION") return true;
+    if (el.tagName === "LI") {
+      return Boolean(el.closest('[role="listbox"], [role="menu"], ul[role="listbox"]'));
+    }
+    return false;
+  }
+
+  function isNumberLikeControl(el: Element): boolean {
+    if (el instanceof HTMLInputElement && String(el.type || "").toLowerCase() === "number") {
+      return true;
+    }
+    return (el.getAttribute("role") || "").toLowerCase() === "spinbutton";
+  }
+
   function findAssociated(anchor: Element): Candidate | null {
     const candidates: Candidate[] = [];
     const isChoice = anchor.matches(CHOICE_SELECTOR);
     const isFormControl = anchor.matches(FORM_CONTROL_SELECTOR);
     const contentEditable = anchor.getAttribute("contenteditable") === "true";
+    const listOption = isListOption(anchor);
 
     if (isChoice) return { el: anchor, reason: "self:choice", score: 1 };
     if (isFormControl || contentEditable) {
       return { el: anchor, reason: "self:form-control", score: 0.95 };
+    }
+    // 下拉选项 / 菜单项：点自身（勿把同行 number 当成交互靶点）
+    if (listOption) {
+      return { el: anchor, reason: "self:actionable", score: 0.9 };
     }
     if (anchor.matches("a[href],button") || anchor.getAttribute("role") === "button") {
       return { el: anchor, reason: "self:actionable", score: 0.9 };
@@ -409,6 +432,8 @@ function RESOLVE_HIT_POINTS_SCRIPT(request: {
       for (const el of scoped) {
         if (el === anchor) continue;
         if (styleOf(el).display === "none") continue;
+        // 锚点是列表选项时，禁止把 type=number / spinbutton 当成关联靶点
+        if (listOption && isNumberLikeControl(el)) continue;
 
         const elName = normalize(accessibleName(el));
         const overlap = verticalOverlap(el, anchor);

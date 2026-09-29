@@ -443,18 +443,39 @@ fn spawn_stdout_pump(
                     continue;
                 }
                 if event_type == Some("agent_state") {
-                    let _ = app_stdout.emit(
-                        AGENT_STATE_EVENT,
-                        json!({
-                            "profileId": profile_for_stdout,
-                            "state": value.get("state"),
-                            "step": value.get("step"),
-                            "msg": value.get("msg"),
-                            "engine": value.get("engine"),
-                            // 终态小结（交付物正文）：信息型任务的结论就在这里，转发给 UI 展示
-                            "summary": value.get("summary"),
-                        }),
-                    );
+                    /*
+                     * AgentEvent SSOT（C3）：仿 chat_state 的 clone+inject，但先剥 DOM/JSON/截图等重载荷。
+                     * 人视只拿瘦字段（含 eventKind/phase）；AI 证据不过 Host 监视总线。
+                     * chat_state 分支保持零改动。
+                     */
+                    const HEAVY_KEYS: &[&str] = &[
+                        "domBefore",
+                        "domAfter",
+                        "domSnippet",
+                        "networkJson",
+                        "networkHits",
+                        "screenshotBase64",
+                        "screenshot",
+                        "visionImages",
+                        "interactiveTree",
+                        "plan",
+                        "rawHtml",
+                        "actions",
+                    ];
+                    let mut payload = value.clone();
+                    if let Some(object) = payload.as_object_mut() {
+                        for key in HEAVY_KEYS {
+                            object.remove(*key);
+                        }
+                        object.insert("profileId".to_owned(), json!(profile_for_stdout));
+                        // 兼容旧前端：保留常用顶层字段（原本白名单里的）
+                        if !object.contains_key("state") {
+                            if let Some(state) = value.get("state") {
+                                object.insert("state".to_owned(), state.clone());
+                            }
+                        }
+                    }
+                    let _ = app_stdout.emit(AGENT_STATE_EVENT, payload);
                     let state = value
                         .get("state")
                         .and_then(|entry| entry.as_str())
@@ -2594,6 +2615,16 @@ pub async fn pause_autonomous_agent(
 ) -> Result<(), AppError> {
     parse_profile_id(&profile_id)?;
     manager.write_session_command(&profile_id, json!({ "command": "agent_pause" }))
+}
+
+/// 用户标记成功：当前步结束后以成功收尾并写入轨迹（若已勾选录制）
+#[tauri::command]
+pub async fn mark_agent_success(
+    manager: State<'_, RpaSessionManager>,
+    profile_id: String,
+) -> Result<(), AppError> {
+    parse_profile_id(&profile_id)?;
+    manager.write_session_command(&profile_id, json!({ "command": "agent_success" }))
 }
 
 /// 轨迹回放：机械步骤 + 目标需交付时混合 LLM 分析（对齐 Agent 效果）

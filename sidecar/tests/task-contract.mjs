@@ -359,7 +359,11 @@ test("源码级：select_dropdown 必须真实点击并校验落值（禁止合�
   assert.ok(src.includes("readComboboxShownValue"), "必须有落值回读");
   assert.ok(src.includes("dropdownSelectionApplied"), "必须有落值校验");
   assert.ok(!/hit\.dispatchEvent\(new MouseEvent\("mousedown"/.test(src), "禁止再用合成 mousedown 当主路径");
-  assert.ok(src.includes("option.click"), "必须走 Playwright 真实点击");
+  const selectBlock = src.slice(src.indexOf('registerAction("select_dropdown"'));
+  const body = selectBlock.slice(0, selectBlock.indexOf('registerAction("screenshot"'));
+  assert.ok(!/\.filter\(\s*\{\s*hasText\s*:/.test(body), "禁止 filter hasText（Cloak isolated-world）");
+  assert.ok(body.includes("evaluateHandle"), "必须 evaluateHandle 定位选项");
+  assert.ok(/optionEl\.click/.test(body), "必须走 Playwright 真实点击");
 });
 
 test("源码级：task 意图 / needsFollowup 时禁止纯导航本地收尾", () => {

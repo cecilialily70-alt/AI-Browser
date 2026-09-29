@@ -50,6 +50,11 @@ import {
   type AgentPersona,
   type AgentRule,
 } from "../lib/agentRules";
+import {
+  parseTrajectoryActionsJson,
+  replayHardCaseBanner,
+  type TrajectoryReplayHints,
+} from "../lib/replayHints";
 
 interface BatchReplaySandboxProps {
   open: boolean;
@@ -67,12 +72,11 @@ interface BatchReplaySandboxProps {
 }
 
 function parseTrajectoryActions(trajectory: AgentTrajectory): unknown[] {
-  try {
-    const parsed = JSON.parse(trajectory.actions) as unknown;
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  return parseTrajectoryActionsJson(trajectory.actions).actions;
+}
+
+function parseTrajectoryHints(trajectory: AgentTrajectory): TrajectoryReplayHints | null {
+  return parseTrajectoryActionsJson(trajectory.actions).hints;
 }
 
 function shortSelector(selector: string, max = 28): string {
@@ -232,10 +236,61 @@ export function extractSandboxFieldsFromActions(actions: unknown[]): SandboxForm
   return out;
 }
 
+/** 脱敏占位符不是可回放值；密码/OTP 不得默认进 AI 盲盒 */
+function sanitizeRecordedValue(value: string): string {
+  const trimmed = String(value ?? "").trim();
+  return trimmed === "***" ? "" : trimmed;
+}
+
+function isSandboxSecretField(field: SandboxFormField): boolean {
+  const type = String(field.inputType ?? "").trim().toLowerCase();
+  if (type === "password") {
+    return true;
+  }
+  return /password|passwd|pwd|otp|token|cvv|密码|验证码|驗證|口令|pin\b/i.test(
+    `${field.label} ${field.key}`,
+  );
+}
+
+function isSandboxOtpOrPaymentField(field: SandboxFormField): boolean {
+  return /otp|token|cvv|ssn|驗證碼|验证码|卡号|卡號/i.test(`${field.label} ${field.key}`);
+}
+
+function isSandboxPasswordField(field: SandboxFormField): boolean {
+  const type = String(field.inputType ?? "").trim().toLowerCase();
+  if (isSandboxOtpOrPaymentField(field)) {
+    return false;
+  }
+  if (type === "password") {
+    return true;
+  }
+  return /password|passwd|pwd|密码|密碼|口令/i.test(`${field.label} ${field.key}`);
+}
+
 function defaultOverride(field: SandboxFormField, mode: SandboxFieldMode = "fixed"): SandboxFieldOverride {
+  const recorded = sanitizeRecordedValue(field.recordedValue);
+  // OTP/卡号：固定空框，逼用户填（禁止编造）
+  if (isSandboxOtpOrPaymentField(field) || (isSandboxSecretField(field) && !isSandboxPasswordField(field))) {
+    return {
+      mode: "fixed",
+      value: recorded,
+      label: field.label,
+      inputType: field.inputType,
+    };
+  }
+  // 注册密码：脱敏后给一个可见默认强密码，用户可改；回放侧还有确定性兜底
+  if (isSandboxPasswordField(field) && !recorded) {
+    return {
+      mode: "fixed",
+      value: "Aa1!Replay9zZ",
+      label: field.label,
+      inputType: field.inputType,
+    };
+  }
+  const effectiveMode = isSandboxSecretField(field) ? "fixed" : mode;
   return {
-    mode,
-    value: mode === "fixed" ? field.recordedValue : "",
+    mode: effectiveMode,
+    value: effectiveMode === "fixed" ? recorded : "",
     label: field.label,
     inputType: field.inputType,
   };
@@ -568,6 +623,11 @@ export function BatchReplaySandbox({
     }
     return extractSandboxFieldsFromActions(parseTrajectoryActions(trajectory));
   }, [trajectory]);
+
+  const hardCaseBanner = useMemo(
+    () => (trajectory ? replayHardCaseBanner(parseTrajectoryHints(trajectory)) : null),
+    [trajectory],
+  );
 
   /** 本轮回放使用的目标模板：用户可编辑；默认录制目标 */
   const baseGoalText = useMemo(
@@ -907,6 +967,17 @@ export function BatchReplaySandbox({
           const fieldOverrides: Record<string, SandboxFieldOverride> = {};
           for (const field of fields) {
             const prev = row.fieldOverrides?.[field.key];
+            const recorded = sanitizeRecordedValue(field.recordedValue);
+            // 密码/OTP：全部开盲盒时仍保持固定空值，避免运行时神秘 JIT 失败
+            if (isSandboxSecretField(field)) {
+              fieldOverrides[field.key] = {
+                mode: "fixed",
+                value: prev?.mode === "fixed" ? prev.value || recorded : recorded,
+                label: field.label,
+                inputType: field.inputType,
+              };
+              continue;
+            }
             fieldOverrides[field.key] = {
               mode,
               value:
@@ -914,7 +985,7 @@ export function BatchReplaySandbox({
                   ? prev?.mode === "ai_prompt"
                     ? prev.value
                     : ""
-                  : prev?.value || field.recordedValue,
+                  : prev?.value || recorded,
               label: field.label,
               inputType: field.inputType,
             };
@@ -1093,6 +1164,7 @@ export function BatchReplaySandbox({
         trajectoryId: trajectory.id,
         trajectoryTitle: trajectory.title,
         actions: parseTrajectoryActions(trajectory),
+        filePath: trajectory.file_path ?? null,
         goal: baseGoalText,
         profileIds: selectedEnvIds.map(String),
         repeatCount,
@@ -1398,6 +1470,11 @@ export function BatchReplaySandbox({
           >
             {toastText}
           </div>
+        ) : null}
+        {hardCaseBanner ? (
+          <p className="shrink-0 rounded-md bg-warning/10 px-2.5 py-2 text-[11px] leading-5 text-warning">
+            {hardCaseBanner}
+          </p>
         ) : null}
         <div className="shrink-0 space-y-2">
           <label className="field-label">目标环境 · 运行中</label>
@@ -1881,17 +1958,26 @@ export function BatchReplaySandbox({
                       <input
                         type="checkbox"
                         checked={aiMode}
-                        disabled={locked}
-                        onChange={(event) =>
+                        disabled={locked || isSandboxSecretField(field)}
+                        title={
+                          isSandboxSecretField(field)
+                            ? "密码/验证码请填固定值或数据集"
+                            : undefined
+                        }
+                        onChange={(event) => {
+                          if (event.target.checked && isSandboxSecretField(field)) {
+                            showToast("密码/验证码请填固定值或数据集，不能用 AI 盲盒");
+                            return;
+                          }
                           patchOverride(activeEnvId, field.key, {
                             mode: event.target.checked ? "ai_prompt" : "fixed",
                             value: event.target.checked
                               ? override.mode === "ai_prompt"
                                 ? override.value
                                 : ""
-                              : override.value || field.recordedValue,
-                          })
-                        }
+                              : override.value || sanitizeRecordedValue(field.recordedValue),
+                          });
+                        }}
                       />
                       AI 自动生成
                     </label>

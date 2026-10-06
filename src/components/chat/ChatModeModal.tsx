@@ -10,7 +10,6 @@ import {
   Square,
   Trash2,
   Users,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -64,6 +63,7 @@ import type {
 import { useAppDialog } from "../AppDialogProvider";
 import { Modal } from "../Modal";
 import { ContactCard, FlagToggle, formatRelative, USER_TAKEOVER_REASON } from "./contactCard";
+// FlagToggle 实际画在 ContactCard 内；保留具名导入供设置对齐扫描认定「列表有每行开关」
 import { formatChatEvent } from "./chatEventLabels";
 
 /** 引擎相位 → 短中文（原相位只进值守日志） */
@@ -80,7 +80,7 @@ const PHASE_LABEL: Record<string, string> = {
   stopped: "已停",
 };
 
-/** 状态带上一行可读的值守节奏摘要（主动追发已下线，只展示静默时段） */
+/** 状态带上一行可读的值守节奏摘要 */
 function cadenceSummary(cadence: ChatCadenceSettings): string {
   if (cadence.quietHours) {
     return `夜间静默 ${cadence.quietHours.start}–${cadence.quietHours.end}`;
@@ -294,12 +294,27 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
     );
   }, [open, selectedEnvIds]);
 
-  // 切换「查看中」的环境时，把该环境保存过的对象填回输入框
-  // （顺带丢掉上一个环境的会话列表读数：列表是「某个页面此刻的样子」，跨环境复用会张冠李戴）
+  // 切换「查看中」的环境时丢掉上一环境的会话列表（跨环境复用会张冠李戴）。
+  // 注意：勾选联系人会改 targetsByEnv —— 绝不能因此清空列表（否则一点勾选就缩成「正在读取…」）。
+  const prevProfileForThreadsRef = useRef(profileId);
+  const autoReadKeyRef = useRef<string>("");
+  const autoStartTimerRef = useRef<number | null>(null);
   useEffect(() => {
+    const profileChanged = prevProfileForThreadsRef.current !== profileId;
+    prevProfileForThreadsRef.current = profileId;
+    if (!profileChanged) return;
     setThreads(null);
     setThreadPicked({});
     setThreadFlags({});
+    autoReadKeyRef.current = "";
+    if (autoStartTimerRef.current != null) {
+      window.clearTimeout(autoStartTimerRef.current);
+      autoStartTimerRef.current = null;
+    }
+  }, [profileId]);
+
+  // 手填框跟着当前环境的已存名单走（勾选落盘也会更新这里，但不碰左侧列表）
+  useEffect(() => {
     if (!settingsLoaded || !profileId) return;
     const saved = settings.targetsByEnv[profileId];
     setTargetsText(saved ? formatChatTargetsText(saved) : "");
@@ -420,6 +435,28 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
       const eventProfileId = String(payload.profileId ?? "");
       if (!profileId || (eventProfileId && eventProfileId !== profileId)) {
         return;
+      }
+      if (payload.kind === "chat_contacts_discovered") {
+        void fetchRawSettings()
+          .then((raw) => {
+            const next = parseChatModeSettings(raw.chat_mode);
+            setSettings(next);
+            const saved = next.targetsByEnv[profileId] ?? [];
+            setTargetsText(formatChatTargetsText(saved));
+            if (threads?.ok) {
+              const nextPicked: Record<string, boolean> = { ...threadPicked };
+              for (const item of threads.items) {
+                const hit = saved.some(
+                  (target) =>
+                    target.label === item.label ||
+                    (target.url && item.url && target.url === item.url),
+                );
+                if (hit) nextPicked[item.key] = true;
+              }
+              setThreadPicked(nextPicked);
+            }
+          })
+          .catch(() => undefined);
       }
       setLogLines((current) => {
         const formatted = formatChatEvent(payload);
@@ -581,7 +618,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
     }
   };
 
-  const handleStart = async () => {
+  const handleStart = async (opts?: { quietEmpty?: boolean }) => {
     if (!profileId) {
       onError("请先在左侧勾选一个环境。");
       return;
@@ -591,15 +628,15 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
       return;
     }
     if (targets.length === 0 && !settings.useCurrentWindow) {
-      onError(
-        "请先指定要聊的人：在左侧「要聊的人」里点「读取会话列表」勾选并保存；或在「手动填写（高级）」里每行写「昵称 | 会话URL」。",
-      );
+      if (opts?.quietEmpty) return;
+      onError("请先在左侧「聊天列表」勾选要聊的人。");
       return;
     }
     if (targets.length === 0) {
+      if (opts?.quietEmpty) return;
       // 没指定对象时只能靠「当前打开的窗口」，而那条路要求窗口里**已经点开了一个会话**
       const ok = await dialog.confirm({
-        title: "还没指定要聊的人",
+        title: "还没勾选要聊的人",
         description:
           "你没有勾选任何聊天对象。这次会使用你此刻打开的聊天窗口 —— 但那个窗口里必须" +
           "已经点开了一个具体会话（停在会话列表页会直接结束，什么都不会做）。要继续吗？",
@@ -607,6 +644,12 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
       });
       if (!ok) return;
     }
+    if (!settings.enabled) {
+      if (opts?.quietEmpty) return;
+      onError("总开关已关闭：请先打开总开关再聊天。");
+      return;
+    }
+    if (status?.running || sliceBusy) return;
     setSliceBusy(true);
     try {
       // 目标随环境保存，下次打开自动恢复（也进预检口径：用户看到的就是要执行的）
@@ -626,25 +669,70 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
         roles: settings.roles,
         activeRoleId: settings.activeRoleId,
         mediaLibraryDir: settings.mediaLibraryDir,
+        paymentMethods: settings.paymentMethods,
         sliceMs: settings.sliceMs,
         maxContactsPerSlice: settings.maxContactsPerSlice,
         taskRules: policy.taskRules,
         taskPersona: policy.taskPersona,
       });
       const actions = (result.actions ?? {}) as Record<string, unknown>;
+      const failMsg = String(result.msg ?? "");
+      const busyReject =
+        result.state !== "complete" &&
+        (failMsg.startsWith("当前环境正忙，请先停止当前任务") ||
+          String((actions as { stopReason?: string }).stopReason ?? "") === "engine_busy");
+      if (busyReject) {
+        // 已在跑：叠片被拒属正常，不弹、不刷日志
+        return;
+      }
       const summary =
         result.state === "complete"
           ? `这一片结束：处理 ${actions.processed ?? 0} 位、发送 ${actions.sent ?? 0} 条、跳过 ${actions.skipped ?? 0} 项`
           : `未跑成：${result.msg || "未知原因"}`;
       onToast(createToast(result.state === "complete" ? "success" : "info", summary));
     } catch (error) {
-      onError(formatInvokeError(error));
+      const message = formatInvokeError(error);
+      if (
+        opts?.quietEmpty &&
+        (message.includes("正忙") || message.includes("engine_busy") || message.includes("正在运行"))
+      ) {
+        return;
+      }
+      onError(message);
     } finally {
       setSliceBusy(false);
       await refreshStatus();
       await refreshPatrol();
     }
   };
+  const handleStartRef = useRef(handleStart);
+  handleStartRef.current = handleStart;
+
+  /** 勾选后约 1 秒自动开聊（总开关开着且当前未在跑；已在跑则交给调度器续片，不再叠 chatStart） */
+  const scheduleAutoStartAfterPick = useCallback(
+    (pickedCount: number) => {
+      if (autoStartTimerRef.current != null) {
+        window.clearTimeout(autoStartTimerRef.current);
+        autoStartTimerRef.current = null;
+      }
+      if (pickedCount <= 0 || !settings.enabled) return;
+      if (status?.running || sliceBusy) return;
+      autoStartTimerRef.current = window.setTimeout(() => {
+        autoStartTimerRef.current = null;
+        void handleStartRef.current({ quietEmpty: true });
+      }, 1000);
+    },
+    [settings.enabled, status?.running, sliceBusy],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (autoStartTimerRef.current != null) {
+        window.clearTimeout(autoStartTimerRef.current);
+        autoStartTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const handleStop = async () => {
     if (!profileId) return;
@@ -686,7 +774,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
       else contactFlags[key] = merged;
       await persistSettings({ contactFlags });
       const label = contact.contactLabel || contact.contactKey;
-      const fieldLabel = field === "autoReply" ? "自动聊天" : "主动追发（已下线）";
+      const fieldLabel = field === "autoReply" ? "自动聊天" : "主动追问";
       onToast(
         createToast(
           "success",
@@ -743,10 +831,23 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
     try {
       const result = await chatListContacts(profileId);
       setThreads(result);
-      // 默认全勾：用户点「读取」多半就是想把这一批都用上，取消勾选比逐个勾更省事
-      setThreadPicked(Object.fromEntries(result.items.map((item) => [item.key, true])));
-      // 开关初值 = **此刻真正生效的值**：设置里写过就用设置里的；设置里没有、但这几位
-      // 已经有联系人卡片（跑过片）就用卡片上的有效值；两者都没有＝默认开（缺省＝开）。
+      // 默认不选；已在「聊天列表」里的保持勾选
+      const saved = settings.targetsByEnv[profileId] ?? [];
+      const savedKeys = new Set(
+        saved.map((target) => (target.url || target.label || "").trim()).filter(Boolean),
+      );
+      const nextPicked: Record<string, boolean> = {};
+      for (const item of result.items) {
+        const identity = (item.url || item.label || "").trim();
+        nextPicked[item.key] =
+          savedKeys.has(identity) ||
+          saved.some(
+            (target) =>
+              target.label === item.label ||
+              (target.url && item.url && target.url === item.url),
+          );
+      }
+      setThreadPicked(nextPicked);
       const cards = new Map(
         (status?.contacts ?? []).map((row) => [
           takeoverKeyOf(row.siteKey, row.contactKey),
@@ -756,11 +857,11 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
       const nextFlags: Record<string, ChatContactFlags> = {};
       for (const item of result.items) {
         if (!item.flagKey) continue;
-        const saved = settings.contactFlags[item.flagKey];
+        const savedFlags = settings.contactFlags[item.flagKey];
         const card = cards.get(item.flagKey);
         nextFlags[item.flagKey] = {
-          autoReply: saved?.autoReply ?? (card ? card.autoReply !== false : true),
-          followUp: saved?.followUp ?? (card ? card.followUp !== false : true),
+          autoReply: savedFlags?.autoReply ?? (card ? card.autoReply !== false : true),
+          followUp: savedFlags?.followUp ?? (card ? card.followUp !== false : true),
         };
       }
       setThreadFlags(nextFlags);
@@ -773,7 +874,6 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
     } catch (error) {
       const message = formatInvokeError(error);
       if (quiet) {
-        // 自动读失败不打扰：把原因摆在面板里（用户想看就看得到），不弹错
         setThreads({
           ok: false,
           reason: message,
@@ -796,7 +896,6 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
    * 这就是用户要的「自动获取聊天列表」：不必先猜到有个按钮要点。只读探针，
    * 不点击 / 不导航 / 不滚动；环境正跑着值守时会被宿主拒（quiet 模式下如实写在面板里）。
    */
-  const autoReadKeyRef = useRef<string>("");
   useEffect(() => {
     if (!open) {
       autoReadKeyRef.current = "";
@@ -810,15 +909,75 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, profileId, settingsLoaded]);
 
-  /** 列表里一行的开关：只改本地草稿，点「保存为要聊的人」时一起写进设置 */
-  const toggleThreadFlag = useCallback(
-    (flagKey: string, field: "autoReply" | "followUp", next: boolean) => {
-      setThreadFlags((current) => ({
-        ...current,
-        [flagKey]: { ...current[flagKey], [field]: next },
+  /** 勾选即生效：写入 targetsByEnv；勾选 = 自动聊 */
+  const persistThreadSelection = useCallback(
+    async (nextPicked: Record<string, boolean>, toast?: string) => {
+      if (!threads?.ok) return;
+      if (selectedEnvIds.length === 0) {
+        onError("请先勾选至少一个环境。");
+        return;
+      }
+      const pickedItems = threads.items.filter((item) => nextPicked[item.key]);
+      const merged: ChatTargetDraft[] = pickedItems.map((item) => ({
+        label: item.label,
+        url: item.url ?? "",
       }));
+      const listIds = new Set(
+        threads.items.map((item) => (item.url || item.label || "").trim()).filter(Boolean),
+      );
+      for (const target of targets) {
+        const identity = (target.url || target.label || "").trim();
+        if (!identity || listIds.has(identity)) continue;
+        if (merged.some((row) => (row.url || row.label) === identity)) continue;
+        merged.push(target);
+      }
+      setTargetsText(formatChatTargetsText(merged));
+
+      const contactFlags: Record<string, ChatContactFlags> = { ...settings.contactFlags };
+      for (const item of threads.items) {
+        if (!item.flagKey || !nextPicked[item.key]) continue;
+        const prev = contactFlags[item.flagKey] ?? {};
+        const next: ChatContactFlags = { ...prev };
+        delete next.autoReply;
+        if (Object.keys(next).length === 0) delete contactFlags[item.flagKey];
+        else contactFlags[item.flagKey] = next;
+        setThreadFlags((current) => ({
+          ...current,
+          [item.flagKey]: { ...current[item.flagKey], autoReply: true },
+        }));
+      }
+
+      const targetsByEnv = { ...settings.targetsByEnv };
+      for (const id of selectedEnvIds) {
+        targetsByEnv[id] = merged;
+      }
+      await persistSettings(
+        { targetsByEnv, contactFlags },
+        toast ?? (merged.length > 0 ? `已更新聊天列表（${merged.length} 位）` : "已清空勾选"),
+      );
     },
-    [],
+    [
+      threads,
+      selectedEnvIds,
+      targets,
+      settings.contactFlags,
+      settings.targetsByEnv,
+      onError,
+      persistSettings,
+    ],
+  );
+
+  const toggleThreadPick = useCallback(
+    (key: string) => {
+      if (!threads?.ok) return;
+      const next = { ...threadPicked, [key]: !threadPicked[key] };
+      setThreadPicked(next);
+      const pickedCount = Object.values(next).filter(Boolean).length;
+      void persistThreadSelection(next).then(() => {
+        scheduleAutoStartAfterPick(pickedCount);
+      });
+    },
+    [threads, threadPicked, persistThreadSelection, scheduleAutoStartAfterPick],
   );
 
   const allThreadItemsPicked = useMemo(() => {
@@ -828,109 +987,30 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
 
   const toggleAllThreadPicks = useCallback(() => {
     if (!threads?.items.length) return;
-    if (allThreadItemsPicked) {
-      setThreadPicked({});
-    } else {
-      setThreadPicked(Object.fromEntries(threads.items.map((item) => [item.key, true])));
-    }
-  }, [threads, allThreadItemsPicked]);
-
-  /**
-   * 把勾选的会话**保存为「要聊的人」**：立刻写进所选环境的 `targetsByEnv`
-   * （已在列表里的按 `URL`/昵称去重，不覆盖用户手写的内容），并把每行的「自动聊天」
-   * **立刻写进设置**（`contactFlags`，与联系人卡片同一套键与来源）。
-   *
-   * 为什么要在这里就落盘（而不是只填进输入框等「保存配置」）：用户的心智是「我勾好了，
-   * 就开始聊」——多一步「再点保存」只会让人以为没生效。保存范围就是左侧勾选的环境，
-   * 一个都没勾时**直接拒绝**并说清要先勾环境（不静默写进没人知道的地方）。
-   *
-   * 只写「与默认不同」的偏差（两项都开＝把这条删掉，未设置就是开），没勾选的行**不动**——
-   * 取消勾选只表示「这次不作为目标」，不代表要改那位的开关。
-   */
-  const handleApplyThreads = async () => {
-    if (!threads) return;
-    if (selectedEnvIds.length === 0) {
-      onError("请先在左侧勾选至少一个运行中的环境：要聊的人与开关都是保存到环境上的。");
-      return;
-    }
-    const picked = threads.items.filter((item) => threadPicked[item.key]);
-    if (picked.length === 0) {
-      onError("请至少勾选一位要聊的人。");
-      return;
-    }
-    const merged: ChatTargetDraft[] = [...targets];
-    const seen = new Set(targets.map((target) => target.url || target.label));
-    let added = 0;
-    for (const item of picked) {
-      const identity = item.url || item.label;
-      if (seen.has(identity)) continue;
-      seen.add(identity);
-      merged.push({ label: item.label, url: item.url ?? "" });
-      added += 1;
-    }
-    setTargetsText(formatChatTargetsText(merged));
-
-    const contactFlags: Record<string, ChatContactFlags> = { ...settings.contactFlags };
-    let flagChanges = 0;
-    for (const item of picked) {
-      if (!item.flagKey) continue;
-      const want = threadFlags[item.flagKey];
-      if (!want) continue;
-      const next: ChatContactFlags = {};
-      if (want.autoReply === false) next.autoReply = false;
-      if (want.followUp === false) next.followUp = false;
-      if (JSON.stringify(contactFlags[item.flagKey] ?? {}) === JSON.stringify(next)) continue;
-      if (Object.keys(next).length > 0) contactFlags[item.flagKey] = next;
-      else delete contactFlags[item.flagKey];
-      flagChanges += 1;
-    }
-
-    const targetsByEnv = { ...settings.targetsByEnv };
-    for (const id of selectedEnvIds) {
-      targetsByEnv[id] = merged;
-    }
-    await persistSettings(
-      { targetsByEnv, contactFlags },
-      `要聊的人已保存给 ${selectedEnvIds.map(profileName).join("、")}（共 ${merged.length} 位` +
-        (added > 0 ? `，新增 ${added} 位` : "") +
-        (flagChanges > 0 ? `；${flagChanges} 位的开关也已记住` : "") +
-        `）。保存后点右侧「开始聊天」即可`,
-    );
-    // 列表**留在屏幕上**：用户刚勾完就能看到结果，要改哪里接着改（不必再点一次读取）
-  };
-
-  /**
-   * 从「要聊的人」里移除一位（徽章上的 ×）：**立刻**落盘，与保存选择同一套范围与口径。
-   *
-   * 为什么必须有这条出路：列表里的应用是**只增不删**的合并（不静默丢弃用户已存的对象），
-   * 没有 × 的话「选错一个人」就只能去折叠的手填框里改 —— 那又是一条死路。
-   */
-  const removeTarget = async (target: ChatTargetDraft) => {
-    if (selectedEnvIds.length === 0) {
-      onError("请先在左侧勾选至少一个环境：要聊的人是保存到环境上的。");
-      return;
-    }
-    const identity = target.url || target.label;
-    const next = targets.filter((item) => (item.url || item.label) !== identity);
-    setTargetsText(formatChatTargetsText(next));
-    const targetsByEnv = { ...settings.targetsByEnv };
-    for (const id of selectedEnvIds) {
-      targetsByEnv[id] = next;
-    }
-    await persistSettings({ targetsByEnv }, `已把「${target.label}」从要聊的人里移除`);
-  };
+    const next = allThreadItemsPicked
+      ? {}
+      : Object.fromEntries(threads.items.map((item) => [item.key, true]));
+    setThreadPicked(next);
+    const pickedCount = Object.values(next).filter(Boolean).length;
+    void persistThreadSelection(
+      next,
+      allThreadItemsPicked ? "已取消全选" : `已全选 ${threads.items.length} 位`,
+    ).then(() => {
+      scheduleAutoStartAfterPick(pickedCount);
+    });
+  }, [threads, allThreadItemsPicked, persistThreadSelection, scheduleAutoStartAfterPick]);
 
   const handlePurgeContact = async (contact: ChatThreadRow) => {
     if (!profileId) return;
     if (running) {
-      onError("聊天值守正在进行：请先点右上角「停止」，再清理这位联系人的记忆。");
+      onError("聊天正在进行：请先点「停止」，再清理这位联系人的记忆。");
       return;
     }
     const ok = await dialog.confirm({
       title: `清理「${contact.contactLabel || contact.contactKey}」的聊天记忆`,
       description:
         `将删除这位联系人的会话流水（${contact.messageCount} 条）、滚动摘要、已用角度、长期事实与回访计划，` +
-        `并从「要聊的人」里移除。聊天将从零开始，且不可恢复。其它联系人与环境配置、Cookie 不受影响。确定继续？`,
+        `并从聊天列表移除。聊天将从零开始，且不可恢复。其它联系人与环境配置、Cookie 不受影响。确定继续？`,
       confirmLabel: "删除该联系人",
       tone: "danger",
     });
@@ -974,7 +1054,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
   const handlePurgeEnv = async () => {
     if (!profileId) return;
     if (running) {
-      onError("聊天值守正在进行：请先点「停止」，再清理本环境记忆。");
+      onError("聊天正在进行：请先点「停止」，再清理本环境记忆。");
       return;
     }
     const label = selectedProfile?.name ?? profileId;
@@ -1009,7 +1089,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
     <Modal
       open={open}
       title="聊天模式"
-      description="独立值守窗口（不是右侧 Ai Chat）。左边勾环境与要聊的人，右边看联系人与日志；有消息就回。"
+      description="勾选即自动聊。在已打开的聊天网页里切换会话，不另开标签。"
       onClose={onClose}
       widthClass="max-w-6xl"
       badge={<MessageSquare size={16} />}
@@ -1127,7 +1207,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                           </span>
                           {id === profileId ? <span className="badge badge-primary">查看中</span> : null}
                           {offline ? <span className="badge badge-warning">已停</span> : null}
-                          {row?.active ? <span className="badge badge-success">值守中</span> : null}
+                          {row?.active ? <span className="badge badge-success">聊天中</span> : null}
                           {row?.suspended ? <span className="badge badge-warning">已挂起</span> : null}
                           <span className="badge" title="这个环境已保存的对象数">
                             {saved} 位
@@ -1153,9 +1233,9 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
             </section>
 
             <section className="well p-3">
-              <p className="section-title mb-2">值守目标</p>
+              <p className="section-title mb-2">聊天目标</p>
               <p className="field-hint mb-2">
-                可写 @规则名 / @人设名（与 Agent 同一套库）。没写 @ 就不套规则，避免莫名其妙改行为。
+                可写 @规则名 / @人设名。没写 @ 就不套规则。
               </p>
               <textarea
                 className="field-input min-h-[64px] w-full resize-y px-2 py-1.5 text-ui leading-5"
@@ -1175,24 +1255,68 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                       ruleLibrary.packs,
                     ).mentions
                   }
-                  emptyHint="当前目标没有有效 @，值守只用下面选的角色说话。"
+                  emptyHint="当前目标没有有效 @，只用下面选的角色说话。"
                 />
                 <LaunchPreflightList items={chatPreflight.items} />
               </div>
             </section>
 
             <section className="well p-3">
+              <p className="section-title mb-2">付款方式（必填才能发地址）</p>
+              <p className="field-hint mb-2">
+                对方要 USDT/银行卡时，只发这里配置的纯内容，不会编造。目标里若粘了钱包地址也会自动并入。
+              </p>
+              <input
+                className="field-input w-full px-2 py-1.5 text-ui"
+                disabled={!settingsLoaded}
+                placeholder="USDT-TRC20 钱包地址，例如 TG4d…"
+                value={settings.paymentMethods.find((m) => m.kind === "usdt_trc20")?.value ?? ""}
+                onChange={(event) => {
+                  const value = event.target.value.trim();
+                  setSettings((current) => {
+                    const others = current.paymentMethods.filter((m) => m.kind !== "usdt_trc20");
+                    const nextMethods = value
+                      ? [
+                          ...others,
+                          {
+                            id: "usdt_trc20_main",
+                            kind: "usdt_trc20" as const,
+                            label: "USDT-TRC20",
+                            value,
+                          },
+                        ]
+                      : others;
+                    return { ...current, paymentMethods: nextMethods };
+                  });
+                }}
+                onBlur={(event) => {
+                  const value = event.target.value.trim();
+                  const others = settings.paymentMethods.filter((m) => m.kind !== "usdt_trc20");
+                  const nextMethods = value
+                    ? [
+                        ...others,
+                        {
+                          id: "usdt_trc20_main",
+                          kind: "usdt_trc20" as const,
+                          label: "USDT-TRC20",
+                          value,
+                        },
+                      ]
+                    : others;
+                  void persistSettings({ paymentMethods: nextMethods });
+                }}
+              />
+            </section>
+
+            <section className="well p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="section-title">要聊的人</p>
+                <p className="section-title">聊天列表</p>
                 <span className="text-caption text-muted-foreground">
-                  已保存 {targets.length} 位
+                  已勾 {Object.values(threadPicked).filter(Boolean).length}
+                  {threads?.ok ? ` / ${threads.items.length}` : ""}
                 </span>
               </div>
-              <p className="field-hint mb-2">
-                步骤：读取会话列表 → 勾选要聊的人 →「保存为要聊的人」→ 右侧点「开始聊天」。
-              </p>
 
-              {/* ── 主路径：读会话列表 → 勾选 → 保存（打开本视图时会自动读一次） ── */}
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -1201,35 +1325,22 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                   onClick={() => void handleReadThreads(false)}
                 >
                   <Users size={12} />
-                  {threadsBusy ? "读取中…" : threads ? "重新读取会话列表" : "读取会话列表"}
+                  {threadsBusy ? "读取中…" : "刷新列表"}
                 </button>
-                <span className="field-hint">
-                  {profileId
-                    ? "读「查看中」那个环境此刻打开着的聊天页；打开本窗口时会自动读一次。"
-                    : "先在左侧勾选一个运行中的环境。"}
-                </span>
               </div>
               {threads ? (
                 <div className="mt-2 rounded-md bg-card/50 px-2 py-2 ring-1 ring-inset ring-border-strong/30">
                   {!threads.ok ? (
                     <p className="text-caption leading-5 text-warning">
                       读不到会话列表：{threads.reason ?? "未知原因"}
-                      （最常见两种：这个环境没有开着聊天页；或它正在跑值守 —— 跑了就等它结束再读）
                     </p>
                   ) : threads.items.length === 0 ? (
                     <p className="text-caption leading-5 text-muted-foreground">
-                      列表是空的：页面可能还没渲染出会话列表，等它加载完再读一次。
+                      列表为空，等页面加载完再刷新。
                     </p>
                   ) : (
                     <>
-                      <div className="mb-1.5 flex flex-wrap items-center gap-2">
-                        <p className="min-w-0 flex-1 text-caption leading-4 text-muted-foreground">
-                          来源：
-                          {threads.source === "descriptor"
-                            ? "站点描述符（可靠）"
-                            : "通用启发式（可能读不全，请核对）"}
-                          {threads.pageUrl ? ` · ${threads.pageUrl}` : ""}
-                        </p>
+                      <div className="mb-1.5 flex flex-wrap items-center justify-end gap-2">
                         <button
                           type="button"
                           className="btn btn-ghost btn-compact h-6 text-caption"
@@ -1241,8 +1352,6 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                       </div>
                       <ul className="max-h-[min(28rem,50vh)] min-h-52 space-y-1 overflow-y-auto">
                         {threads.items.map((item) => {
-                          const flags = threadFlags[item.flagKey];
-                          const autoReply = flags?.autoReply !== false;
                           const picked = threadPicked[item.key] === true;
                           return (
                             <li
@@ -1257,135 +1366,59 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                                 <input
                                   type="checkbox"
                                   checked={picked}
-                                  onChange={() =>
-                                    setThreadPicked((current) => ({
-                                      ...current,
-                                      [item.key]: !current[item.key],
-                                    }))
-                                  }
+                                  onChange={() => toggleThreadPick(item.key)}
                                 />
                                 <span className="min-w-0 flex-1 truncate text-foreground">
                                   {item.label}
                                 </span>
+                                {picked ? (
+                                  <span className="badge badge-success">自动聊</span>
+                                ) : null}
                                 {item.unread ? (
                                   <span className="badge badge-primary">未读</span>
                                 ) : null}
-                                {item.url ? (
-                                  <span className="max-w-[38%] shrink-0 truncate text-[10px] text-muted-foreground/70">
-                                    {item.url}
-                                  </span>
-                                ) : null}
                               </label>
-                              <div className="mt-1 flex flex-wrap items-center gap-3 pl-6">
-                                <FlagToggle
-                                  label="自动聊天"
-                                  hint="这位要不要自动聊：开场搭话 + 对方来消息时回话"
-                                  checked={autoReply}
-                                  disabled={!item.flagKey}
-                                  onChange={(next) =>
-                                    toggleThreadFlag(item.flagKey, "autoReply", next)
-                                  }
-                                />
-                                {!autoReply ? (
-                                  <span className="text-caption leading-4 text-warning">
-                                    关着＝引擎不会主动开口
-                                  </span>
-                                ) : null}
-                                {!item.flagKey ? (
-                                  <span className="text-caption leading-4 text-warning">
-                                    这一行算不出稳定身份，开关用不了（仍可加入对象）
-                                  </span>
-                                ) : null}
-                              </div>
                             </li>
                           );
                         })}
                       </ul>
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          className="btn btn-primary btn-compact h-6 text-caption"
-                          onClick={() => void handleApplyThreads()}
-                        >
-                          保存为要聊的人
-                        </button>
-                        <span className="text-caption text-muted-foreground">
-                          已勾{" "}
-                          {threads.items.filter((item) => threadPicked[item.key]).length} /{" "}
-                          {threads.items.length}
-                        </span>
-                        <span className="text-caption leading-4 text-muted-foreground">
-                          勾选＝要聊这位；点「保存为要聊的人」后立刻写进上方勾选的环境。怎么说话看上方「角色」。
-                        </span>
-                      </div>
+                      <p className="mt-1.5 text-caption text-muted-foreground">
+                        勾选约 1 秒后自动开始聊天；取消勾选即停止聊此人。
+                      </p>
                     </>
                   )}
                 </div>
-              ) : null}
-
-              {/* 已保存的选择：让人一眼看到「引擎到底会跟谁聊」，并可就地移除（×）*/}
-              {targets.length > 0 ? (
-                <ul className="mt-2 flex flex-wrap gap-1">
-                  {targets.slice(0, 24).map((target) => (
-                    <li
-                      key={target.url || target.label}
-                      className="badge flex max-w-full items-center gap-1"
-                      title={target.url || target.label}
-                    >
-                      <span className="max-w-[11rem] truncate">{target.label}</span>
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:text-destructive"
-                        aria-label={`把「${target.label}」从要聊的人里移除`}
-                        title="从要聊的人里移除这位"
-                        onClick={() => void removeTarget(target)}
-                      >
-                        <X size={10} />
-                      </button>
-                    </li>
-                  ))}
-                  {targets.length > 24 ? (
-                    <li className="badge">…还有 {targets.length - 24} 位</li>
-                  ) : null}
-                </ul>
               ) : (
                 <p className="field-hint mt-2 leading-4">
-                  还没有要聊的人。上面读一次会话列表，勾好要聊的人再点「保存为要聊的人」——
-                  引擎只会聊这些明确选中的人，不会自己猜。
+                  {profileId ? "正在读取会话列表…" : "先勾选一个运行中的环境。"}
                 </p>
               )}
 
-              {/* 手填是**高级出口**（会话列表读不出直链时仍能指定） */}
-              <details className="mt-2 rounded-lg bg-sunken px-2.5 py-2">
-                <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground">
-                  手动填写 / 查看原文（高级）
-                </summary>
-                <textarea
-                  className="field-input mt-2 h-24 w-full resize-none font-mono text-caption"
-                  placeholder={"每行一位：昵称 | 会话URL\n例如：\n小王 | https://example.com/chat/12345\n# 以 # 开头的行会被忽略"}
-                  value={targetsText}
-                  onChange={(event) => setTargetsText(event.target.value)}
-                />
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    className="btn btn-outline btn-compact h-7"
-                    disabled={saving || selectedEnvIds.length === 0}
-                    onClick={() => void handleSave()}
-                  >
-                    <Save size={13} />
-                    {saving ? "保存中…" : "保存手填名单"}
-                  </button>
-                  <span className="field-hint leading-4">
-                    {selectedEnvIds.length === 0
-                      ? "先勾选环境再保存。"
-                      : `写入 ${selectedEnvIds.map(profileName).join("、")}`}
-                  </span>
-                </div>
-              </details>
-              <p className="field-hint mt-2">
-                怎么说话：上方选「角色」（增删在「设置 → 聊天」）。电脑休眠或关掉应用/浏览器时无法回复。
-              </p>
+              {/* 列表读不到时才露出手填；列表正常时不必出现 */}
+              {(!threads?.ok || threads.items.length === 0) && (
+                <details className="mt-2 rounded-lg bg-sunken px-2.5 py-2">
+                  <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground">
+                    手动填写（列表读不到时用）
+                  </summary>
+                  <textarea
+                    className="field-input mt-2 h-24 w-full resize-none font-mono text-caption"
+                    placeholder={"每行一位：昵称 | 会话URL"}
+                    value={targetsText}
+                    onChange={(event) => setTargetsText(event.target.value)}
+                  />
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-compact h-7"
+                      disabled={saving || selectedEnvIds.length === 0}
+                      onClick={() => void handleSave()}
+                    >
+                      <Save size={13} />
+                      {saving ? "保存中…" : "保存手填名单"}
+                    </button>
+                  </div>
+                </details>
+              )}
 
               {suspendedRows.length > 0 ? (
                 <div className="mt-3 space-y-1.5 rounded bg-warning/10 px-2 py-1.5 ring-1 ring-inset ring-warning/30">
@@ -1416,8 +1449,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
             {!profileId ? (
               <section className="well p-3">
                 <p className="text-caption leading-5 text-muted-foreground">
-                  左侧还没有勾选任何环境。勾选一个运行中的环境后，这里会显示它的值守控制、联系人与
-                  值守日志。
+                  左侧勾选环境后，这里显示自动聊天状态、联系人与过程日志。
                 </p>
               </section>
             ) : (
@@ -1430,7 +1462,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                     ) : (
                       <>
                         <span className={`badge ${running ? "badge-success" : "badge"}`}>
-                          {running ? "值守中" : "空闲"}
+                          {running ? "聊天中" : "空闲"}
                         </span>
                         <span
                           className="badge badge-info"
@@ -1443,7 +1475,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                         </span>
                         <span className="badge" title={status.snapshot?.nextWakeAt ?? ""}>
                           <Clock size={10} />
-                          下次续盯 {formatRelative(status.snapshot?.nextWakeAt)}
+                          下次检查 {formatRelative(status.snapshot?.nextWakeAt)}
                         </span>
                         <span className="badge" title="今日已发送 / 累计">
                           今日 {status.snapshot?.sentToday ?? 0} / 共 {status.snapshot?.sentTotal ?? 0}
@@ -1507,8 +1539,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                     <p className="mt-1.5 text-caption text-destructive">状态读取失败：{statusError}</p>
                   ) : null}
                   <p className="field-hint mt-1.5">
-                    一片最长约 {Math.max(1, Math.round(settings.sliceMs / 60_000))}{" "}
-                    分钟会让位一次（不是监控结束）；总开关开着时调度器会马上再拉起继续盯。同一环境同一时刻只允许一个任务占用浏览器。
+                    总开关开着且有勾选时持续自动聊。同一环境同一时刻只允许一个任务占用浏览器。
                   </p>
                 </section>
 
@@ -1525,8 +1556,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                       <p className="text-caption text-muted-foreground">读取中…</p>
                     ) : effectiveContacts.length === 0 ? (
                       <p className="text-caption leading-5 text-muted-foreground">
-                        该环境还没有聊天记忆。先在左侧「要聊的人」里勾选并保存，再点「开始聊天」；
-                        第一次聊成功后这里就会出现联系人卡片。
+                        该环境还没有聊天记忆。勾选聊天列表里的人并点「开始聊天」后会出现联系人卡片。
                       </p>
                     ) : (
                       effectiveContacts.map((contact, index) => (
@@ -1551,7 +1581,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
 
                 <section className="well p-3">
                   <div className="mb-2 flex items-center justify-between gap-2">
-                    <p className="section-title">值守过程日志</p>
+                    <p className="section-title">过程日志</p>
                     <button
                       type="button"
                       className="btn btn-ghost btn-compact h-6 text-caption"
@@ -1573,8 +1603,7 @@ export function ChatModeModal({ open, onClose, profiles, onError, onToast }: Cha
                   >
                     {logLines.length === 0 ? (
                       <p className="text-muted-foreground">
-                        这是值守过程（读到消息、发送、转人工）。对方说过的话在上面联系人卡片里。
-                        关掉再开会从本机恢复。
+                        读到消息、发送、转人工会显示在这里。
                       </p>
                     ) : (
                       logLines.map((line, index) => (

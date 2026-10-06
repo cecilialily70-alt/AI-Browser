@@ -269,10 +269,17 @@ export function ContactCard({
               disabled={flagsBusy}
               onChange={(next) => onToggleFlags(contact, "autoReply", next)}
             />
+            <FlagToggle
+              label="主动追问"
+              hint="对方一阵不回时，按角色往目标轻推几句（不冷场；关掉＝只回话不催）"
+              checked={contact.followUp !== false}
+              disabled={flagsBusy || !autoReplyOn}
+              onChange={(next) => onToggleFlags(contact, "followUp", next)}
+            />
           </div>
           {!autoReplyOn ? (
             <p className="text-caption text-warning">
-              「自动聊天」关着 → 不会开场、也不会回话（对方没回时本来也不会主动追）。想让它聊就打开这个开关。
+              「自动聊天」关着 → 不会开场、回话，也不会主动追问。想让它聊就打开这个开关。
             </p>
           ) : null}
 
@@ -289,6 +296,12 @@ export function ContactCard({
               <span className="text-foreground/70">会话：</span>
               {contact.messageCount} 条流水
             </p>
+            {(contact.suspectedTradeCount ?? 0) > 0 ? (
+              <p className="text-warning">
+                <span className="text-foreground/70">疑似交易：</span>
+                {contact.suspectedTradeCount}
+              </p>
+            ) : null}
             <p>
               <span className="text-foreground/70">下次续盯：</span>
               {formatRelative(contact.nextCheckAt)}

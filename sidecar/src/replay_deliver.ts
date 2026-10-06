@@ -22,8 +22,7 @@ const DELIVER_CONFIRM_PAUSE_MS = 400;
 const DELIVERABLE_GOAL_RE =
   /总结|简化|分析|提取|理解|解读|归纳|概括|提炼|告诉我|发给我|发送给我|回复我|报告|汇报|回答我/i;
 
-/** @deprecated 保留别名：仅认知/交付类提示词才 AI 介入 */
-export function goalRequiresDeliverable(goal: string): boolean {
+function goalRequiresDeliverable(goal: string): boolean {
   return DELIVERABLE_GOAL_RE.test(String(goal ?? ""));
 }
 

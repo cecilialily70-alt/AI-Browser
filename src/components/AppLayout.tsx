@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import {
   CheckCircle2,
+  FolderOpen,
   HelpCircle,
   Info,
   LayoutGrid,
@@ -34,6 +35,7 @@ import {
   fetchSettings,
   formatInvokeError,
   importProfileCookies,
+  openDownloadDir,
   startProfile,
   stopProfile,
 } from "../lib/tauri";
@@ -602,6 +604,42 @@ export function AppLayout() {
           >
             <LayoutGrid size={13} />
             批量
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-compact h-7"
+            onClick={() => {
+              void (async () => {
+                try {
+                  const opened = await openDownloadDir("browser");
+                  showNotice("success", `已打开下载目录：${opened}`);
+                } catch (error) {
+                  showError(formatInvokeError(error));
+                }
+              })();
+            }}
+            title="打开常规浏览器下载目录"
+          >
+            <FolderOpen size={13} />
+            打开下载目录
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-compact h-7"
+            onClick={() => {
+              void (async () => {
+                try {
+                  const opened = await openDownloadDir("scraper");
+                  showNotice("success", `已打开数据目录：${opened}`);
+                } catch (error) {
+                  showError(formatInvokeError(error));
+                }
+              })();
+            }}
+            title="打开数据目录"
+          >
+            <FolderOpen size={13} />
+            打开数据目录
           </button>
           <button
             type="button"

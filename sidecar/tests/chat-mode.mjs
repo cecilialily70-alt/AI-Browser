@@ -525,23 +525,36 @@ function fakeContext(pages, onNewPage) {
   };
 }
 
-test("聊天标签：同一片内复用（不每片一开）", async () => {
+test("聊天标签：无聊天站页时不新开标签（抛 no_open_chat_page）", async () => {
+  const { NoOpenChatPageError } = await import("../dist/bu_agent/chat_actions.js");
   const context = fakeContext([]);
+  await assert.rejects(
+    () => ensureChatPage(context),
+    (error) => error instanceof NoOpenChatPageError || /no_open_chat_page/.test(String(error?.message ?? error)),
+  );
+  assert.equal(context.opened, 0);
+});
+
+test("聊天标签：同一片内复用已认领的站页（不每片一开）", async () => {
+  const site = fakeChatPage({
+    url: "https://web.whatsapp.com/",
+    title: "WhatsApp",
+    own: false,
+  });
+  const context = fakeContext([site]);
   const first = await ensureChatPage(context);
-  assert.equal(first.created, true);
-  assert.equal(context.opened, 1);
+  assert.equal(first.created, false);
+  assert.equal(first.adopted, true);
+  assert.equal(context.opened, 0);
 
   const second = await ensureChatPage(context);
   assert.equal(second.created, false);
-  assert.equal(second.adopted, false);
   assert.equal(second.page, first.page);
-  // 进程内缓存命中：**不再新开**（同一个账号的多个会话共用这一个标签）
-  assert.equal(context.opened, 1);
+  assert.equal(context.opened, 0);
 });
 
 test("聊天标签：sidecar 重启后认领上次留下的标签（否则每片都新开一个窗口）", async () => {
-  // 现场：缓存（WeakMap）随进程消失，但标签还开着 —— 不认它就会**每片新开一个**，
-  // 而目标往往是同一个账号里的不同会话，于是用户浏览器里堆一排我们开的页。
+  // 现场：缓存（WeakMap）随进程消失，但标签还开着 —— 不认它就会失败（不再新开）。
   const leftover = fakeChatPage({
     url: "https://web.telegram.org/k/#@Alyssa",
     title: "Alyssa",
@@ -555,7 +568,7 @@ test("聊天标签：sidecar 重启后认领上次留下的标签（否则每片
   assert.equal(context.opened, 0);
 });
 
-test("聊天标签：认领只认带标记的标签，绝不劫持用户的窗口", async () => {
+test("聊天标签：认领已打开的聊天站页（用户窗也可，不另开标签）", async () => {
   const userTab = fakeChatPage({
     url: "https://web.telegram.org/k/#@Alyssa",
     title: "Alyssa",
@@ -563,17 +576,58 @@ test("聊天标签：认领只认带标记的标签，绝不劫持用户的窗�
   });
   const context = fakeContext([userTab]);
   const result = await ensureChatPage(context);
-  assert.equal(result.created, true);
-  assert.equal(result.adopted, false);
-  assert.equal(context.opened, 1, "用户自己的标签不能被当成聊天专用标签");
+  assert.equal(result.created, false);
+  assert.equal(result.adopted, true);
+  assert.equal(result.page, userTab);
+  assert.equal(context.opened, 0, "不得另开新标签");
 });
 
-test("聊天标签的标记用 page.addInitScript（导航后仍认得出自己）", async () => {
-  // `evaluate` 打的标记只活在当前文档，`page.goto` 到某个会话就没了 ——
-  // 于是「排除自开标签」「跨进程认领」双双失效（现场就是「每次都开一个新窗口」）。
-  const context = fakeContext([]);
-  const { page } = await ensureChatPage(context);
-  assert.ok(page.initScripts >= 1, "必须用页级 addInitScript 打标记（只对本标签生效）");
+test("打开会话：对话头已是目标人 → 跳过点击与导航", async () => {
+  const page = fakeChatPage({
+    url: "https://web.whatsapp.com/",
+    title: "WhatsApp",
+    chatPage: true,
+    openHeader: "8522656565",
+  });
+  const result = await openContact(page, { label: "8522656565", url: null });
+  assert.equal(result.ok, true);
+  assert.equal(result.navigated, false);
+  assert.equal(page.navigations, 0);
+  assert.equal(page.listClicks, 0);
+});
+
+test("打开会话：对话头是别人 → 必须点列表切换", async () => {
+  const page = fakeChatPage({
+    url: "https://web.whatsapp.com/",
+    title: "WhatsApp",
+    chatPage: true,
+    openHeader: "8522656565",
+    listLabels: ["8522656565", "85265681111"],
+  });
+  const result = await openContact(page, { label: "85265681111", url: null });
+  assert.equal(result.ok, true);
+  assert.equal(result.navigated, true);
+  assert.ok(page.listClicks >= 1, "应点击会话列表切换");
+  assert.equal(page.openHeader, "85265681111");
+});
+
+test("打开会话：点完列表头仍是别人 → 失败（禁止当成打开成功）", async () => {
+  const page = fakeChatPage({
+    url: "https://web.whatsapp.com/",
+    title: "WhatsApp",
+    chatPage: true,
+    openHeader: "8522656565",
+    listLabels: ["85265681111"],
+    stickyHeader: true,
+  });
+  const result = await openContact(page, { label: "85265681111", url: null });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.reason === "list_click_opened_wrong_contact" ||
+      result.reason === "wrong_conversation_open" ||
+      result.reason === "opened_contact_mismatch",
+    `应因窗口不对失败，实际 reason=${result.reason}`,
+  );
 });
 
 /* ————————————————————————— 同一账号多会话：必须真的切过去 ————————————————————————— */
@@ -586,6 +640,7 @@ test("打开会话：同一账号里两个会话只有 hash 不同 → 必须导
     url: "https://web.telegram.org/k/#@Alyssa",
     title: "Alyssa",
     chatPage: true,
+    openHeader: "Alyssa",
   });
   const result = await openContact(page, { label: "Bob", url: "https://web.telegram.org/k/#@Bob" });
   assert.equal(result.ok, true);
@@ -599,6 +654,7 @@ test("打开会话：确实已经在目标会话上时不重复导航（只差�
     url: "https://web.telegram.org/k/#@Bob",
     title: "Bob",
     chatPage: true,
+    openHeader: "Bob",
   });
   const result = await openContact(page, { label: "Bob", url: "https://web.telegram.org/k#@Bob" });
   assert.equal(result.ok, true);
@@ -607,16 +663,28 @@ test("打开会话：确实已经在目标会话上时不重复导航（只差�
 });
 
 /**
- * 假页面：只实现 `resolveCurrentConversation` / `ensureChatPage` 真正用到的那几个方法
- * （`isClosed` / `evaluate` / `url` / `addInitScript`），并记录有没有被导航或开新标签。
+ * 假页面：只实现 `resolveCurrentConversation` / `ensureChatPage` / `openContact` 用到的方法。
  */
-function fakeChatPage({ url, title, containerSelector = "#chat", chatPage = true, own = false }) {
+function fakeChatPage({
+  url,
+  title,
+  containerSelector = "#chat",
+  chatPage = true,
+  own = false,
+  openHeader = null,
+  listLabels = [],
+  stickyHeader = false,
+}) {
   return {
     navigations: 0,
     newTabs: 0,
     initScripts: 0,
+    listClicks: 0,
     label: url,
     currentUrl: url,
+    openHeader,
+    listLabels,
+    stickyHeader,
     isClosed: () => false,
     url() {
       return this.currentUrl;
@@ -624,16 +692,73 @@ function fakeChatPage({ url, title, containerSelector = "#chat", chatPage = true
     async goto(target) {
       this.navigations += 1;
       this.currentUrl = target;
+      try {
+        const hash = new URL(target).hash.replace(/^#/, "");
+        if (hash && !this.stickyHeader) this.openHeader = hash.replace(/^@/, "") || this.openHeader;
+      } catch {
+        /* ignore */
+      }
     },
     async waitForLoadState() {},
     async waitForTimeout() {},
     async addInitScript() {
       this.initScripts += 1;
     },
+    async click(_selector) {
+      this.listClicks += 1;
+      if (!this.stickyHeader && this._pendingPick) this.openHeader = this._pendingPick;
+    },
+    viewportSize() {
+      return { width: 1280, height: 720 };
+    },
+    locator() {
+      const self = this;
+      const loc = {
+        first() {
+          return loc;
+        },
+        async focus() {},
+        async click() {
+          self.listClicks += 1;
+          if (!self.stickyHeader && self._pendingPick) self.openHeader = self._pendingPick;
+        },
+        async boundingBox() {
+          return { x: 8, y: 8, width: 120, height: 24 };
+        },
+        async evaluate() {
+          return null;
+        },
+      };
+      return loc;
+    },
     async evaluate(fn, arg) {
       if (typeof arg === "string" && arg === "__tst_chat_tab") return own;
+      // 读对话头：selectors 数组
+      if (Array.isArray(arg) && arg.every((item) => typeof item === "string")) {
+        return this.openHeader;
+      }
+      // 点列表：{ target, digits } → 与 clickContactInList 的 PickProbe 对齐
+      if (arg && typeof arg === "object" && "target" in arg && "digits" in arg) {
+        const needle = String(arg.target ?? "");
+        const digits = String(arg.digits ?? "");
+        const hit = (this.listLabels || []).find((label) => {
+          const text = String(label);
+          if (text.includes(needle)) return true;
+          const textDigits = text.replace(/\D+/g, "");
+          return digits.length >= 6 && (textDigits === digits || textDigits.endsWith(digits) || digits.endsWith(textDigits));
+        });
+        if (!hit) {
+          return { selector: null, candidateCount: 0, scoped: true, sampleTitleLen: 0 };
+        }
+        this._pendingPick = hit;
+        return {
+          selector: '[data-tst-chat-pick="1"]',
+          candidateCount: 1,
+          scoped: true,
+          sampleTitleLen: String(hit).length,
+        };
+      }
       if (typeof fn === "function" && fn.name === "readPageMeta") return undefined;
-      // probeChatDom：返回一份最小但结构完整的探针结果
       if (arg && typeof arg === "object" && "maxContainers" in arg) {
         return chatPage
           ? {
@@ -683,7 +808,6 @@ function fakeChatPage({ url, title, containerSelector = "#chat", chatPage = true
               viewport: { width: 1280, height: 800 },
             };
       }
-      // readPageMeta 的页内函数没有入参：直接回标题/URL
       if (arg === undefined) return { title, url };
       return null;
     },

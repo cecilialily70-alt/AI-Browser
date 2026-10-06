@@ -449,6 +449,8 @@ export async function chatStart(input: {
   /** 目标里 @ 展开后的规则/人设（没有 @ 不要传） */
   taskRules?: unknown[] | null;
   taskPersona?: { label: string; fixed: Record<string, string> } | null;
+  /** 已配置付款方式（USDT/银行卡等） */
+  paymentMethods?: Array<{ id: string; kind: string; label: string; value: string }> | null;
 }): Promise<ChatSliceResult> {
   return invoke<ChatSliceResult>("chat_start", {
     profileId: input.profileId,
@@ -462,6 +464,7 @@ export async function chatStart(input: {
     roles: input.roles ?? null,
     activeRoleId: input.activeRoleId ?? null,
     mediaLibraryDir: input.mediaLibraryDir?.trim() || null,
+    paymentMethods: input.paymentMethods ?? null,
     sliceMs: input.sliceMs ?? null,
     maxContactsPerSlice: input.maxContactsPerSlice ?? null,
     useCurrentWindow: input.useCurrentWindow ?? false,

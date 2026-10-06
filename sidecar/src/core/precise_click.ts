@@ -204,16 +204,26 @@ function snapshotChanged(before: ChoiceSnapshot | null, after: ChoiceSnapshot | 
 
 /** 物理点击（主文档视口坐标）：`mouse` 只存在于 Page 上，因此这里必须由调用方换算好坐标 */
 async function clickPagePoint(owner: Page, x: number, y: number): Promise<void> {
-  try {
-    await owner.mouse.click(x, y);
-  } catch {
-    await owner.mouse.move(x, y);
-    await owner.mouse.click(x, y);
-  }
+  await owner.mouse.click(x, y);
 }
 
-/** 页面内原生激活（针对视觉折叠、鼠标点不到的控件），在元素自己的文档里执行 */
+/** 先 Locator 物理点击；页面内原生激活仅作视觉折叠控件的最后兜底 */
 async function nativeActivate(page: DomScope, target: ParsedTarget): Promise<boolean> {
+  const playwrightSelector = target.xpath ? `xpath=${target.xpath}` : target.selector;
+  if (playwrightSelector) {
+    const locator = page.locator(playwrightSelector).first();
+    try {
+      await locator.click({ timeout: 2_000 });
+      return true;
+    } catch {
+      try {
+        await locator.click({ force: true, timeout: 2_000 });
+        return true;
+      } catch {
+        /* fall through to DOM click */
+      }
+    }
+  }
   try {
     return Boolean(
       await page.evaluate((t: ParsedTarget) => {
@@ -250,14 +260,14 @@ async function nativeActivate(page: DomScope, target: ParsedTarget): Promise<boo
         };
         const root = resolve();
         if (!root) return false;
-        const target =
+        const targetEl =
           root instanceof HTMLInputElement
             ? root
             : ((root.querySelector("input[type='checkbox'],input[type='radio']") as HTMLElement | null) ??
               (root as HTMLElement));
-        if (typeof target.click !== "function") return false;
-        target.focus?.({ preventScroll: true });
-        target.click();
+        if (typeof targetEl.click !== "function") return false;
+        targetEl.focus?.({ preventScroll: true });
+        targetEl.click();
         return true;
       }, target),
     );

@@ -139,13 +139,27 @@ export interface ChatModeSettings {
    */
   taskRules: unknown[] | null;
   taskPersona: { label: string; fixed: Record<string, string> } | null;
+  /**
+   * 已配置付款方式（USDT/银行卡等）。对方要地址时只发这里的纯内容，禁止编造。
+   * 目标框里若粘了钱包地址，保存时也会自动并入。
+   */
+  paymentMethods: ChatPaymentMethod[];
+}
+
+export type ChatPaymentKind = "usdt_trc20" | "usdt_erc20" | "bank" | "other";
+
+export interface ChatPaymentMethod {
+  id: string;
+  kind: ChatPaymentKind;
+  label: string;
+  value: string;
 }
 
 /** 一位联系人的两个开关；缺省（未设置）＝开 */
 export interface ChatContactFlags {
   /** 对方来消息时引擎回不回 */
   autoReply?: boolean;
-  /** 兼容读：曾表示「到点要不要主动找话」；引擎不读，主动追发已下线 */
+  /** 对方沉默时是否主动追问（不冷场）；缺省＝开 */
   followUp?: boolean;
 }
 
@@ -180,6 +194,7 @@ export const DEFAULT_CHAT_MODE_SETTINGS: ChatModeSettings = {
   mediaLibraryDir: "",
   taskRules: null,
   taskPersona: null,
+  paymentMethods: [],
 };
 
 export const CHAT_SLICE_MS_MIN = 15_000;
@@ -343,6 +358,84 @@ function parseContactFlags(
  * 解析角色库。坏条目**跳过并记诊断**，不整份崩掉；超上限截断并说明。
  * id / name 必填；prompt 允许空串（用户可后补）。
  */
+function parsePaymentMethods(raw: unknown, diagnostics: string[]): ChatPaymentMethod[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    diagnostics.push("付款方式不是列表，已忽略");
+    return [];
+  }
+  const out: ChatPaymentMethod[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < raw.length; index += 1) {
+    const entry = raw[index];
+    if (typeof entry !== "object" || entry === null) {
+      diagnostics.push(`付款方式第 ${index + 1} 条无法识别，已跳过`);
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const value = String(record.value ?? "").trim();
+    if (!value || value.length > 200) {
+      diagnostics.push(`付款方式第 ${index + 1} 条内容无效，已跳过`);
+      continue;
+    }
+    const id = String(record.id ?? "").trim() || `pay_${index + 1}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const kindRaw = String(record.kind ?? "other").trim().toLowerCase();
+    const kind: ChatPaymentKind =
+      kindRaw === "usdt_trc20" ||
+      kindRaw === "usdt_erc20" ||
+      kindRaw === "bank" ||
+      kindRaw === "other"
+        ? kindRaw
+        : "other";
+    out.push({
+      id,
+      kind,
+      label: String(record.label ?? "").trim().slice(0, 60) || kind,
+      value,
+    });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+function extractPaymentMethodsFromGoal(goal: string): ChatPaymentMethod[] {
+  const found: ChatPaymentMethod[] = [];
+  const tron = String(goal ?? "").match(/\bT[1-9A-HJ-NP-Za-km-z]{33}\b/);
+  if (tron) {
+    found.push({
+      id: "goal_usdt_trc20",
+      kind: "usdt_trc20",
+      label: "USDT-TRC20",
+      value: tron[0],
+    });
+  }
+  const eth = String(goal ?? "").match(/\b0x[a-fA-F0-9]{40}\b/);
+  if (eth) {
+    found.push({
+      id: "goal_usdt_erc20",
+      kind: "usdt_erc20",
+      label: "USDT-ERC20",
+      value: eth[0],
+    });
+  }
+  return found;
+}
+
+function mergePaymentMethods(
+  configured: ChatPaymentMethod[],
+  fromGoal: ChatPaymentMethod[],
+): ChatPaymentMethod[] {
+  const byValue = new Map<string, ChatPaymentMethod>();
+  for (const method of [...configured, ...fromGoal]) {
+    const key = method.value.replace(/\s+/g, "").toLowerCase();
+    if (!key || byValue.has(key)) continue;
+    byValue.set(key, method);
+  }
+  return [...byValue.values()];
+}
+
 function parseRoles(raw: unknown, diagnostics: string[]): ChatRole[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
@@ -471,6 +564,11 @@ export function parseChatModeSettings(raw: unknown): ChatModeSettingsParseResult
 
   const roles = parseRoles(source.roles, diagnostics);
   const activeRoleId = parseActiveRoleId(source.activeRoleId, roles, diagnostics);
+  const goalText = typeof source.goal === "string" ? source.goal : "";
+  const paymentMethods = mergePaymentMethods(
+    parsePaymentMethods(source.paymentMethods, diagnostics),
+    extractPaymentMethodsFromGoal(goalText),
+  );
 
   let mediaLibraryDir = "";
   if (source.mediaLibraryDir !== undefined && source.mediaLibraryDir !== null) {
@@ -490,9 +588,10 @@ export function parseChatModeSettings(raw: unknown): ChatModeSettingsParseResult
 
   const settings: ChatModeSettings = {
     enabled: source.enabled === true || source.enabled === "true" || source.enabled === 1,
-    goal: typeof source.goal === "string" ? source.goal : "",
+    goal: goalText,
     styleHint: typeof source.styleHint === "string" ? source.styleHint : "",
     bannedWords,
+    paymentMethods,
     sliceMs: clampNumber(
       source.sliceMs,
       DEFAULT_CHAT_MODE_SETTINGS.sliceMs,

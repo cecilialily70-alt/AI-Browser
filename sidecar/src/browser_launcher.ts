@@ -9,7 +9,7 @@ import {
 } from "cloakbrowser";
 import type { BrowserContext } from "playwright-core";
 
-import { HUMAN_MOUSE_CONFIG, HUMAN_PRESET, loadCloakExtras } from "./cloakbrowser_extra.js";
+import { HUMAN_CONFIG, HUMAN_PRESET, loadCloakExtras } from "./cloakbrowser_extra.js";
 import { ensureBinaryHonoringVersionPin } from "./ensure_binary_pin.js";
 import {
   applyBrowserDownloadDir,
@@ -1056,7 +1056,7 @@ async function launchBrowserContext(runtime: ProfileLaunchRuntime): Promise<Brow
       geoip: runtime.forceGeoip,
       humanize: runtime.forceHumanize,
       humanPreset: HUMAN_PRESET,
-      humanConfig: { ...HUMAN_MOUSE_CONFIG },
+      humanConfig: { ...HUMAN_CONFIG },
       licenseKey,
       browserVersion,
       releaseChannel,

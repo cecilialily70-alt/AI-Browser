@@ -13,7 +13,7 @@ import type { ChatMessage } from "./conversation_extract.js";
 
 /** 发送前闸门判定 */
 export type ChatSendGateResult =
-  | { allow: true }
+  | { allow: true; rewriteText?: string }
   | { allow: false; kind: "redline"; reason: string; needHandover: boolean }
   | { allow: false; kind: "banned"; reason: string };
 
@@ -113,6 +113,8 @@ export interface ChatEngineDeps {
     history: DedupeHistory;
     rewriteHint: string | null;
     isFollowUp: boolean;
+    /** opening＝冷开场；due＝温热追问 */
+    planReason?: "opening" | "due" | null;
     /** 本轮意图硬指令（信任攻击/提问等；可空） */
     intentDirective?: string | null;
     /** 本轮 texts 上限（默认 1） */
@@ -267,6 +269,11 @@ export interface ChatEngineDeps {
    * 配成 `0` 即「不限」）。
    */
   pacing?: PacingConfig;
+  /**
+   * 已配置的付款方式（USDT/银行卡等）。空 = 对方要付款方式时交人工配置。
+   * 聊天模式只许发这里的纯内容，禁止编造支付通道。
+   */
+  paymentMethods?: readonly import("./chat_payment.js").ChatPaymentMethod[];
 }
 
 export interface ChatEngineOptions {

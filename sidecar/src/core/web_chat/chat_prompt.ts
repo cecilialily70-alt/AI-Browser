@@ -37,8 +37,10 @@ export interface ChatDraftPromptInput {
   recent: readonly ChatMessage[];
   /** 本次是主动开口（对方没未回复）还是回复对方 */
   isFollowUp: boolean;
-  /** 开场序号（首次接触为 0） */
+  /** 开场序号（首次接触为 0）；温热追问时表示已追次数 */
   followUpIndex: number;
+  /** opening＝冷开场；due＝温热追问；缺省按 followUpIndex 推断 */
+  planReason?: "opening" | "due" | null;
   /** 去重拒绝后的强制重写提示（含「你已说过」的原句） */
   rewriteHint: string | null;
   /** 本轮意图指令（信任攻击/提问等；可空） */
@@ -77,24 +79,202 @@ export const CHAT_DRAFT_SYSTEM_PROMPT = [
   "",
   "硬性要求：",
   "1. 输出 JSON：默认只发 1 句（texts 数组一个元素）。一句说清；没说完下轮再说。只有对方一口气问了多个问题时，才可发 2～3 句。",
-  "2. 用对方使用的语言回话（对方说中文就用中文）。",
-  "3. 每句像真人打字：自然、完整；匹配对方消息长短，不要小作文，也不要无端截断。",
+  "2. 回话语言必须与对方最近消息一致（对方使用的语言）：对方用英文就全程英文，用中文就全程中文，用其它语种就用该语种；禁止中英夹杂、先英后中。角色提示或任务目标若是另一种文字，只影响人设与事实，不改变回话语种。",
+  "3. 口气与书写习惯都要跟对方当地人日常私聊：口语、自然、短句；对方少用句号/破折号你就少用；匹配对方语气松紧与消息长短，不要翻译腔、不要客服稿、不要小作文，也不要无端截断。",
   "4. 必须先回应对方刚说的内容；对方连发多条时合起来理解。有提问或质疑时先答，答完前禁止推销。",
   "5. 严禁复述、改写、换同义词重复你之前已经说过的话。",
-  "6. 不要出现机器痕迹：不写「作为AI」「我代表」、不堆感叹号、不用书面语排比、不群发口吻。",
+  "6. 不要出现机器痕迹：不写「作为AI」「我代表」、不堆感叹号、不用书面语排比与破折号长句、不群发口吻。",
   "7. 不编造敏感与身份：验证码/密码/银行卡/证件/假人设一律禁止。对方纠正你说错的事实时必须先认错接住，禁止死撑旧说法。",
   "8. 商业目标下对方问价格/配置：必须给出你这边的渠道大致价或常见价位区间（可说「大概」「左右」），并顺带问清版本/容量；禁止空推「还没官宣 / 给不了数字 / 等官宣」——若角色或目标已写明价目，以那份为准。",
   "9. 不索要或发送验证码、密码、银行卡、身份证等敏感信息；对方索要时委婉拒绝并转移话题。",
   "10. 不说「已收到」「感谢咨询」这类客服话术。",
-  "11. 对方质疑你是骗子/机器人时：必须先正面澄清，本轮禁止继续产品话术。",
+  "11. 对方质疑你是骗子/机器人时：只用一句短口语正面澄清，本轮禁止提产品/型号/颜色/成交，禁止长篇自辩。",
   "12. 不替对方做付款/转账决定，不承诺「已帮你付掉」。",
   "13. 对方要图：不要用连环问配置顶替。系统会从图库发图；你只写一句配图说明。库里没有对应图时如实说备图，不要空转问容量。",
   "14. 对方要语音或视频：不要主动说你不会/不能。用一句自然借口带过；可以请对方先看实拍。禁止承诺马上发语音、视频或通话。",
+  "15. 对方一阵没回、你主动追问时：像真人角色继续推进（老师会追问、销售会探需求、医生会问症状、朋友会找话说）——用 1 句有由头的问句或轻推，把话题往「本次任务目标」带；禁止空洞「在吗/还在吗/考虑得怎么样」；禁止连发施压；语气贴合角色。",
   "",
   "输出严格的 JSON（不要 markdown 代码块）：",
   '{"texts":["要发送的那一句"],"angle":"切入角度（4~10字）"}',
   "兼容旧格式：也接受 {\"text\":\"单句\",\"angle\":\"...\"}。",
 ].join("\n");
+
+/** 对方回话应使用的语种（由最近入站消息脚本统计；unknown = 不强锁） */
+export type PeerReplyLanguage = "zh" | "en" | "he" | "unknown";
+
+const LANG_LABEL: Readonly<Record<PeerReplyLanguage, string>> = {
+  zh: "中文",
+  en: "English",
+  he: "עברית / Hebrew",
+  unknown: "对方当前语种",
+};
+
+function countScriptSignals(text: string): { cjk: number; latin: number; hebrew: number } {
+  let cjk = 0;
+  let latin = 0;
+  let hebrew = 0;
+  for (const ch of String(text ?? "")) {
+    const code = ch.codePointAt(0);
+    if (code == null) continue;
+    if (code >= 0x4e00 && code <= 0x9fff) cjk += 1;
+    else if (code >= 0x0590 && code <= 0x05ff) hebrew += 1;
+    else if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)) latin += 1;
+  }
+  return { cjk, latin, hebrew };
+}
+
+/** 从一段文本推断主导语种（纯脚本统计，不猜语义） */
+export function scoreTextLanguage(text: string): PeerReplyLanguage {
+  const { cjk, latin, hebrew } = countScriptSignals(text);
+  const total = cjk + latin + hebrew;
+  if (total < 3) return "unknown";
+  if (hebrew >= cjk && hebrew >= latin && hebrew / total >= 0.25) return "he";
+  if (cjk >= latin && cjk / total >= 0.2) return "zh";
+  if (latin >= cjk && latin / total >= 0.35) return "en";
+  if (cjk > latin && cjk > hebrew) return "zh";
+  if (hebrew > latin) return "he";
+  if (latin > 0) return "en";
+  return "unknown";
+}
+
+/**
+ * 从最近对话推断**本轮回话语种**：优先看对方最近入站；没有入站时看整段最近文本。
+ * 对方用英文时绝不能回中文（现场：询价英文 → 机器人回中文）。
+ */
+export function inferPeerReplyLanguage(recent: readonly ChatMessage[]): PeerReplyLanguage {
+  const inbound = recent
+    .filter((message) => message.direction === "in")
+    .slice(-8)
+    .map((message) => String(message.text ?? "").trim())
+    .filter(Boolean);
+  if (inbound.length > 0) return scoreTextLanguage(inbound.join("\n"));
+  const any = recent
+    .slice(-12)
+    .map((message) => String(message.text ?? "").trim())
+    .filter(Boolean);
+  if (any.length === 0) return "unknown";
+  return scoreTextLanguage(any.join("\n"));
+}
+
+/** 草稿是否与对方语种一致；unknown / 极短草稿不拦 */
+export function draftMatchesPeerLanguage(
+  texts: readonly string[],
+  lang: PeerReplyLanguage,
+): boolean {
+  if (lang === "unknown") return true;
+  const joined = texts.map((item) => String(item ?? "").trim()).filter(Boolean).join("\n");
+  if (!joined) return true;
+  const detected = scoreTextLanguage(joined);
+  if (detected === "unknown") return true;
+  return detected === lang;
+}
+
+export function languageRewriteHint(lang: PeerReplyLanguage): string {
+  if (lang === "en") {
+    return "上一版草稿语种不对：对方在用英文。请用自然的日常英文重写整段 texts，禁止出现中文句子或中英夹杂。";
+  }
+  if (lang === "zh") {
+    return "上一版草稿语种不对：对方在用中文。请用自然的中文口语重写整段 texts，禁止整段改成英文。";
+  }
+  if (lang === "he") {
+    return "上一版草稿语种不对：对方在用希伯来语。请用希伯来语日常短口语重写整段 texts，少用句号与破折号。";
+  }
+  return "上一版草稿语种与对方不一致：请改用对方最近消息的同一种语言重写。";
+}
+
+function languageLockLine(lang: PeerReplyLanguage): string | null {
+  if (lang === "unknown") return null;
+  if (lang === "en") {
+    return `⚠ 回话语种锁定：English。本轮 texts 必须全部是英文日常口语（像当地人私聊），禁止中文句子或中英夹杂。角色/任务若是中文，只当事实参考，仍用英文说。`;
+  }
+  if (lang === "zh") {
+    return `⚠ 回话语种锁定：中文。本轮 texts 必须全部是中文日常口语，不要整段改成英文。`;
+  }
+  if (lang === "he") {
+    return `⚠ 回话语种锁定：${LANG_LABEL.he}。本轮 texts 必须全部用该语种日常短口语（像以色列人私聊打字），少用句号、逗号排比与破折号 —，不要翻译腔长句。`;
+  }
+  return null;
+}
+
+/** 对方私聊标点习惯：sparse = 几乎不用句号/破折号（以色列私聊现场） */
+export type PeerPunctuationHabit = "sparse" | "normal" | "unknown";
+
+const PUNCT_COMPLAINT_RE =
+  /(סימני\s*פיסוק|punctuation|不用标点|不加句号|不打句号|不使用标点|不用句号)/i;
+
+function countPunctSignals(text: string): { letters: number; terminals: number; emDashes: number } {
+  let letters = 0;
+  let terminals = 0;
+  let emDashes = 0;
+  for (const ch of String(text ?? "")) {
+    if (/\p{L}/u.test(ch)) letters += 1;
+    else if (/[.!?。！？…]/.test(ch)) terminals += 1;
+    else if (ch === "—" || ch === "–") emDashes += 1;
+  }
+  return { letters, terminals, emDashes };
+}
+
+/**
+ * 从对方最近入站推断标点习惯。
+ * 对方明确吐槽标点，或入站几乎无句号 → sparse。
+ */
+export function inferPeerPunctuationHabit(recent: readonly ChatMessage[]): PeerPunctuationHabit {
+  const inbound = recent
+    .filter((message) => message.direction === "in")
+    .slice(-8)
+    .map((message) => String(message.text ?? "").trim())
+    .filter(Boolean);
+  if (inbound.length === 0) return "unknown";
+  if (inbound.some((text) => PUNCT_COMPLAINT_RE.test(text))) return "sparse";
+  let letters = 0;
+  let terminals = 0;
+  let emDashes = 0;
+  for (const text of inbound) {
+    const signals = countPunctSignals(text);
+    letters += signals.letters;
+    terminals += signals.terminals;
+    emDashes += signals.emDashes;
+  }
+  if (letters < 10) return "unknown";
+  if (emDashes === 0 && terminals / letters <= 0.025) return "sparse";
+  return "normal";
+}
+
+/** sparse 习惯下：禁止破折号/分号，句号最多 0～1（长句不允许句号） */
+export function draftMatchesPeerPunctuation(
+  texts: readonly string[],
+  habit: PeerPunctuationHabit,
+): boolean {
+  if (habit !== "sparse") return true;
+  const joined = texts.map((item) => String(item ?? "").trim()).filter(Boolean).join("\n");
+  if (!joined) return true;
+  if (/[—–;；]/.test(joined)) return false;
+  const periods = (joined.match(/[.。]/g) ?? []).length;
+  if (periods >= 2) return false;
+  const letters = [...joined].filter((ch) => /\p{L}/u.test(ch)).length;
+  if (letters >= 18 && periods >= 1) return false;
+  return true;
+}
+
+export function punctuationRewriteHint(habit: PeerPunctuationHabit): string {
+  if (habit === "sparse") {
+    return "上一版草稿标点太书面：对方私聊几乎不用句号/破折号。请用短口语重写，尽量不加句号与 —，像当地人打字。";
+  }
+  return "上一版草稿口气太书面，请改成更口语的短句。";
+}
+
+function punctuationLockLine(
+  habit: PeerPunctuationHabit,
+  lang: PeerReplyLanguage,
+): string | null {
+  if (habit === "sparse") {
+    return "⚠ 书写习惯锁定：对方私聊几乎不用句号/破折号。本轮 texts 必须短口语、少标点（尽量不加句号与 —），禁止书面排比与小作文。";
+  }
+  if (lang === "he") {
+    return "⚠ 希伯来语私聊：短口语优先，少用句号与破折号；对方怎么打字你就怎么打。";
+  }
+  return null;
+}
 
 function directionLabel(direction: ChatMessage["direction"]): string {
   return direction === "out" ? "我" : "对方";
@@ -131,19 +311,39 @@ export function buildChatDraftMessages(input: ChatDraftPromptInput): Array<{
     lines.push("");
     lines.push(`⚠ 本轮硬性意图：${input.intentDirective}`);
   }
+  const peerLang = inferPeerReplyLanguage(input.recent);
+  const langLock = languageLockLine(peerLang);
+  if (langLock) {
+    lines.push("");
+    lines.push(langLock);
+  }
+  const peerPunct = inferPeerPunctuationHabit(input.recent);
+  const punctLock = punctuationLockLine(peerPunct, peerLang);
+  if (punctLock) {
+    lines.push("");
+    lines.push(punctLock);
+  }
   const maxBubbles = Math.max(1, Math.min(3, Math.trunc(input.maxBubbles ?? 1)));
   lines.push(`本轮最多发 ${maxBubbles} 句（texts 数组长度 ≤ ${maxBubbles}）。`);
   const hasHistory = input.longTermFacts.length > 0 || input.rollingSummary !== null || input.recent.length > 0;
+  const nudgeOrdinal = Math.max(1, Math.trunc(input.followUpIndex) + 1);
+  const isWarmSteer = input.isFollowUp && input.planReason === "due";
   lines.push(
     input.isFollowUp
-      ? input.followUpIndex === 0
-        ? hasHistory
-          ? // 会话里已有内容（对方说过、或历史被读进来），但我方还没开过口：
-            // 这时候要**顺着已有话题接上**，而不是再来一句「你好」（会像机器人）
-            "本次性质：**主动开口**（我方还没发过话，但会话里已有内容）——顺着已有的话题自然接上，不要客套、不要重问已经知道的事"
-          : // 开场与「回访」是两回事：把「第 0 次回访」塞给模型，出来的就是客套的「在吗」
-            "本次性质：**开场**（你主动发起的第一句，对方还没回过话）——具体、有由头、不客套；不要只说「你好 / 在吗」"
-        : `本次性质：**主动回访**（对方还没回话；这是第 ${input.followUpIndex} 次回访）——找一个新的、有由头的话题开口`
+      ? isWarmSteer
+        ? [
+            `本次性质：**主动追问 / 不冷场**（对方一阵没回；这是第 ${nudgeOrdinal} 次轻推）。`,
+            "按当前角色继续推进：老师会启发提问，销售会探清需求与顾虑，医生会追问症状细节，朋友会找自然话题——都要往「本次任务目标」轻轻带，不要空洞催「在吗」。",
+            "只发 1 句：有由头、可回答、换新角度；不要复读上一句，不要连发施压。",
+          ].join("")
+        : input.followUpIndex === 0
+          ? hasHistory
+            ? "本次性质：**主动开口**（我方还没发过话，但会话里已有内容）——顺着已有的话题自然接上，不要客套、不要重问已经知道的事"
+            : "本次性质：**开场**（你主动发起的第一句，对方还没回过话）——具体、有由头、不客套；不要只说「你好 / 在吗」"
+          : [
+              `本次性质：**主动追问 / 不冷场**（对方一阵没回；这是第 ${input.followUpIndex} 次轻推）。`,
+              "按当前角色继续推进，把话题往「本次任务目标」轻轻带；只发 1 句有由头的问句，禁止空洞「在吗」。",
+            ].join("")
       : "本次性质：**回复对方**（对方刚发了消息）",
   );
 

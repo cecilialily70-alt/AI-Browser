@@ -29,8 +29,13 @@ import {
   isUnrequestedDeliverable,
   isUnverifiableNavigation,
   listPendingDeliverables,
+  isSearchResultsArrival,
+  isSearchSubmitDeliverable,
+  strongElementStateHints,
 } from "../dist/bu_agent/task_contract.js";
+import { absorbPlanDeliverables } from "../dist/bu_agent/replan.js";
 import { verifyDeliverable } from "../dist/core/deliverable_verify.js";
+import { pageIsSerpForQuery } from "../dist/bu_agent/deterministic.js";
 
 const SIDECAR_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const LEXICON = loadCompletionLexicon();
@@ -335,6 +340,173 @@ test("契约生成：有具体目的地的 navigation 照旧保留（不是一�
     raw: [{ kind: "navigation", text: "打开 https://example.com/apply 申请页", hints: ["example.com/apply"] }],
   });
   assert.ok(contract.deliverables.some((spec) => spec.kind === "navigation"));
+});
+
+test("搜索+总结：进入结果页并入 submitted，不另立 element_state 债", () => {
+  const contract = deriveContractFromRules({
+    goal: "搜索李世民然后总结第一条结果",
+    intent: "informational",
+    plan: ["在搜索框输入「李世民」并提交", "确认已进入搜索结果页", "总结第一条结果"],
+    queryTerms: ["李世民"],
+  });
+  assert.equal(contract.deliverables.filter((spec) => spec.kind === "element_state").length, 0);
+  assert.equal(contract.deliverables.filter((spec) => spec.kind === "submitted").length, 1);
+  assert.ok(contract.deliverables.some((spec) => spec.kind === "answer_given"));
+});
+
+test("模型把进入结果页标成 element_state：合并进 submitted，不留第三笔债", () => {
+  const contract = buildTaskContract({
+    goal: "搜索李世民然后总结第一条结果",
+    intent: "informational",
+    raw: [
+      { text: "搜索李世民并进入搜索结果页", kind: "navigation", required: true, hints: ["进入", "结果页"] },
+      { text: "读取并汇报第一条搜索结果", kind: "answer_given", required: true },
+      { text: "打开搜索引擎首页，在搜索框中输入「李世民」并提交搜索", kind: "submitted", required: true },
+    ],
+  });
+  assert.deepEqual(
+    contract.deliverables.map((spec) => spec.kind),
+    ["submitted", "answer_given"],
+  );
+});
+
+test("verifyElementState：已在检索词 SERP 上则核销进入结果页", () => {
+  assert.equal(isSearchResultsArrival("搜索李世民并进入搜索结果页", ["进入", "结果页"]), true);
+  assert.equal(isSearchResultsArrival("在联系人列表找到 Anne 并进入对话", ["进入"]), false);
+  const result = verifyDeliverable(
+    {
+      id: "element_state#1",
+      kind: "element_state",
+      text: "搜索李世民并进入搜索结果页",
+      hints: ["进入", "结果页"],
+      required: true,
+    },
+    {
+      goal: "搜索李世民然后总结第一条结果",
+      ledger: ledgerOf({
+        startUrl: "https://www.baidu.com/",
+        facts: [{ kind: "navigated", step: 2, url: "https://www.baidu.com/s?wd=x", detail: "url changed" }],
+        lastMutationStep: 2,
+      }),
+      currentUrl: "https://www.baidu.com/s?wd=%E6%9D%8E%E4%B8%96%E6%B0%91",
+      serpForQuery: true,
+    },
+  );
+  assert.equal(result.ok, true, result.reason);
+});
+
+test("pageIsSerpForQuery：动作后地址已是编码检索词的结果页（观察时的 pageFacts 会过期）", () => {
+  assert.equal(
+    pageIsSerpForQuery("https://www.baidu.com/s?ie=utf-8&wd=%E6%9D%8E%E4%B8%96%E6%B0%91", ["李世民"]),
+    true,
+  );
+  assert.equal(pageIsSerpForQuery("https://www.baidu.com/", ["李世民"]), false);
+});
+
+test("点图/下载第二张不得收成「到达结果页」submitted，也不得因站在 SERP 被核销", () => {
+  const planText =
+    "在当前已打开的 Google 图片结果页（udm=2）上，用 scroll 把图片网格滚入视口，找到第二张缩略图对应的可点击编号后用 click 点击第二张图片";
+  assert.equal(isSearchResultsArrival(planText), false);
+  const contract = buildTaskContract({
+    goal: "点击图片并下载第二张图片",
+    intent: "generic",
+    raw: [
+      { text: "点击图片栏目", kind: "element_state" },
+      { text: "下载第二张图片", kind: "download" },
+    ],
+    plan: ["点击图片", "下载第二张图片"],
+  });
+  const ledger = createDeliverableLedger(contract);
+  assert.deepEqual(
+    absorbPlanDeliverables(ledger, [planText, "下载第二张图片"]),
+    [],
+  );
+  // 重规划「确认进入结果页」也不得偷加 submitted（目标从未要求搜索提交债）
+  assert.deepEqual(absorbPlanDeliverables(ledger, ["确认已进入搜索结果页", "下载第二张图片"]), []);
+  const settled = verifyDeliverable(
+    { id: "submitted#9", kind: "submitted", text: planText, hints: ["结果页"], required: true },
+    {
+      goal: "点击图片并下载第二张图片",
+      ledger: ledgerOf({ startUrl: "https://www.google.com/search?q=x" }),
+      currentUrl: "https://www.google.com/search?q=%E6%9D%A8%E5%B9%82&udm=2",
+      serpForQuery: true,
+    },
+  );
+  assert.notEqual(settled.ok, true, settled.reason);
+});
+
+test("submitted SERP 捷径只服务搜索到达债，注册提交不得因停在谷歌结果页被核销", () => {
+  assert.equal(isSearchSubmitDeliverable("搜索王健林并进入搜索结果页"), true);
+  assert.equal(isSearchSubmitDeliverable("提交注册表单", ["提交", "注册"]), false);
+  const register = verifyDeliverable(
+    { id: "submitted#1", kind: "submitted", text: "提交注册表单", hints: ["提交", "注册"], required: true },
+    {
+      goal: "注册一个账号",
+      ledger: ledgerOf({ startUrl: "https://www.google.com/" }),
+      currentUrl: "https://www.google.com/search?q=register",
+      serpForQuery: true,
+      visibleLabels: ["注册", "登录"],
+    },
+  );
+  assert.notEqual(register.ok, true, register.reason);
+  const search = verifyDeliverable(
+    {
+      id: "submitted#1",
+      kind: "submitted",
+      text: "搜索王健林并进入搜索结果页",
+      hints: ["搜索结果页", "王健林"],
+      required: true,
+    },
+    {
+      goal: "搜索王健林然后总结第一条结果",
+      ledger: ledgerOf({ startUrl: "https://www.google.com/" }),
+      currentUrl: "https://www.google.com/search?q=%E7%8E%8B%E5%81%A5%E6%9E%97",
+      serpForQuery: true,
+    },
+  );
+  assert.equal(search.ok, true, search.reason);
+});
+
+test("下载类目标：模型塞「确认进入结果页」不得进入契约", () => {
+  const contract = buildTaskContract({
+    goal: "点击图片并下载第二张图片",
+    intent: "generic",
+    raw: [
+      { text: "点击图片栏目", kind: "element_state" },
+      { text: "下载第二张图片", kind: "download" },
+      { text: "确认已进入搜索结果页", kind: "navigation", required: true },
+    ],
+  });
+  assert.equal(contract.deliverables.some((spec) => spec.kind === "submitted"), false);
+  assert.deepEqual(
+    contract.deliverables.map((spec) => spec.kind),
+    ["element_state", "download"],
+  );
+});
+
+test("element_state：顶栏频道名「图片」不足以核销「点击图片栏目」", () => {
+  assert.deepEqual(strongElementStateHints(["图片", "点击"]), []);
+  const result = verifyDeliverable(
+    {
+      id: "element_state#1",
+      kind: "element_state",
+      text: "点击图片栏目",
+      hints: ["图片", "点击"],
+      required: true,
+    },
+    {
+      goal: "点击图片并下载第二张图片",
+      ledger: ledgerOf({
+        startUrl: "https://www.google.com/search?q=x",
+        facts: [{ kind: "navigated", step: 1, url: "https://www.google.com/search?q=x", detail: "" }],
+        lastMutationStep: 1,
+      }),
+      currentUrl: "https://www.google.com/search?q=x",
+      serpForQuery: true,
+      visibleLabels: ["全部", "图片", "视频", "新闻", "购物"],
+    },
+  );
+  assert.notEqual(result.ok, true, result.reason);
 });
 
 test("运行期判据：isUnverifiableNavigation 只认「navigation + 说不出目的地」", () => {

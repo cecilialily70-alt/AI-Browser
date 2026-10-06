@@ -187,7 +187,11 @@ export interface ThreadsSpec {
   itemSelectors: string[];
   /** 稳定身份属性名（如 `data-peer-id`）；取不到就退回 href / 展示名指纹 */
   keyAttr: string | null;
-  /** 会话直链所在属性名（缺省 `href`；取不到即 `url=null`，由调用方按展示名在列表里点） */
+  /**
+   * 会话直链所在属性名。
+   * - `null`：本站没有直链（如 WhatsApp）→ 采集时不读 href，打开只能点列表
+   * - 字符串：读该属性；缺省语义仅在未声明 threads 的通用启发式里用 `href`
+   */
   hrefAttr: string | null;
   /** 展示名候选（在项内按顺序取第一个非空文本；都没有就用整项文本前 80 字） */
   labelSelectors: string[];

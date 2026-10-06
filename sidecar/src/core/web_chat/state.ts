@@ -59,6 +59,11 @@ export function autoReplyOf(contact: { autoReply?: boolean | null }): boolean {
   return contact.autoReply !== false;
 }
 
+/** 缺省＝开：对方沉默时是否主动追问（不冷场）；显式 false 才关 */
+export function followUpOf(contact: { followUp?: boolean | null }): boolean {
+  return contact.followUp !== false;
+}
+
 export interface ChatContactState {
   key: string;
   label: string;
@@ -93,21 +98,22 @@ export interface ChatContactState {
   /** 被判定为「用户接管」的原因（视图要说清为什么停手，不静默） */
   takeoverReason?: string | null;
   /**
-   * 每联系人开关（§5.7）：`autoReply`＝开场 + 对方来消息时引擎回不回。
-   * `followUp` 字段仍可读（老设置兼容），但**主动追发产品已下线**，引擎不再读取它。
-   * **缺省（`undefined`）＝开**，老快照无需迁移。
+   * 每联系人开关（§5.7）：`autoReply`＝开场 + 对方来消息时引擎回不回；
+   * `followUp`＝对方沉默时是否温热追问（不冷场）。**缺省（`undefined`）＝开**。
    *
    * 与 `takeover` 的分工：`takeover` 是「谁能说话」的总闸（human/paused 连读都不读），
-   * `autoReply` 是「引擎可以说话时，开不开口 / 回不回」——关掉＝只记账。
+   * `autoReply` / `followUp` 是「引擎可以说话时，回不回 / 追不追」。
    */
   autoReply?: boolean;
-  /** @deprecated 主动追发已下线；保留字段仅兼容老设置，引擎不读 */
+  /** 对方沉默时主动追问（不冷场）；缺省＝开 */
   followUp?: boolean;
   /**
    * 待发多句队列（跨片说完）：草稿一次产出多句时，本片预算不够就留下，
    * 下一片优先发出去，不再重新找模型写半截话。
    */
   pendingTexts?: string[];
+  /** 疑似进入交易 / 对方索要付款方式的累计次数（视图「疑似交易：N」） */
+  suspectedTradeCount?: number;
 }
 
 export interface ChatEngineState {

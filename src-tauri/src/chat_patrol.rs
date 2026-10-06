@@ -61,6 +61,8 @@ const STALL_LIMIT: Duration = Duration::from_secs(300);
 /// 失败后的退避起点 / 上限（5min 起，翻倍递增，封顶 30min）
 const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(300);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(1800);
+/// `browser_closed` 可原谅，但仍要短退避，避免快照未落盘时立刻再拉一片打成风暴。
+const BROWSER_CLOSED_SOFT_BACKOFF: Duration = Duration::from_secs(20);
 /// License 状态的缓存时长（查它要联网；席位口径在 10 分钟内不会变）
 const ENTITLEMENT_TTL: Duration = Duration::from_secs(600);
 
@@ -604,6 +606,7 @@ impl ChatPatrol {
             banned_words: settings.banned_words.clone(),
             cadence: settings.cadence.clone(),
             pacing: settings.pacing.clone(),
+            payment_methods: settings.payment_methods.clone(),
             takeovers: settings.takeovers.clone(),
             contact_flags: settings.contact_flags.clone(),
             roles: settings.roles.clone(),
@@ -671,7 +674,10 @@ impl ChatPatrol {
                         stop_reason.as_str(),
                         "browser_closed" | "seat_lost" | "engine_busy" | "no_targets"
                     );
-                if excusable {
+                if stop_reason == "browser_closed" && !user_stop {
+                    // 不进失败计数，但强制短退避，挡住「异常退出 → 立刻续盯」风暴
+                    self.apply_soft_backoff(profile_id, BROWSER_CLOSED_SOFT_BACKOFF);
+                } else if excusable {
                     self.clear_failures(profile_id);
                 } else if hard {
                     let reason = if stop_reason == "aborted" {
@@ -716,6 +722,21 @@ impl ChatPatrol {
             entry.last_error = None;
             entry.next_attempt_at = None;
         }
+    }
+
+    /// 可原谅停因的短退避：清失败计数，但在 `until` 之前不要再自动拉起。
+    fn apply_soft_backoff(&self, profile_id: &str, until: Duration) {
+        let mut health = lock(&self.inner.health);
+        let entry = health.entry(profile_id.to_owned()).or_default();
+        entry.consecutive_failures = 0;
+        entry.suspended = false;
+        entry.reason = None;
+        entry.last_error = Some("browser_closed_soft_backoff".to_owned());
+        entry.next_attempt_at = Some(Instant::now() + until);
+        log_info!(
+            "[chat_patrol] browser_closed 短退避 {}s：profile={profile_id}",
+            until.as_secs()
+        );
     }
 
     /// 记一次失败并退避；连续失败到顶则**挂起自动拉起**（超限即停，如实上报）。
@@ -818,7 +839,9 @@ impl ChatPatrol {
 /* ————————————————————————— 纯逻辑（可单测） ————————————————————————— */
 
 /// 到期判定的容差：调度 tick 是 60s，别因为几秒误差判成「没到期」。
-const DUE_TOLERANCE_MS: i64 = 30_000;
+/// 时钟容差（仅防墙钟抖动）。**不能**设到 5–30 秒：引擎的短续盯是 5–20s，
+/// 容差过大时 `plan_schedule` 会把「未到期」当成已到期，`browser_closed` 秒级空转。
+const DUE_TOLERANCE_MS: i64 = 1_500;
 /// 「马上要到期」的判定窗口：`nextWakeAt` 落在这个窗口内 → 提高节拍（见 [`pending_work`]）。
 /// 必须 ≥ 短复环节拍（30s）+ 一次 tick 的富余，否则 30 秒的复查仍会被 60 秒节拍拖过去。
 const IMMINENT_WAKE_MS: i64 = 60_000;
@@ -1029,6 +1052,8 @@ struct LaunchSettings {
     cadence: Option<Value>,
     /// 发送节奏护栏（原样转发；合法区间由 Sidecar 的权威解析器决定）
     pacing: Option<Value>,
+    /// 已配置付款方式（原样转发）
+    payment_methods: Option<Value>,
     /// 人工优先：用户在设置里为**单个联系人**选定的模式（原样转发，Sidecar 权威解析）
     takeovers: Option<Value>,
     /// 每联系人开关（自动聊天；followUp 仅兼容转发）原样转发；缺省＝开的口径只在 Sidecar 一处
@@ -1099,6 +1124,10 @@ impl LaunchSettings {
                 .unwrap_or_default(),
             cadence: value.get("cadence").filter(|entry| entry.is_object()).cloned(),
             pacing: value.get("pacing").filter(|entry| entry.is_object()).cloned(),
+            payment_methods: value
+                .get("paymentMethods")
+                .filter(|entry| entry.is_array())
+                .cloned(),
             takeovers: value.get("takeovers").filter(|entry| entry.is_object()).cloned(),
             contact_flags: value.get("contactFlags").filter(|entry| entry.is_object()).cloned(),
             roles: value.get("roles").filter(|entry| entry.is_array()).cloned(),
@@ -1181,6 +1210,113 @@ fn read_launch_settings(app: &AppHandle) -> Result<LaunchSettings, AppError> {
 /// （避免「前端写一套、Rust 再各读一套」的口径分裂，§0.5.3 F）。
 pub fn chat_mode_enabled(app: &AppHandle) -> Result<bool, AppError> {
     Ok(read_launch_settings(app)?.enabled)
+}
+
+/// 引擎扫到新人时并入该环境的 `targetsByEnv`（勾选即自动聊；不覆盖已有项）。
+pub fn merge_discovered_chat_targets(
+    app: &AppHandle,
+    profile_id: &str,
+    contacts: &[Value],
+) -> Result<usize, AppError> {
+    let profile_id = profile_id.trim();
+    if profile_id.is_empty() || contacts.is_empty() {
+        return Ok(0);
+    }
+    let state = app
+        .try_state::<crate::AppState>()
+        .ok_or_else(|| AppError::State("AppState missing".to_owned()))?;
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| AppError::State("database lock poisoned".to_owned()))?;
+    let raw = db::get_setting(&connection, KEY_CHAT_MODE)?.unwrap_or_else(|| "{}".to_owned());
+    let mut root: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Object(Default::default()));
+    if !root.is_object() {
+        root = Value::Object(Default::default());
+    }
+    let map = root
+        .as_object_mut()
+        .ok_or_else(|| AppError::State("chat_mode root not object".to_owned()))?;
+    let targets_by_env = map
+        .entry("targetsByEnv".to_owned())
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !targets_by_env.is_object() {
+        *targets_by_env = Value::Object(Default::default());
+    }
+    let env_map = targets_by_env
+        .as_object_mut()
+        .ok_or_else(|| AppError::State("targetsByEnv not object".to_owned()))?;
+    let existing = env_map
+        .entry(profile_id.to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !existing.is_array() {
+        *existing = Value::Array(Vec::new());
+    }
+    let list = existing
+        .as_array_mut()
+        .ok_or_else(|| AppError::State("targets list not array".to_owned()))?;
+
+    let mut seen = std::collections::HashSet::new();
+    for row in list.iter() {
+        let label = row
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let url = row
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let identity = if !url.is_empty() {
+            url
+        } else {
+            label
+        };
+        if !identity.is_empty() {
+            seen.insert(identity);
+        }
+    }
+
+    let mut added = 0usize;
+    for contact in contacts {
+        let label = contact
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        if label.is_empty() {
+            continue;
+        }
+        let url = contact
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let identity = if !url.is_empty() {
+            url.clone()
+        } else {
+            label.clone()
+        };
+        if seen.contains(&identity) {
+            continue;
+        }
+        seen.insert(identity);
+        list.push(json!({ "label": label, "url": url }));
+        added += 1;
+    }
+
+    if added == 0 {
+        return Ok(0);
+    }
+    let serialized = serde_json::to_string(&root)
+        .map_err(|error| AppError::State(format!("serialize chat_mode: {error}")))?;
+    db::set_setting(&connection, KEY_CHAT_MODE, &serialized)?;
+    Ok(added)
 }
 
 /// 三态读取布尔：**只有真正的 `true` / `false` 才表态**，其余一律 `None`（交给调用方用默认值）。
@@ -1784,9 +1920,11 @@ mod tests {
             next_wake_at_ms: Some(now + offset_ms),
         };
         // 已经到期（在容差内）→ 由 `due` 计数（`plan_schedule` 会立刻拉起），不重复算
-        assert_eq!(imminent_count(&[fact(30_000)], now), 0);
+        assert_eq!(imminent_count(&[fact(1_000)], now), 0);
         // 45 秒后的短复查 → 落在「马上到期」窗口 → 提高节拍（否则 60 秒 tick 会把它拖过点）
         assert_eq!(imminent_count(&[fact(45_000)], now), 1);
+        // 20 秒后续盯也算 imminent（容差已收紧到 1.5s，不再被误当成 due）
+        assert_eq!(imminent_count(&[fact(20_000)], now), 1);
         // 一小时后的回访 → 按常规/长节拍睡，勤看纯属空转
         assert_eq!(imminent_count(&[fact(3_600_000)], now), 0);
         // 从没跑过 → 属于 `due`，不算 imminent

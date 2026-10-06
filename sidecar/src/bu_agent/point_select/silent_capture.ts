@@ -24,16 +24,6 @@ export async function waitCaptureSettle(ms?: number): Promise<number> {
   return t;
 }
 
-/** @deprecated 注入 style 本身会闪，已废弃为空操作 */
-export async function freezePageForCapture(_page: Page): Promise<void> {
-  /* no-op：禁止向页面 appendChild(style) */
-}
-
-/** @deprecated */
-export async function unfreezePageForCapture(_page: Page): Promise<void> {
-  /* no-op */
-}
-
 /**
  * 仅当主图未充分入视口时 nearest 微滚（等同 scrollIntoViewIfNeeded）；禁止 block:center。
  */

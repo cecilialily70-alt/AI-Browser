@@ -81,6 +81,11 @@ import {
   CHAT_SLICE_MS_DEFAULT,
 } from "./core/web_chat/slice_limits.js";
 import { resolveLearnedConnectorDir } from "./core/web_chat/descriptor/registry.js";
+import {
+  extractPaymentMethodsFromGoal,
+  mergePaymentMethods,
+  parsePaymentMethods,
+} from "./core/web_chat/chat_payment.js";
 import { parsePacingConfig } from "./core/web_chat/pacing.js";
 import { parseControlMemorySeed } from "./cross_task_memory.js";
 import { parseFieldOverrides } from "./deferred_generation.js";
@@ -1364,23 +1369,27 @@ async function handleChatStart(
   waitId?: string | null,
 ): Promise<void> {
   const boundWaitId = waitId?.trim() || String(payload.waitId ?? payload.wait_id ?? "").trim() || null;
-  bindCommandWaitId(boundWaitId);
 
-  // 互斥（S5）：任何引擎在跑都不允许再起聊天
+  // 互斥（S5）：任何引擎在跑都不允许再起聊天。
+  // 注意：忙拒绝时**不要** bindCommandWaitId —— 会冲掉正在跑那一片的 waitId，引发「误终态 → 狂拉 → 再拒」风暴。
   const busy = engineBusySnapshot();
   if (isEngineBusy(busy)) {
     const msg = formatEngineBusyMessage(busy, "聊天模式启动") || ENGINE_BUSY_MESSAGE;
     logger.warn("engine_busy_reject", { requested: "聊天模式启动", ...busy, msg, waitId: boundWaitId });
-    // 只走聊天协议终态（带 waitId + stopReason），**不**打 agentState(failed)：
-    // 否则 Agent 监视栏会多一条吓人的「失败」，调度器还可能把正忙当成硬失败去退避挂起。
-    logger.chatProgress(msg, {
-      type: "chat_state_update",
-      phase: "stopped",
-      stopReason: "engine_busy",
-      ...(boundWaitId ? { waitId: boundWaitId } : {}),
-    });
+    // 只走聊天协议终态（带 waitId + stopReason），**不**打 agentState(failed)。
+    // kind=chat_patrol_busy：过程日志面板按表屏蔽，避免「正忙」刷屏。
+    if (boundWaitId) {
+      logger.chatProgress(msg, {
+        type: "chat_patrol_busy",
+        phase: "stopped",
+        stopReason: "engine_busy",
+        waitId: boundWaitId,
+      });
+    }
     return;
   }
+
+  bindCommandWaitId(boundWaitId);
 
   const contacts = parseContactSeeds(payload.contacts ?? payload.targets);
   /**
@@ -1463,6 +1472,10 @@ async function handleChatStart(
           : CHAT_CONTACTS_PER_SLICE_DEFAULT,
       cadence: parseCadence(payload.cadence ?? payload.chatCadence),
       pacing: parsePacingConfig(payload.pacing, []),
+      paymentMethods: mergePaymentMethods(
+        parsePaymentMethods(payload.paymentMethods ?? payload.payment_methods),
+        extractPaymentMethodsFromGoal(String(payload.goal ?? "")),
+      ),
       takeovers: parseTakeovers(payload.takeovers ?? payload.chatTakeovers),
       contactFlags: parseContactFlags(
         payload.contactFlags ?? payload.contact_flags,
@@ -3195,7 +3208,7 @@ async function main(): Promise<void> {
       browser = next;
       watchDisconnect(next);
     });
-    // 内核 humanize 是启动进程内的 JS 补丁，不随 CDP 传播；不补则 Agent 的
+    // 包装层 humanize 不随 CDP 传播；不补则 Agent 的
     // page.mouse.move 退化为瞬移（滑块「没动就过」，无仿生轨迹）。
     const humanized = await humanizeConnectedBrowser(browser);
     logger.status("cdp_humanize", { cdpUrl, humanized });

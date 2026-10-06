@@ -148,6 +148,21 @@ export function queryMatchedOnPage(
 }
 
 /**
+ * 以**当前地址**判断是否已站在本任务检索词的结果页。
+ * 观察时的 pageFacts 会在「本步里才跳到 SERP、随即 done」时过期
+ * （用户现场：URL 已是 baidu.com/s?wd=李世民，serpForQuery 仍为 false）。
+ */
+export function pageIsSerpForQuery(
+  pageUrl: string,
+  queryTerms: readonly string[],
+  digest = "",
+): boolean {
+  const terms = queryTerms.map((term) => String(term ?? "").trim()).filter(Boolean);
+  if (terms.length === 0) return false;
+  return isSearchResultsUrl(pageUrl) && queryMatchedOnPage(terms, digest, pageUrl);
+}
+
+/**
  * 引擎首页地址（宪法合法路径的唯一入口）。
  *
  * 改造前这里是 `buildSearchUrlForQuery`：直接拼出 `?q=` / `?wd=` 的结果页地址并直达。

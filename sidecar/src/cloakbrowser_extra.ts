@@ -41,27 +41,10 @@ let cached: CloakExtras | null = null;
 export const HUMAN_PRESET = "careful";
 
 /**
- * 鼠标拟人参数微调（在内核 careful 档基础上覆盖）。
- *
- * 动机：内核默认参数是为「移动 + 点击」调优的，轨迹采样偏稀疏、手部抖动偏小，
- * 对滑块拖拽这种长距离连续动作拟人度不足。此处只调 mouse_* 参数（不碰键盘/滚动），
- * 且调整方向一致为「更像人手」，无功能副作用。
- *
- * 参数含义见 cloakbrowser/dist/human/config.js 与 mouse.js：
- *   mouse_steps_divisor  每移动多少 px 生成一个采样点（越小采样越密）
- *   mouse_min/max_steps  单次移动的采样点上下限
- *   mouse_wobble_max     垂直手部抖动幅度（px）
- *   mouse_overshoot_*    终点微超冲 + 回正（真人松手前常见）
+ * 启动与 CDP 二次连接共用的拟人覆盖（禁止两处各写一份）。
+ * 只调 mouse_*：内核 careful 档对滑块长拖采样偏稀。不碰键盘/滚动，不把 mistype_chance 调高。
  */
-export const HUMAN_MOUSE_CONFIG: {
-  mouse_steps_divisor: number;
-  mouse_min_steps: number;
-  mouse_max_steps: number;
-  mouse_wobble_max: number;
-  mouse_overshoot_chance: number;
-  mouse_overshoot_px: [number, number];
-  mouse_burst_pause: [number, number];
-} = {
+export const HUMAN_CONFIG: Record<string, unknown> = {
   mouse_steps_divisor: 6,
   mouse_min_steps: 14,
   mouse_max_steps: 110,
@@ -71,44 +54,45 @@ export const HUMAN_MOUSE_CONFIG: {
   mouse_burst_pause: [15, 32],
 };
 
-type HumanizeBrowserFn = (
-  browser: unknown,
-  options?: { humanize?: boolean; humanPreset?: string; humanConfig?: Record<string, unknown> },
-) => Promise<void>;
+/** OTP / 验证码单次填写：禁止错字回改。 */
+export const HUMAN_NO_MISTYPE = { mistype_chance: 0 } as const;
 
-let cachedHumanizeBrowser: HumanizeBrowserFn | null = null;
+type PatchBrowserFn = (browser: unknown, cfg: unknown) => void;
+type ResolveConfigFn = (preset?: string, overrides?: Record<string, unknown>) => unknown;
 
-async function loadHumanizeBrowser(): Promise<HumanizeBrowserFn> {
-  if (!cachedHumanizeBrowser) {
-    const mod = (await import(moduleHref("playwright.js"))) as {
-      humanizeBrowser: HumanizeBrowserFn;
+let cachedPatch: { patchBrowser: PatchBrowserFn; resolveConfig: ResolveConfigFn } | null = null;
+
+async function loadOfficialHumanPatch(): Promise<{
+  patchBrowser: PatchBrowserFn;
+  resolveConfig: ResolveConfigFn;
+}> {
+  if (!cachedPatch) {
+    const mod = (await import(moduleHref("human/index.js"))) as {
+      patchBrowser: PatchBrowserFn;
+      resolveConfig: ResolveConfigFn;
     };
-    cachedHumanizeBrowser = mod.humanizeBrowser;
+    cachedPatch = {
+      patchBrowser: mod.patchBrowser,
+      resolveConfig: mod.resolveConfig,
+    };
   }
-  return cachedHumanizeBrowser;
+  return cachedPatch;
 }
 
 /**
- * 给「另开 CDP 连接」拿到的 Browser 打上内核拟人补丁。
+ * 给「另开 CDP 连接」拿到的 Browser 打上包装层拟人补丁。
  *
- * 关键事实（实测确认）：humanize 是内核在**启动进程内**对 Page 对象做的 JS 补丁，
- * 不随 CDP 协议传播。任何用 chromium.connectOverCDP() 另开连接的客户端（如 Agent）
- * 拿到的都是**未打补丁**的 page —— 此时 page.mouse.move() 退化为「瞬移」，
- * 滑块拖拽一帧内完成，既无仿生曲线也极易被风控识破（现象：滑块「没动就过」）。
+ * 官方（CloakBrowser #126）：行为层（贝塞尔 / 打字节奏 / 滚轮微步）是 wrapper
+ * monkey-patch，不随 CDP 传播。connectOverCDP 必须再调 patchBrowser。
  *
- * 实测对比：同一次拖拽，补丁前 2 个 mousemove 事件 / 242ms；补丁后 82 个 / 1692ms。
- *
- * 内核为此提供 humanizeBrowser()，可补丁已有的 context/page 并挂钩后续新建页面。
- * 补丁失败不抛出：退化为原生行为（可用性优先），由调用方记录告警留痕。
+ * 与 launchPersistentContext({ humanize, humanPreset, humanConfig }) 同一份档位。
+ * 补丁失败不抛出：退化为原生 Playwright（可用性优先），由调用方记录告警留痕。
  */
 export async function humanizeConnectedBrowser(browser: unknown): Promise<boolean> {
   try {
-    const humanizeBrowser = await loadHumanizeBrowser();
-    await humanizeBrowser(browser, {
-      humanize: true,
-      humanPreset: HUMAN_PRESET,
-      humanConfig: { ...HUMAN_MOUSE_CONFIG },
-    });
+    const { patchBrowser, resolveConfig } = await loadOfficialHumanPatch();
+    const cfg = resolveConfig(HUMAN_PRESET, HUMAN_CONFIG);
+    patchBrowser(browser, cfg);
     return true;
   } catch {
     return false;

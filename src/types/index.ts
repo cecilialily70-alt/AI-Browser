@@ -182,6 +182,8 @@ export interface ChatThreadRow {
   autoReply: boolean;
   /** 每联系人开关：到点要不要主动找话（缺省＝开） */
   followUp: boolean;
+  /** 疑似交易次数（对方要付款方式 / 成交语境） */
+  suspectedTradeCount?: number;
 }
 
 /** 谁能对这个联系人说话（§5 人工优先） */

@@ -12,8 +12,6 @@ import type { AgentFileSystem } from "./filesystem.js";
 import {
   encodeBytesToJpegOnPage,
   fetchImageBuffer,
-  freezePageForCapture,
-  unfreezePageForCapture,
   waitCaptureSettle,
 } from "./point_select/silent_capture.js";
 import { openCvSliderGap } from "./opencv_preprocess.js";
@@ -950,20 +948,15 @@ async function captureElementImage(input: {
   }
   // 截图只能产出 JPEG（无 Alpha），对拼图块毫无意义 → 直接放弃交由调用方降级
   if (!buf && !keepAlpha) {
-    await freezePageForCapture(input.page);
-    try {
-      await waitCaptureSettle();
-      buf = await captureScreenshot(input.page, {
-        type: "jpeg",
-        quality: 92,
-        clip,
-        scale: "css",
-        animations: "disabled",
-        caret: "hide",
-      });
-    } finally {
-      await unfreezePageForCapture(input.page);
-    }
+    await waitCaptureSettle();
+    buf = await captureScreenshot(input.page, {
+      type: "jpeg",
+      quality: 92,
+      clip,
+      scale: "css",
+      animations: "disabled",
+      caret: "hide",
+    });
   }
   return buf ? { buf, clip } : null;
 }

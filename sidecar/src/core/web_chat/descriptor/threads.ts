@@ -102,7 +102,12 @@ function extractThreadsInPage(arg: ExtractThreadsArg): ThreadsProbe {
     for (const node of nodes) {
       if (items.length >= arg.limit) break;
       if (!isVisible(node)) continue;
-      const href = absolute(node.getAttribute(spec?.hrefAttr || "href"));
+      // hrefAttr === null 表示「本站没有会话直链」（WhatsApp）：禁止回落读 href，
+      // 否则会把无关 a[href] 或空串当成 url，openContact 去 goto / 误开页。
+      const href =
+        spec && spec.hrefAttr === null
+          ? null
+          : absolute(node.getAttribute(spec?.hrefAttr || "href"));
       const keyAttr = spec?.keyAttr ?? null;
       const key = keyAttr ? clean(node.getAttribute(keyAttr) ?? "") || null : null;
       const label =

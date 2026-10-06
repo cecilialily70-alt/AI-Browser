@@ -331,18 +331,34 @@ function dedupeOrdered(messages: ChatMessage[]): ChatMessage[] {
  */
 export function unansweredIncoming(
   messages: readonly ChatMessage[],
-  opts: { isOwnText?: (text: string) => boolean } = {},
+  opts: {
+    isOwnText?: (text: string) => boolean;
+    /** 已有我方发件证据时，才允许把「标成 out 但不像我方」的行改按入站收（防 RTL/几何误判） */
+    reinterpretMislabeledOut?: boolean;
+  } = {},
 ): ChatMessage[] {
   const collected: ChatMessage[] = [];
+  const own = opts.isOwnText;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
+    const text = String(message.text ?? "").trim();
+    // 标成 in、但内容就是我方发过的 → 方向误判，按出站截断
+    if (message.direction === "in" && own && text && own(text)) break;
     if (message.direction === "in") {
       if (message.kind === "retracted") continue;
       collected.push(message);
       continue;
     }
-    if (message.direction === "out") break;
-    if (opts.isOwnText && message.text && opts.isOwnText(message.text)) break;
+    if (message.direction === "out") {
+      // 标成 out、但内容完全不像我方 → 多半是几何/RTL 把对方气泡判反了
+      if (opts.reinterpretMislabeledOut && own && text && !own(text)) {
+        if (message.kind === "retracted") continue;
+        collected.push(message);
+        continue;
+      }
+      break;
+    }
+    if (own && text && own(text)) break;
     // 其余（方向未知且看不出是我方 / 系统行）：既不算对方在等回话，也不算「我方发过话」
   }
   return collected.reverse();

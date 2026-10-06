@@ -1,6 +1,6 @@
 {
   "id": "whatsapp-web",
-  "version": 1,
+  "version": 2,
   "source": "builtin",
   "match": {
     "hostPattern": "^web\\.whatsapp\\.com$",
@@ -65,7 +65,14 @@
     "thenCheckIcons": {
       "out": [
         "[data-icon^=\"msg-dblcheck\"]",
-        "[data-icon^=\"msg-check\"]"
+        "[data-icon^=\"msg-check\"]",
+        "[data-testid=\"msg-dblcheck\"]",
+        "[data-testid=\"msg-check\"]",
+        "[data-testid=\"status-dblcheck\"]",
+        "[data-testid=\"status-check\"]",
+        "span[data-icon=\"msg-dblcheck\"]",
+        "span[data-icon=\"msg-check\"]",
+        "span[data-icon=\"msg-dblcheck-ack\"]"
       ]
     },
     "exclude": [

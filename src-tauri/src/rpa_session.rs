@@ -124,6 +124,19 @@ pub fn enqueue_chat_patrol_log(app: &AppHandle, profile_id: &str, payload: &Valu
     if text.trim().is_empty() && kind.trim().is_empty() {
         return;
     }
+    // 叠片正忙：协议终态仍要给 Host waiter，但过程日志不落库（否则一秒刷上百行）
+    let stop_reason = payload
+        .get("stopReason")
+        .or_else(|| payload.get("stop_reason"))
+        .and_then(|entry| entry.as_str())
+        .unwrap_or("");
+    if kind == "chat_patrol_busy"
+        || kind == "chat_patrol_launch"
+        || stop_reason == "engine_busy"
+        || text.starts_with("当前环境正忙，请先停止当前任务")
+    {
+        return;
+    }
     let pid = payload
         .get("profileId")
         .and_then(|entry| entry.as_str())
@@ -619,6 +632,19 @@ fn spawn_stdout_pump(
                     let mut payload = value.clone();
                     if let Some(object) = payload.as_object_mut() {
                         object.insert("profileId".to_owned(), json!(profile_for_stdout));
+                    }
+                    let kind = value
+                        .get("kind")
+                        .and_then(|entry| entry.as_str())
+                        .unwrap_or("");
+                    if kind == "chat_contacts_discovered" {
+                        if let Some(contacts) = value.get("contacts").and_then(Value::as_array) {
+                            let _ = crate::chat_patrol::merge_discovered_chat_targets(
+                                &app_stdout,
+                                &profile_for_stdout,
+                                contacts,
+                            );
+                        }
                     }
                     enqueue_chat_patrol_log(&app_stdout, &profile_for_stdout, &payload);
                     let _ = app_stdout.emit(CHAT_STATE_EVENT, payload);
@@ -2318,6 +2344,8 @@ pub struct ChatSliceRequest {
     /// 发送节奏护栏（同线程最小间隔 / 阅读延迟 / 抖动）。
     /// **只读转发**：合法区间由 Sidecar 的权威解析器（`parsePacingConfig`）决定，Host 不重写一套。
     pub pacing: Option<Value>,
+    /// 已配置付款方式（原样转发；合法性由 Sidecar 判定）
+    pub payment_methods: Option<Value>,
     /// 人工优先：用户在设置里为单个联系人选定的模式（原样转发，Sidecar 权威解析）
     pub takeovers: Option<Value>,
     /// 每联系人开关（自动聊天；followUp 仅兼容转发）原样转发；合法性与默认值由 Sidecar 权威解析
@@ -2477,6 +2505,11 @@ pub async fn run_chat_slice(
             command["pacing"] = pacing;
         }
     }
+    if let Some(methods) = request.payment_methods {
+        if methods.is_array() {
+            command["paymentMethods"] = methods;
+        }
+    }
     // 人工接管模式（按联系人）原样转发；合法性交给 Sidecar 的权威解析器
     if let Some(takeovers) = request.takeovers {
         if takeovers.is_object() {
@@ -2560,6 +2593,7 @@ pub async fn chat_start(
     use_current_window: Option<bool>,
     task_rules: Option<Value>,
     task_persona: Option<Value>,
+    payment_methods: Option<Value>,
 ) -> Result<RpaRunResult, AppError> {
     // 用户显式点过 = 明确意图：解除该环境被看门狗挂起的自动值守（§0.5.3 H「超限即停」要能人工恢复）
     if let Some(patrol) = app
@@ -2579,6 +2613,7 @@ pub async fn chat_start(
             banned_words: banned_words.unwrap_or_default(),
             cadence,
             pacing,
+            payment_methods,
             takeovers,
             contact_flags,
             roles,

@@ -117,7 +117,7 @@ export interface ActionContext {
    * submitted 类交付物时用它做**最直接**的判据（不需要任何 URL 差分推演）。
    * 缺省（单测直调 action）视为 false，不影响既有行为。
    */
-  pageFacts?: { serpForQuery: boolean };
+  pageFacts?: { serpForQuery: boolean; queryTerms?: string[] };
   /**
    * P1.2：邮箱 OTP 通道绑定（Host 注入；密钥只以 ref 出现）。
    * 缺省 = 未配置 → fetch_email_otp 走 Layer 3 HITL。

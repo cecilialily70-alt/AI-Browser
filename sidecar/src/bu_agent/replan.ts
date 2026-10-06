@@ -323,8 +323,19 @@ export async function requestReplan(input: RequestReplanInput): Promise<ReplanRe
 /**
  * 新计划里若出现契约还没有的交付物类型，补进台账（已核销的项不动）。
  * 返回新增 id，便于日志。
+ *
+ * 纪律：计划步骤是「怎么做」，不能发明用户目标没要求的 kind。
+ * 否则重规划写一句「确认已进入结果页」就会塞进 submitted，再被 SERP 假核销（点图/下载任务现场）。
  */
 export function absorbPlanDeliverables(ledger: DeliverableLedger, plan: string[]): string[] {
+  const goalKinds = new Set(
+    deriveContractFromRules({
+      goal: ledger.contract.goal,
+      intent: ledger.contract.intent,
+      plan: [],
+      queryTerms: [],
+    }).deliverables.map((item) => item.kind),
+  );
   const extra = deriveContractFromRules({
     goal: ledger.contract.goal,
     intent: ledger.contract.intent,
@@ -333,6 +344,7 @@ export function absorbPlanDeliverables(ledger: DeliverableLedger, plan: string[]
   });
   const added: string[] = [];
   for (const spec of extra.deliverables) {
+    if (!goalKinds.has(spec.kind)) continue;
     if (ledger.contract.deliverables.some((item) => item.kind === spec.kind)) continue;
     const id = `${spec.kind}#${ledger.contract.deliverables.length + 1}`;
     ledger.contract.deliverables.push({ ...spec, id });

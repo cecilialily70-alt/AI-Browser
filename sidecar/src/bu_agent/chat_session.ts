@@ -26,6 +26,7 @@ import {
   readThread,
   resolveCurrentConversation,
   sendChatText,
+  verifyOpenContact,
   waitForChatReady,
   waitThreadActivity,
   type CurrentConversation,
@@ -64,6 +65,11 @@ import type {
   ConnectorActivityEvent,
   ConnectorMessage,
 } from "../core/web_chat/descriptor/types.js";
+import {
+  extractPaymentMethodsFromGoal,
+  mergePaymentMethods,
+} from "../core/web_chat/chat_payment.js";
+import { agentDebugLog } from "../debug_session_log.js";
 import { DEFAULT_PACING } from "../core/web_chat/pacing.js";
 import {
   buildTaskRulesBrief,
@@ -356,6 +362,17 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
     contextLayer;
 
   const bannedWords = [...config.bannedWords];
+  const paymentMethodsResolved = mergePaymentMethods(
+    config.paymentMethods ?? [],
+    extractPaymentMethodsFromGoal(config.goal),
+  );
+  // #region agent log
+  agentDebugLog("H-pay", "chat_session.ts:init", "payment methods resolved", {
+    configured: (config.paymentMethods ?? []).length,
+    resolved: paymentMethodsResolved.length,
+    kinds: paymentMethodsResolved.map((m) => m.kind),
+  });
+  // #endregion
 
   /**
    * 「绑用户当前窗口、只读不导航」是否生效。
@@ -457,34 +474,20 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
       const result = await ensureChatPage(context);
       page = result.page;
       if (result.adopted) {
-        // 跨进程复用（sidecar 重启后认领上次那个标签）：说清楚，免得用户以为「又开了一个」——
-        // 同一个账号的多个会话共用这一个标签，按会话导航切换，不再堆窗口。
-        logger.chatProgress("复用上次值守留下的聊天标签（同一个账号的会话都在这个标签里切换）", {
+        // 认领已开的聊天站页：同窗点列表切换，不再堆新标签。
+        logger.chatProgress("使用已打开的聊天窗口", {
           type: "chat_tab",
           phase: "booting",
           threadKey: null,
           reason: "adopted_existing_tab",
+          url: (() => {
+            try {
+              return page?.url() ?? null;
+            } catch {
+              return null;
+            }
+          })(),
         });
-      }
-      if (result.created) {
-        // 说清**为什么**要自开标签：写了目标时目标优先（不动用户正在看的标签）。
-        // 用户现场正是这一条让人困惑 —— 「我明明开着聊天窗口，为什么又开一个」，
-        // 所以日志里必须把原因写出来，而不是只报「已开聊天专用标签」（§5.7 让用户能审计）。
-        const viaTargets = contacts.length > 0;
-        logger.chatProgress(
-          viaTargets
-            ? `另开了一个聊天页去聊：${contacts
-                .map((item) => item.label)
-                .slice(0, 3)
-                .join("、")}（不打扰你正在看的页面）`
-            : "另开了一个聊天页（当前没有可用窗口）",
-          {
-            type: "chat_tab",
-            phase: "booting",
-            threadKey: null,
-            reason: viaTargets ? "explicit_targets" : "no_open_window",
-          },
-        );
       }
       return { ok: true, page };
     } catch (error) {
@@ -581,59 +584,65 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
     now: isoNow,
 
     listContacts: async () => {
-      // 名单 = 用户勾选的目标 ∪ 会话列表里新发现的（尤其未读）。
-      // 显式目标优先；自动发现的新人只追加、不覆盖用户关掉的人。
+      // 用户已勾选/保存「要聊的人」时**只聊这些人**，禁止再从会话列表擅自加人
+      // （现场：勾了 +852，却给未勾选的 +972 发消息）。
       const seeds = await resolveTargets();
       const existing = readSnapshot();
       const known =
         existing.ok ? new Map(existing.snapshot.contacts.map((c) => [c.key, c])) : new Map();
 
       const mergedSeeds: ChatContactSeed[] = [...seeds];
-      const seenKeys = new Set(seeds.map((s) => s.key));
-      try {
-        const discovered = await listPageThreads(browser, {
-          userDataDir: config.userDataDir,
-          limit: Math.max(config.maxContactsPerSlice * 2, 20),
-          signal,
-        });
-        if (discovered.ok && discovered.items.length > 0) {
-          // 未读优先并入，再并入其余新人
-          const ordered = [
-            ...discovered.items.filter((item) => item.unread),
-            ...discovered.items.filter((item) => !item.unread),
-          ];
-          let added = 0;
-          for (const item of ordered) {
-            if (mergedSeeds.length >= config.maxContactsPerSlice) break;
-            const base: ChatContactSeed = {
-              key: item.key || `${discovered.siteKey}|${item.label}`,
-              label: item.label,
-              siteKey: discovered.siteKey || "unknown",
-              url: item.url || null,
-            };
-            const seed = seedIdentityOf(base).seed;
-            if (seenKeys.has(seed.key)) continue;
-            seenKeys.add(seed.key);
-            mergedSeeds.push(seed);
-            added += 1;
+      // 仅「名单为空」时才扫页补人（用当前窗口 / 发现未读）；有勾选绝不自动加人
+      if (seeds.length === 0) {
+        try {
+          const discovered = await listPageThreads(browser, {
+            userDataDir: config.userDataDir,
+            limit: Math.max(config.maxContactsPerSlice * 2, 20),
+            signal,
+          });
+          if (discovered.ok && discovered.items.length > 0) {
+            const seenKeys = new Set<string>();
+            let added = 0;
+            const newlyAdded: ChatContactSeed[] = [];
+            for (const item of discovered.items) {
+              if (mergedSeeds.length >= config.maxContactsPerSlice) break;
+              const base: ChatContactSeed = {
+                key: item.key || `${discovered.siteKey}|${item.label}`,
+                label: item.label,
+                siteKey: discovered.siteKey || "unknown",
+                url: item.url || null,
+              };
+              const seed = seedIdentityOf(base).seed;
+              if (seenKeys.has(seed.key)) continue;
+              seenKeys.add(seed.key);
+              mergedSeeds.push(seed);
+              newlyAdded.push(seed);
+              added += 1;
+            }
+            if (added > 0) {
+              rosterNote = null;
+              logger.chatProgress(`从会话列表自动加入 ${added} 人（优先未读）`, {
+                type: "chat_contacts_discovered",
+                phase: "scanning",
+                added,
+                source: discovered.source,
+                contacts: newlyAdded.map((s) => ({
+                  label: s.label,
+                  url: s.url,
+                  siteKey: s.siteKey,
+                  key: s.key,
+                })),
+              });
+            }
           }
-          if (added > 0) {
-            rosterNote = null;
-            logger.chatProgress(`从会话列表自动加入 ${added} 人（优先未读）`, {
-              type: "chat_contacts_discovered",
-              phase: "scanning",
-              added,
-              source: discovered.source,
-            });
-          }
+        } catch (error) {
+          logger.chatProgress(
+            `自动扫描会话列表失败（本轮没有可聊对象）：${
+              error instanceof Error ? error.message : String(error)
+            }`.slice(0, 200),
+            { type: "chat_contacts_discover_failed", phase: "scanning" },
+          );
         }
-      } catch (error) {
-        logger.chatProgress(
-          `自动扫描会话列表失败（本轮只用已保存名单）：${
-            error instanceof Error ? error.message : String(error)
-          }`.slice(0, 200),
-          { type: "chat_contacts_discover_failed", phase: "scanning" },
-        );
       }
 
       resolvedSeeds = mergedSeeds;
@@ -976,6 +985,7 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
         recent: draftInput.incoming,
         isFollowUp: draftInput.isFollowUp,
         followUpIndex: draftInput.contact.followUpIndex,
+        planReason: draftInput.planReason ?? null,
         rewriteHint: draftInput.rewriteHint,
         intentDirective: draftInput.intentDirective ?? null,
         maxBubbles,
@@ -1025,11 +1035,25 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
       };
     },
 
-    gateSend: (text) => defaultGateSend(text, bannedWords),
+    gateSend: (text) => defaultGateSend(text, bannedWords, paymentMethodsResolved),
 
     sendText: async (contact, text) => {
       if (!page || !containerSelector) {
         return { ok: false, reason: "no_page_or_container" };
+      }
+      // 每次发送前核对对话头：窗口不是目标人 → 一律不发（防发错人）
+      const windowOk = await verifyOpenContact(page, contact.label, { retries: 3, gapMs: 250 });
+      if (!windowOk.ok) {
+        logger.chatProgress(
+          `发送前发现聊天窗口不是目标人（目标已勾选；当前窗：${windowOk.openLabel ?? "无对话头"}），已取消发送`,
+          {
+            type: "chat_send_unconfirmed",
+            phase: "sending",
+            threadKey: contact.key,
+            reason: windowOk.reason ?? "wrong_conversation_open",
+          },
+        );
+        return { ok: false, reason: windowOk.reason ?? "wrong_conversation_open" };
       }
       const active = connectorFor(contact);
       const result = active
@@ -1072,6 +1096,19 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
     sendImage: async (contact, filePath) => {
       if (!page || !containerSelector) {
         return { ok: false, reason: "no_page_or_container" };
+      }
+      const windowOk = await verifyOpenContact(page, contact.label, { retries: 3, gapMs: 250 });
+      if (!windowOk.ok) {
+        logger.chatProgress(
+          `发图前发现聊天窗口不是目标人（当前窗：${windowOk.openLabel ?? "无对话头"}），已取消发送`,
+          {
+            type: "chat_send_unconfirmed",
+            phase: "sending",
+            threadKey: contact.key,
+            reason: windowOk.reason ?? "wrong_conversation_open",
+          },
+        );
+        return { ok: false, reason: windowOk.reason ?? "wrong_conversation_open" };
       }
       const active = connectorFor(contact);
       if (!active?.sendImage) {
@@ -1288,6 +1325,7 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
         stage: persistInput.stage,
         stopped: contact.stopped,
         stopReason: contact.stopReason,
+        suspectedTradeCount: contact.suspectedTradeCount ?? prior.suspectedTradeCount ?? 0,
       });
       const visitWrite = writeVisitState(dir, settled);
       if (!visitWrite.ok) {
@@ -1441,6 +1479,7 @@ export function buildChatSession(input: BuildChatSessionInput): ChatEngine {
     maxTurnsPerContact: 6,
     /** 节奏护栏（只为防封号；不含任何每日上限） */
     pacing: config.pacing ?? DEFAULT_PACING,
+    paymentMethods: paymentMethodsResolved,
   };
 
   return new ChatEngine(

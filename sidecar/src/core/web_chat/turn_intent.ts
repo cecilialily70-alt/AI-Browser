@@ -9,6 +9,7 @@ import type { ChatMessage } from "./conversation_extract.js";
 
 export type TurnIntentKind =
   | "trust_attack"
+  | "payment_ask"
   | "voice_video_request"
   | "image_request"
   | "price_question"
@@ -24,7 +25,7 @@ export interface TurnIntent {
 }
 
 const TRUST_ATTACK_RE =
-  /(骗子|诈骗|骗钱|托儿|托吗|是不是机器人|你是机器人|ai\b|chatgpt|gpt|假人|营销号|广告|scam|fraud|bot\b|robot|are you (a )?bot|are you (an )?ai)/i;
+  /(骗子|诈骗|骗钱|托儿|托吗|是不是机器人|你是机器人|ai\b|chatgpt|gpt|假人|营销号|广告|scam|fraud|scammer|bot\b|robot|are you (a )?bot|are you (an )?ai|נוכל|רמאי|רובוט|אתה\s*ai|אתה\s*רובוט)/i;
 
 /** 对方明确要语音 / 视频 / 通话（引擎不能发，只许被动婉拒或转图） */
 const VOICE_VIDEO_ASK_RE =
@@ -43,6 +44,9 @@ const MEDIA_CONFESS_RE =
   /(我(不会|不能|没法|没办法)发?(语音|视频)|没有语音|没有视频功能|网页(上)?发不了(语音|视频)|不支持语音|不支持视频)/;
 
 /** 对方在问价（商业目标下必须给大致价，不许空推「没官宣」） */
+const PAYMENT_ASK_RE =
+  /(钱包|地址|usdt|trc20|erc20|银行卡|卡号|收款|怎么付|付款方式|转账地址|wallet|address|iban|payment\s*method|ארנק|כתובת|איך\s*לשלם)/i;
+
 const PRICE_ASK_RE =
   /(价格|多少钱|报价|售价|什么价|贵不贵|怎么卖|贵多少|怎么定价|价位|price\b|how much|\bcost\b)/i;
 
@@ -58,11 +62,11 @@ const OBJECTION_RE =
 
 /** 推销/产品推进口吻（在信任攻击或未答问题时出现即违规） */
 const PITCH_RE =
-  /(苹果\s*\d+|iphone|散热|帧率|测评|实测|入手|下单|优惠|性价比|配置|推荐你|一定要|错过|库存|发货|包邮)/i;
+  /(苹果\s*\d+|iphone|散热|帧率|测评|实测|入手|下单|优惠|性价比|配置|推荐你|一定要|错过|库存|发货|包邮|pro\s*max|burgundy|בורגונדי|סוגרים|\b512\b|מכשיר|closing|lock(ing)?\s*in|成交|锁单|酒红)/i;
 
 /** 像在正面回应信任质问 */
 const TRUST_ANSWER_RE =
-  /(不是骗子|不是机器人|真人|我是人|真实|误会|为什么这么问|你放心|不是托)/i;
+  /(不是骗子|不是机器人|真人|我是人|真实|误会|为什么这么问|你放心|不是托|לא\s*(נוכל|רמאי|רובוט)|אני\s*לא|בן\s*אדם|neither\s*a\s*(bot|robot|scammer)|not\s*a\s*(scam|scammer|bot|fraud|robot)|just\s*(a\s*)?(tired\s*)?(person|human))/i;
 
 /** 像在正面回应问题（含问号回问或直接答） */
 const ANSWERISH_RE = /(因为|所以|其实|我这边|你说的|关于你问|问的是|[?？])/;
@@ -91,6 +95,7 @@ export function classifyTurnIntent(messages: readonly ChatMessage[]): TurnIntent
   const excerpt = incomingTextOf(messages).slice(0, 500);
   if (!excerpt) return { kind: "continue", excerpt: "" };
   if (TRUST_ATTACK_RE.test(excerpt)) return { kind: "trust_attack", excerpt };
+  if (PAYMENT_ASK_RE.test(excerpt)) return { kind: "payment_ask", excerpt };
   if (VOICE_VIDEO_ASK_RE.test(excerpt)) return { kind: "voice_video_request", excerpt };
   if (IMAGE_ASK_RE.test(excerpt)) return { kind: "image_request", excerpt };
   // 纠错优先于泛化提问：对方先戳穿「还没发布」时，本轮必须认错接住
@@ -121,16 +126,14 @@ export function draftViolatesIntent(text: string, intent: TurnIntent): boolean {
     return false;
   }
   if (intent.kind === "trust_attack") {
-    if (TRUST_ANSWER_RE.test(raw)) return false;
-    // 含推销且没有正面澄清 → 违规
-    if (PITCH_RE.test(raw)) return true;
-    // 完全不沾信任话题、却像在继续剧本
-    if (!TRUST_ATTACK_RE.test(raw) && PITCH_RE.test(raw)) return true;
-    if (!TRUST_ANSWER_RE.test(raw) && !/(不是|真人|误会|为什么问)/.test(raw) && PITCH_RE.test(raw)) {
-      return true;
-    }
-    // 信任攻击下纯推销（无澄清词）
-    return PITCH_RE.test(raw) && !TRUST_ANSWER_RE.test(raw);
+    // 必须先正面澄清；允许一句轻拉回正题，禁止硬推成交/锁单
+    if (!TRUST_ANSWER_RE.test(raw)) return true;
+    if (/(成交|下单|锁单|סוגרים|lock(ing)?\s*in|closing)/i.test(raw)) return true;
+    return false;
+  }
+  if (intent.kind === "payment_ask") {
+    // 付款方式走确定性通道，不经模型草稿判违规
+    return false;
   }
   if (intent.kind === "price_question") {
     // 空推「没官宣 / 给不了」且没有任何价位信息 → 违规（现场：Anne 问价却永远不报）
@@ -152,12 +155,14 @@ export function draftViolatesIntent(text: string, intent: TurnIntent): boolean {
   return false;
 }
 
-/** 本轮最多几句气泡：默认 1；对方一口气多条未回复才放宽到 2～3；信任攻击/纠错最多 2 */
+/** 本轮最多几句气泡：默认 1；对方一口气多条未回复才放宽到 2～3；信任攻击只许 1 句短回应 */
 export function maxBubblesForTurn(
   incoming: readonly ChatMessage[],
   intent: TurnIntent,
 ): number {
-  if (intent.kind === "trust_attack" || intent.kind === "fact_correction") return 2;
+  if (intent.kind === "trust_attack") return 1;
+  if (intent.kind === "payment_ask") return 1;
+  if (intent.kind === "fact_correction") return 2;
   const inCount = incoming.filter((message) => message.direction === "in").length;
   // 单条提问/闲聊 → 只回 1 句（「价格多少」被拆成两句推销 = 不连贯）
   if (inCount >= 2) return Math.min(3, inCount);
@@ -168,7 +173,9 @@ export function maxBubblesForTurn(
 export function intentPromptDirective(intent: TurnIntent): string | null {
   switch (intent.kind) {
     case "trust_attack":
-      return "对方在质疑你是骗子/机器人/托：必须先正面回应这个质疑（澄清你是真人、解释误会），本轮禁止推销产品或继续上一套话术。";
+      return "对方在质疑你是骗子/机器人/托：先用一句短口语澄清（你不是骗子/机器人），可顺带半句轻拉回正题；禁止本轮提产品、禁止长篇自辩、禁止硬推成交/锁单。";
+    case "payment_ask":
+      return "对方在要付款方式：不要自己编地址或卡号。系统若已配置会只发纯付款方式；未配置则交人工去设置。";
     case "voice_video_request":
       return "对方要语音或视频：不要主动说你不会/不能。用一句自然借口带过；可以请对方先看实拍图。禁止承诺马上发语音、视频或通话。";
     case "image_request":
@@ -186,10 +193,22 @@ export function intentPromptDirective(intent: TurnIntent): string | null {
   }
 }
 
+/**
+ * 信任质疑草稿全失败时的确定性短回复（按对方语种），避免「不回 = 更像机器人」。
+ */
+export function trustFallbackText(lang: "zh" | "en" | "he" | "unknown"): string {
+  if (lang === "he") return "לא רובוט ולא רמאי, סתם בן אדם עם טלפון ביד";
+  if (lang === "zh") return "不是机器人，真人在回你，咱们接着说正事";
+  return "nah not a bot, just me on my phone — back to what we were talking";
+}
+
 /** 去重/意图违规后的强制重写提示 */
 export function intentRewriteHint(intent: TurnIntent): string {
   if (intent.kind === "trust_attack") {
-    return `上一版草稿没有正面回答对方的信任质疑（「${intent.excerpt.slice(0, 80)}」）。请先澄清你不是骗子/机器人，不要提产品。`;
+    return `上一版草稿没有正面回答对方的信任质疑（「${intent.excerpt.slice(0, 80)}」）。请一句短口语澄清你不是骗子/机器人，可轻拉回正题，不要硬推成交。`;
+  }
+  if (intent.kind === "payment_ask") {
+    return `上一版草稿夹了废话或编造了付款信息（「${intent.excerpt.slice(0, 80)}」）。付款方式只能发已配置的纯内容。`;
   }
   if (intent.kind === "voice_video_request") {
     return `上一版草稿承诺了语音/视频，或主动说了做不到（「${intent.excerpt.slice(0, 80)}」）。请改成一句自然借口，不要提能力缺陷，也不要承诺发语音视频。`;

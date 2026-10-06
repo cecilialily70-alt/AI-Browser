@@ -10,6 +10,7 @@ import {
   intentPromptDirective,
   intentRewriteHint,
   maxBubblesForTurn,
+  trustFallbackText,
 } from "../dist/core/web_chat/turn_intent.js";
 
 test("骗子/机器人质问 → trust_attack", () => {
@@ -17,7 +18,33 @@ test("骗子/机器人质问 → trust_attack", () => {
     { id: "1", direction: "in", text: "你是骗子吗", ts: null, identity: null, stableId: false },
   ]);
   assert.equal(intent.kind, "trust_attack");
-  assert.ok(intentPromptDirective(intent)?.includes("禁止推销"));
+  assert.ok(intentPromptDirective(intent)?.includes("禁止本轮提产品"));
+});
+
+test("希伯来语骗子/机器人质问 → trust_attack；成交句违规；短澄清合规", () => {
+  const intent = classifyTurnIntent([
+    { id: "1", direction: "in", text: "אתה נוכל?", ts: null, identity: null, stableId: false },
+  ]);
+  assert.equal(intent.kind, "trust_attack");
+  const robot = classifyTurnIntent([
+    { id: "1", direction: "in", text: "AI אתה רובוט", ts: null, identity: null, stableId: false },
+  ]);
+  assert.equal(robot.kind, "trust_attack");
+  assert.equal(
+    draftViolatesIntent("אז מה איתנו עם ה-512 בורגונדי — סוגרים?", intent),
+    true,
+  );
+  assert.equal(draftViolatesIntent("לא אני לא נוכל חחח", intent), false);
+  assert.equal(
+    draftViolatesIntent("לא רובוט ולא רמאי, סתם בן אדם עם טלפון ביד", robot),
+    false,
+  );
+});
+
+test("信任质疑兜底文案按语种", () => {
+  assert.match(trustFallbackText("he"), /רובוט/);
+  assert.match(trustFallbackText("zh"), /不是机器人/);
+  assert.match(trustFallbackText("en"), /not a bot/i);
 });
 
 test("问价 → price_question；空推没官宣违规；给大致价合规", () => {
@@ -108,7 +135,7 @@ test("信任攻击优先于要图", () => {
   assert.equal(intent.kind, "trust_attack");
 });
 
-test("气泡上限：默认 1；多问/信任攻击放宽到 2～3", () => {
+test("气泡上限：默认 1；信任攻击只许 1；纠错/多问可到 2～3", () => {
   const cont = { kind: "continue", excerpt: "" };
   assert.equal(maxBubblesForTurn([], cont), 1);
   assert.equal(
@@ -119,7 +146,7 @@ test("气泡上限：默认 1；多问/信任攻击放宽到 2～3", () => {
     1,
     "单条提问必须只回 1 句，禁止拆成两句倒脚本",
   );
-  assert.equal(maxBubblesForTurn([], { kind: "trust_attack", excerpt: "骗子" }), 2);
+  assert.equal(maxBubblesForTurn([], { kind: "trust_attack", excerpt: "骗子" }), 1);
   assert.equal(maxBubblesForTurn([], { kind: "fact_correction", excerpt: "早就发布了" }), 2);
   const twoQ = [
     { id: "1", direction: "in", text: "a？", ts: null, identity: null, stableId: false },

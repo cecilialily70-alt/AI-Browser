@@ -1,16 +1,12 @@
 /**
  * 聊天模式的**页面原语**（§0.4 允许的「底层原语」：`resolveGateway` / CDP page / `readConversation`）。
  *
- * 这里只做四件确定性的小事，不含任何决策、不含任何模型调用：
- *   1. `ensureChatPage`  —— 确保有一个**聊天专用标签**（绝不复用/劫持用户正在看的标签）
- *   2. `openContact`     —— 定位到某个联系人的会话（同标签内导航，必要时点进列表项）
- *   3. `readThread`      —— 调用通用会话读取器（不截图、不观测）
- *   4. `sendChatText`    —— 拟人输入 + 发送 + **回读确认**
- *   5. `isTextInThread`  —— 页面回读：某条内容是否已在会话里（崩溃窗口对账的唯一依据）
- *   6. `waitThreadActivity` —— 页内 `MutationObserver` 事件等待
+ * 这里只做确定性的小事，不含任何决策、不含任何模型调用：
+ *   1. `ensureChatPage`  —— 复用**已打开的聊天站页**（绝不 newPage）
+ *   2. `openContact`     —— 先认当前对话头，已是目标则跳过；否则同窗点列表切换
+ *   3. `readThread` / `sendChatText` / `isTextInThread` / `waitThreadActivity`
  *
- * 纪律：不产生截图 / 全景 / SoM / a11y / digest / 影子模型（§5）。本文件里没有任何
- * 观测类调用，回归测试也据此断言。
+ * 纪律：不产生截图 / 全景 / SoM / a11y / digest / 影子模型（§5）。
  */
 import type { Browser, BrowserContext, Page } from "playwright-core";
 
@@ -19,6 +15,11 @@ import {
   normalizeComposerText,
   verifyComposerWrite,
 } from "../core/web_chat/descriptor/composer.js";
+import {
+  builtinConnectorDirs,
+  loadDescriptorDirs,
+  pickDescriptor,
+} from "../core/web_chat/descriptor/registry.js";
 import {
   readConversation,
   type ChatMessage,
@@ -30,15 +31,39 @@ import {
   decideChatReady,
   detectChatPage,
   loadChatSitePolicy,
+  matchChatSiteProfile,
   siteKeyOf,
   type ChatPageVerdict,
   type ChatSitePolicy,
 } from "../core/web_chat/site_detect.js";
+import { contactsMatch, digitsOfContact } from "./contact_identity.js";
 import {
   readChatSliceSize,
   waitForChatActivity,
   type ChatActivityResult,
 } from "../core/web_chat/wait.js";
+
+export { contactsMatch, digitsOfContact } from "./contact_identity.js";
+
+/** 没有已打开的聊天站页时抛出（调用方应提示用户先打开 WhatsApp / Telegram 等） */
+export class NoOpenChatPageError extends Error {
+  readonly code = "no_open_chat_page" as const;
+  constructor(message = "no_open_chat_page") {
+    super(message);
+    this.name = "NoOpenChatPageError";
+  }
+}
+
+/** 描述符缺失时的对话头选择器兜底（WhatsApp / Telegram 常见） */
+const DEFAULT_PEER_HEADER_SELECTORS = [
+  '#main header [data-testid="conversation-info-header-chat-title"]',
+  "#main header span[title]",
+  "#main header [title]",
+  "#MiddleColumn .peer-title",
+  "#MiddleColumn .ChatInfo .title",
+  "#column-center .peer-title",
+  "#column-center .chat-info .peer-title",
+] as const;
 
 /* ————————————————————————— 1. 聊天专用标签 ————————————————————————— */
 
@@ -112,50 +137,84 @@ export async function findOwnChatTab(context: BrowserContext): Promise<Page | nu
 }
 
 /**
- * 取得聊天专用标签。
+ * 在本环境里找**已经打开的聊天站点页**（WhatsApp / Telegram 等）。
  *
- * 关键约束：**不劫持用户正在看的标签**。用户自己开的页面上可能正开着别的会话，
- * 我们一旦在里面导航，就把用户正在做的事冲掉了。所以这里只在
- * 「我们上次开的、还活着的聊天标签」里复用，否则**新开一个**。
+ * 切换会话只应在同一窗口里点列表项；有站点页却再 `newPage()` 会开出 about:blank，
+ * WhatsApp 单窗模型下必然打不开会话（用户现场）。
+ */
+export async function findChatSitePage(
+  context: BrowserContext,
+  policy: ChatSitePolicy = loadChatSitePolicy(),
+): Promise<Page | null> {
+  let pages: Page[];
+  try {
+    pages = context.pages();
+  } catch {
+    return null;
+  }
+  let best: Page | null = null;
+  for (const page of pages) {
+    try {
+      if (page.isClosed()) continue;
+      const url = page.url();
+      if (!url || url === "about:blank" || !/^https?:/i.test(url)) continue;
+      if (matchChatSiteProfile(url, policy)) best = page;
+    } catch {
+      /* 单个页失败继续扫 */
+    }
+  }
+  return best;
+}
+
+/**
+ * 取得聊天页：只复用已开着的聊天站点窗口，**永不 newPage**。
  *
- * 复用分两层：进程内缓存（{@link chatTabs}）→ 跨进程认领（{@link findOwnChatTab}）。
- * 第二层很重要：同一账号的多个会话**共用一个标签**（一个标签里按会话导航切换），
- * 这样不会每个联系人、每一片都开一个新窗口把账号堆成一排标签。
+ * 顺序：进程内缓存 → 自开标记页 → 已打开的聊天站点页 → 抛 {@link NoOpenChatPageError}。
+ * 切换联系人只在该窗内点列表（见 {@link openContact}）。
  */
 export async function ensureChatPage(context: BrowserContext): Promise<EnsureChatPageResult> {
   const cached = chatTabs.get(context);
   if (cached) {
     try {
       if (!cached.isClosed()) {
-        return { page: cached, created: false, adopted: false };
+        const url = safeUrl(cached);
+        if (url && url !== "about:blank") {
+          return { page: cached, created: false, adopted: false };
+        }
       }
     } catch {
-      /* 已销毁，落到下面认领/重开 */
+      /* 已销毁，落到下面认领 */
     }
   }
 
-  const adopted = await findOwnChatTab(context);
-  if (adopted) {
-    chatTabs.set(context, adopted);
-    return { page: adopted, created: false, adopted: true };
+  const own = await findOwnChatTab(context);
+  if (own) {
+    chatTabs.set(context, own);
+    return { page: own, created: false, adopted: true };
   }
 
-  const page = await context.newPage();
-  chatTabs.set(context, page);
-  await markOwnChatTab(page);
-  return { page, created: true, adopted: false };
+  const sitePage = await findChatSitePage(context);
+  if (sitePage) {
+    chatTabs.set(context, sitePage);
+    return { page: sitePage, created: false, adopted: true };
+  }
+
+  throw new NoOpenChatPageError(
+    "no_open_chat_page: 请先在浏览器里打开目标站点的聊天页面（不会另开新标签）",
+  );
 }
 
-/** 关掉聊天标签（`chat_stop` 时调用；只关我们自己开的那个） */
+/** 关掉聊天标签（`chat_stop` 时调用；**只关我们自己开的**，绝不关用户的 WhatsApp/Telegram 窗） */
 export async function closeChatPage(context: BrowserContext): Promise<boolean> {
   const page = chatTabs.get(context);
   chatTabs.delete(context);
   if (!page) return false;
   try {
-    if (!page.isClosed()) {
-      await page.close();
-      return true;
-    }
+    if (page.isClosed()) return false;
+    // 认领的用户聊天站页没有 own 标记 → 只解除绑定，不关页
+    if (!(await isOwnChatTab(page))) return false;
+    await page.close();
+    return true;
   } catch {
     /* ignore */
   }
@@ -175,8 +234,11 @@ export interface OpenContactResult {
 /**
  * 打开某个联系人的会话。
  *
- * `contact.url` 是该联系人的会话直链（由用户指定/登记时记录）。没有直链时退化为
- * 「在当前页上找列表项并点击」——点不到就如实失败，绝不猜。
+ * 产品纪律：
+ *   1. 永不 newPage；只在当前聊天窗里点列表切换。
+ *   2. 先读对话头：已是目标人 → **跳过点击**。
+ *   3. 当前是别人 → 点列表打开目标；点完再读头校验。
+ * WhatsApp 无会话直链 → 必须点；有 hash 直链时点击失败再同标签导航兜底。
  */
 export async function openContact(
   page: Page,
@@ -188,20 +250,80 @@ export async function openContact(
     return { ok: false, reason: "aborted", containerSelector: null, navigated: false };
   }
 
+  const targetLabel = String(contact.label ?? "").trim();
   const targetUrl = String(contact.url ?? "").trim();
-  let navigated = false;
+  const current = safeUrl(page);
 
-  if (targetUrl) {
-    const current = safeUrl(page);
-    if (normalizeUrl(current) !== normalizeUrl(targetUrl)) {
+  // ① 已打开且就是目标 → 不点
+  const openLabel = await readOpenConversationLabel(page);
+  if (targetLabel && openLabel && contactsMatch(openLabel, targetLabel)) {
+    const detected = await detectChatPage(page, { policy, signal });
+    return {
+      ok: true,
+      reason: null,
+      containerSelector: detected.containerSelector ?? contact.containerSelector ?? null,
+      navigated: false,
+    };
+  }
+  if (targetUrl && normalizeUrl(current) === normalizeUrl(targetUrl) && openLabel) {
+    // URL 已对齐且有对话头：若还有目标名，必须名字也对得上（SPA 同 URL 不同会话）
+    if (!targetLabel || contactsMatch(openLabel, targetLabel)) {
+      const detected = await detectChatPage(page, { policy, signal });
+      return {
+        ok: true,
+        reason: null,
+        containerSelector: detected.containerSelector ?? contact.containerSelector ?? null,
+        navigated: false,
+      };
+    }
+  }
+
+  let navigated = false;
+  const preferClick = shouldOpenByListClick(current, targetUrl, targetLabel, policy);
+
+  if (preferClick) {
+    const clicked = await clickContactInList(page, targetLabel);
+    if (clicked) {
+      await settle(page);
+      navigated = true;
+      const after = await readOpenConversationLabel(page);
+      if (targetLabel && after && !contactsMatch(after, targetLabel)) {
+        // 点了但头还是别人 → 再试 URL 兜底；否则如实失败
+        if (!targetUrl) {
+          return {
+            ok: false,
+            reason: "list_click_opened_wrong_contact",
+            containerSelector: null,
+            navigated: true,
+          };
+        }
+      } else if (targetLabel && after && contactsMatch(after, targetLabel)) {
+        const detected = await detectChatPage(page, { policy, signal });
+        return {
+          ok: true,
+          reason: null,
+          containerSelector: detected.containerSelector ?? contact.containerSelector ?? null,
+          navigated: true,
+        };
+      }
+    } else if (!targetUrl) {
+      return {
+        ok: false,
+        reason: "contact_url_missing_and_not_found_in_list",
+        containerSelector: null,
+        navigated: false,
+      };
+    }
+  }
+
+
+  if (!navigated && targetUrl) {
+    if (normalizeUrl(safeUrl(page)) !== normalizeUrl(targetUrl)) {
       try {
         await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
         navigated = true;
       } catch (error) {
-        // 同一文档内的切换（很多 SPA 只改 hash：`#@A` → `#@B`）有时不会被 `goto` 当成一次
-        // 可等待的导航。这类情况**不是失败**：直接把 hash 交给页面自己路由即可 ——
-        // 站点收到 hashchange 就会切会话，语义与用户点列表里那一行完全相同。
-        if (!(await switchSameDocument(page, current, targetUrl))) {
+        if (!(await switchSameDocument(page, safeUrl(page), targetUrl))) {
           return {
             ok: false,
             reason: `navigate_failed:${error instanceof Error ? error.message : String(error)}`,
@@ -211,35 +333,34 @@ export async function openContact(
         }
         navigated = true;
       }
-      // 会话页是异步渲染的：给一个短暂的确定性等待，等不到不硬等
       await settle(page);
     }
-  } else {
-    // 没有直链：尝试在列表里点这个联系人（只按可见文本精确/包含匹配，不做模糊猜测）
-    const clicked = await clickContactInList(page, contact.label);
-    if (!clicked) {
-      return {
-        ok: false,
-        reason: "contact_url_missing_and_not_found_in_list",
-        containerSelector: null,
-        navigated: false,
-      };
-    }
-    await settle(page);
+  } else if (!navigated && !targetUrl) {
+    return {
+      ok: false,
+      reason: "contact_url_missing_and_not_found_in_list",
+      containerSelector: null,
+      navigated: false,
+    };
   }
 
   if (signal?.aborted) {
     return { ok: false, reason: "aborted", containerSelector: null, navigated };
   }
 
-  // 顺手做一次探测，只为「能带上容器就带上」——**这一瞬的结果不作结论**。
-  //
-  // 纪律（§0.5.3 A）：`openContact` 只保证「导航已发出 / 列表项已点」，此刻首屏往往还在渲染，
-  // 打分自然低，很容易被误判成「不是聊天页」。那其实是把「还没跑成」谎报成结论 ——
-  // 现场就是这一条：打开会话 1 秒后 `not_chat_page`，整片瞬间结束
-  // （`打不开会话，跳过该联系人` → `值守片结束：slice_complete`）。
-  // 「就绪 / 明确不是聊天页」交给就绪门禁（`waitPageReady` → `waitForChatReady`）在一段
-  // 公平的观察窗之后判定；本函数**不越权**下这个结论。
+  // 有目标名时必须核对对话头：读不到 / 对不上 → 失败（禁止「以为打开了」却发到当前窗里的别人）
+  if (targetLabel) {
+    const verified = await verifyOpenContact(page, targetLabel, { retries: 5, gapMs: 350 });
+    if (!verified.ok) {
+      return {
+        ok: false,
+        reason: verified.reason ?? "opened_contact_mismatch",
+        containerSelector: null,
+        navigated,
+      };
+    }
+  }
+
   const detected = await detectChatPage(page, { policy, signal });
   return {
     ok: true,
@@ -247,6 +368,128 @@ export async function openContact(
     containerSelector: detected.containerSelector ?? contact.containerSelector ?? null,
     navigated,
   };
+}
+
+export interface VerifyOpenContactResult {
+  ok: boolean;
+  reason: string | null;
+  /** 当前对话头（脱敏排查用；可能为空） */
+  openLabel: string | null;
+}
+
+/**
+ * 核对「当前打开的会话」是否就是目标人（发消息前必跑）。
+ * 读不到头或对不上 → fail-closed，绝不往当前窗硬发。
+ */
+export async function verifyOpenContact(
+  page: Page,
+  targetLabel: string,
+  options: { retries?: number; gapMs?: number } = {},
+): Promise<VerifyOpenContactResult> {
+  const needle = String(targetLabel ?? "").trim();
+  if (!needle) {
+    return { ok: true, reason: null, openLabel: null };
+  }
+  const retries = Math.max(1, Math.min(10, Math.trunc(options.retries ?? 3)));
+  const gapMs = Math.max(0, Math.min(2_000, Math.trunc(options.gapMs ?? 300)));
+  let openLabel: string | null = null;
+  for (let i = 0; i < retries; i += 1) {
+    openLabel = await readOpenConversationLabel(page);
+    if (openLabel && contactsMatch(openLabel, needle)) {
+      return { ok: true, reason: null, openLabel };
+    }
+    if (openLabel && !contactsMatch(openLabel, needle)) {
+      return { ok: false, reason: "wrong_conversation_open", openLabel };
+    }
+    if (i + 1 < retries && gapMs > 0) {
+      await page.waitForTimeout(gapMs).catch(() => undefined);
+    }
+  }
+  return {
+    ok: false,
+    reason: openLabel ? "wrong_conversation_open" : "conversation_header_missing",
+    openLabel,
+  };
+}
+
+/**
+ * 读当前已打开对话的展示名（中间栏标题）。
+ * 无对话窗（只有列表）→ null。
+ */
+export async function readOpenConversationLabel(page: Page): Promise<string | null> {
+  const selectors = await peerHeaderSelectorsOf(page);
+  if (selectors.length === 0) return null;
+  try {
+    const label = await page.evaluate((sels: string[]) => {
+      for (const sel of sels) {
+        let nodes: NodeListOf<Element>;
+        try {
+          nodes = document.querySelectorAll(sel);
+        } catch {
+          continue;
+        }
+        for (const el of nodes) {
+          const titled = (el.getAttribute("title") || "").trim();
+          const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+          const value = titled || text;
+          if (value) return value.slice(0, 120);
+        }
+      }
+      return null;
+    }, selectors);
+    return label && String(label).trim() ? String(label).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function peerHeaderSelectorsOf(page: Page): Promise<string[]> {
+  const url = safeUrl(page);
+  if (url && url !== "about:blank") {
+    try {
+      const hit = pickDescriptor(cachedBuiltinDescriptors(), url, {});
+      const headers = hit?.descriptor.peer?.fallbackHeader?.selectors;
+      if (headers && headers.length > 0) return [...headers];
+    } catch {
+      /* 描述符加载失败 → 用兜底 */
+    }
+  }
+  return [...DEFAULT_PEER_HEADER_SELECTORS];
+}
+
+let builtinDescriptorCache: ReturnType<typeof loadDescriptorDirs>["descriptors"] | null = null;
+function cachedBuiltinDescriptors() {
+  if (!builtinDescriptorCache) {
+    builtinDescriptorCache = loadDescriptorDirs({
+      builtinDirs: builtinConnectorDirs(),
+      learnedDirs: [],
+    }).descriptors;
+  }
+  return builtinDescriptorCache;
+}
+
+/** 同站点切换优先点列表；about:blank 上点不到，交给导航。 */
+function shouldOpenByListClick(
+  currentUrl: string,
+  targetUrl: string,
+  label: string,
+  policy: ChatSitePolicy,
+): boolean {
+  if (!String(label ?? "").trim()) return false;
+  if (!targetUrl) return true;
+  try {
+    const current = String(currentUrl ?? "").trim();
+    if (!current || current === "about:blank") return false;
+    const cur = new URL(current);
+    const tgt = new URL(targetUrl);
+    if (cur.origin !== tgt.origin) return false;
+    if (matchChatSiteProfile(current, policy) || matchChatSiteProfile(targetUrl, policy)) {
+      return true;
+    }
+    return normalizeUrl(current) === normalizeUrl(targetUrl);
+  } catch {
+    return true;
+  }
 }
 
 function safeUrl(page: Page): string {
@@ -308,51 +551,170 @@ async function switchSameDocument(page: Page, current: string, target: string): 
 }
 
 /**
- * 在会话列表里点选联系人。只在**可见、可点**的候选里按文本匹配，
- * 匹配到多个就选最短文本的那个（最像昵称），一个都没有就返回 false。
+ * 在会话列表里点选联系人。
+ *
+ * WhatsApp Web 列表项是 `#pane-side [data-testid="cell-frame-container"]`（哈希 class、无 a[href]），
+ * 旧通用选择器扫不到 → `contact_url_missing_and_not_found_in_list`（现场日志 H2）。
+ * 优先用描述符同款选择器，并按 title / 电话数字匹配；点最外层列表行，不点侧栏图标。
  */
 async function clickContactInList(page: Page, label: string): Promise<boolean> {
   const needle = String(label ?? "").trim();
   if (!needle) return false;
+  const digits = digitsOfContact(needle);
 
-  const selector = await page
-    .evaluate((target: string) => {
-      const isVisible = (el: Element): boolean => {
-        const rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return false;
-        const style = window.getComputedStyle(el);
-        return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0.1;
-      };
-      const candidates: Array<{ selector: string; textLength: number }> = [];
-      const all = document.querySelectorAll<HTMLElement>(
-        'a[href], [role="listitem"], [role="option"], li, [data-id], [class*="contact" i], [class*="chat" i], [class*="dialog" i]',
-      );
-      let index = 0;
-      for (const el of all) {
-        index += 1;
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (!text || !text.includes(target)) continue;
-        if (!isVisible(el)) continue;
-        const attr = `data-tst-chat-pick`;
-        el.setAttribute(attr, String(index));
-        candidates.push({ selector: `[${attr}="${index}"]`, textLength: text.length });
-      }
-      if (candidates.length === 0) return null;
-      candidates.sort((a, b) => a.textLength - b.textLength);
-      return candidates[0].selector;
-    }, needle)
-    .catch(() => null);
+  type PickProbe = {
+    selector: string | null;
+    candidateCount: number;
+    scoped: boolean;
+    sampleTitleLen: number;
+  };
+
+  const probe = await page
+    .evaluate(
+      (arg: { target: string; digits: string }): PickProbe => {
+        const { target, digits: digitNeedle } = arg;
+        const isVisible = (el: Element): boolean => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          const style = window.getComputedStyle(el);
+          return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0.1;
+        };
+        const digitsOf = (raw: string): string => String(raw ?? "").replace(/\D+/g, "");
+        const matchesHay = (hay: string): boolean => {
+          if (!hay) return false;
+          if (hay.includes(target)) return true;
+          // 电话：忽略空格/破折号差异（+852 9705 4887 vs +85297054887）
+          if (digitNeedle.length >= 6) {
+            const hd = digitsOf(hay);
+            if (
+              hd.length >= 6 &&
+              (hd === digitNeedle || hd.endsWith(digitNeedle) || digitNeedle.endsWith(hd))
+            ) {
+              return true;
+            }
+          }
+          return false;
+        };
+        const titleOf = (el: Element): string => {
+          const node =
+            el.querySelector(
+              '[data-testid="cell-frame-title"] span[title], [data-testid="cell-frame-title"] [title], span[title]',
+            ) ?? el;
+          const titled = (node.getAttribute("title") || "").trim();
+          if (titled) return titled;
+          const aria = (el.getAttribute("aria-label") || "").trim();
+          if (aria) return aria.split("\n")[0]!.trim().slice(0, 120);
+          return "";
+        };
+        const rowOf = (el: Element): HTMLElement => {
+          let cur: Element | null = el;
+          for (let i = 0; i < 8 && cur; i += 1) {
+            if (
+              cur instanceof HTMLElement &&
+              (cur.matches(
+                '[data-testid="cell-frame-container"], [role="listitem"], [role="row"], div[data-testid^="list-item-"], a[href]',
+              ) ||
+                cur.getAttribute("role") === "listitem")
+            ) {
+              return cur;
+            }
+            cur = cur.parentElement;
+          }
+          return el instanceof HTMLElement ? el : (el.parentElement as HTMLElement);
+        };
+
+        // 与 whatsapp-web.json threads.itemSelectors 对齐，再加通用回落
+        const itemSelectors = [
+          '#pane-side [data-testid="cell-frame-container"]',
+          '#pane-side [role="listitem"]',
+          '#pane-side div[data-testid^="list-item-"]',
+          '#pane-side [role="row"]',
+          '[data-testid="cell-frame-container"]',
+          '[role="listitem"]',
+          '[role="option"]',
+          'div[data-testid^="list-item-"]',
+          'a[href]',
+          'li',
+          '[data-id]',
+        ];
+
+        const pane = document.querySelector("#pane-side");
+        const roots: Array<{ root: ParentNode; scoped: boolean }> = pane
+          ? [
+              { root: pane, scoped: true },
+              { root: document, scoped: false },
+            ]
+          : [{ root: document, scoped: false }];
+
+        for (const { root, scoped } of roots) {
+          const seen = new Set<Element>();
+          const candidates: Array<{ el: HTMLElement; score: number; titleLen: number }> = [];
+          for (const sel of itemSelectors) {
+            let nodes: Element[] = [];
+            try {
+              nodes = Array.from(root.querySelectorAll(sel));
+            } catch {
+              continue;
+            }
+            for (const node of nodes) {
+              if (seen.has(node)) continue;
+              seen.add(node);
+              if (!isVisible(node)) continue;
+              const title = titleOf(node);
+              const text = (node.textContent ?? "").replace(/\s+/g, " ").trim();
+              // 整栏拼接的超长 text 只靠 title/短文本匹配，避免误点父容器
+              const shortText = text.length > 0 && text.length <= 96 ? text : "";
+              if (!matchesHay(title) && !matchesHay(shortText)) continue;
+              const row = rowOf(node);
+              if (!row || !isVisible(row)) continue;
+              const score = (title && matchesHay(title) ? 0 : 10) + Math.min(text.length, 200);
+              candidates.push({ el: row, score, titleLen: title.length });
+            }
+          }
+          if (candidates.length === 0) continue;
+          candidates.sort((a, b) => a.score - b.score || a.titleLen - b.titleLen);
+          const best = candidates[0]!.el;
+          const attr = "data-tst-chat-pick";
+          const mark = `p${Date.now().toString(36)}`;
+          best.setAttribute(attr, mark);
+          return {
+            selector: `[${attr}="${mark}"]`,
+            candidateCount: candidates.length,
+            scoped,
+            sampleTitleLen: candidates[0]!.titleLen,
+          };
+        }
+        return { selector: null, candidateCount: 0, scoped: Boolean(pane), sampleTitleLen: 0 };
+      },
+      { target: needle, digits },
+    )
+    .catch((): PickProbe | null => null);
+
+  // 兼容旧假页面（测试返回纯字符串选择器）
+  const selector =
+    typeof probe === "string"
+      ? probe
+      : probe && typeof probe === "object"
+        ? probe.selector
+        : null;
 
   if (!selector) return false;
 
   try {
-    await resolveGateway(page).click(selector, { semanticLabel: `打开会话：${needle}` });
+    await resolveGateway(page).click(selector, {
+      semanticLabel: `打开会话：${needle}`,
+      skipSettle: true,
+    });
     return true;
   } catch {
-    return false;
+    try {
+      await page.click(selector, { timeout: 5_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
-
 /* ————————————————————————— 3. 读取会话 ————————————————————————— */
 
 export interface ReadThreadOptions {
@@ -617,7 +979,7 @@ export async function sendChatText(
 
   try {
     const gateway = resolveGateway(page);
-    // `humanLike` 走 pressSequentially：拟人节奏（逐字、有间隔）
+    // `humanLike` 缺省/true 走 Locator.fill，节奏交给 CloakBrowser 包装层
     await gateway.fill(composer.inputSelector, content, {
       humanLike: true,
       semanticLabel: "聊天输入",

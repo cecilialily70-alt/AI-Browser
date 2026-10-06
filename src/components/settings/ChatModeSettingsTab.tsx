@@ -223,17 +223,17 @@ export function ChatModeSettingsTab({
       <SettingsSection
         icon={<MessagesSquare size={16} />}
         title="聊天模式总开关"
-        description="默认关闭。关闭时不会注册定时器、也不会自动拉起值守。日常开关也可在顶栏「聊天模式」视图的状态带上操作。"
+        description="默认关闭。关闭时不会自动聊天。日常开关也可在顶栏「聊天模式」里操作。"
       >
         <ToggleRow
           checked={settings.enabled}
           disabled={saving}
           label="启用聊天模式"
-          hint="这是「允许使用」的闸门；真正开聊仍要在「聊天模式」视图里点「开始值守一片」。"
+          hint="这是总闸门；打开后在「聊天模式」里勾选联系人并点「开始聊天」。"
           onChange={(next) =>
             void persist(
               { ...settings, enabled: next },
-              next ? "聊天模式已启用（仍需显式开始值守）" : "聊天模式已关闭",
+              next ? "聊天模式已启用" : "聊天模式已关闭",
             )
           }
         />
@@ -241,7 +241,7 @@ export function ChatModeSettingsTab({
 
       <SettingsSection
         icon={<MessageSquare size={16} />}
-        title="值守目标"
+        title="聊天目标"
         description="可写 @规则名 / @人设名。没写 @ 就不套规则库，避免悄悄改说话方式。"
       >
         <textarea
@@ -260,19 +260,19 @@ export function ChatModeSettingsTab({
       <SettingsSection
         icon={<MessagesSquare size={16} />}
         title="聊天对象"
-        description="指定要聊谁。没指定时，聊天模式直接用你此刻打开的那个聊天窗口。"
+        description="始终在已打开的聊天网页里工作，不另开标签。名单为空时聊当前打开的会话。"
       >
         <ToggleRow
           checked={settings.useCurrentWindow}
           disabled={saving}
-          label="未指定对象时，使用当前打开的聊天窗口"
-          hint="默认开启。只在「要聊的对象」留空时生效：引擎绑到你当时开着的那个聊天标签上，只读会话、只往输入框里打字；不新开标签、不导航、不关你的窗口。判不出那是聊天页就如实失败，不会乱猜。"
+          label="名单为空时，使用当前打开的会话"
+          hint="默认开启。没有勾选任何人时，直接聊你此刻打开的那个对话窗。"
           onChange={(next) =>
             void persist(
               { ...settings, useCurrentWindow: next },
               next
-                ? "已开启：目标留空时用当前打开的聊天窗口"
-                : "已关闭：没有目标就不会启动聊天",
+                ? "已开启：名单空时用当前打开的会话"
+                : "已关闭：没有勾选就不会启动聊天",
             )
           }
         />
@@ -280,8 +280,8 @@ export function ChatModeSettingsTab({
 
       <SettingsSection
         icon={<Clock size={16} />}
-        title="值守节奏"
-        description="对方没回时只盯守、不催（主动追发已下线）。可设夜间静默；对方来消息仍可按「自动聊天」回话。"
+        title="聊天节奏"
+        description="对方没回时只盯着、不催。可设夜间静默；对方来消息仍可按自动聊天回话。"
       >
         <p className="text-caption text-muted-foreground">
           引擎行为：开场与回话走联系人卡片上的「自动聊天」；发出后靠短复查接对方下一句；不会隔几天再主动追一句。
@@ -308,12 +308,12 @@ export function ChatModeSettingsTab({
 
       <SettingsSection
         icon={<MessagesSquare size={16} />}
-        title="单次值守"
-        description="一次值守跑多久、最多处理几位联系人。总开关开着时会持续盯守：有消息立刻回，片与片之间秒级续上。"
+        title="单次切片"
+        description="一次自动聊天跑多久、最多处理几位。总开关开着时会持续盯：有消息立刻回。"
       >
         <NumberRow
-          label="单次值守时长"
-          hint={`到点就收尾并让位；下一片会马上再来。想多轮来回更久就调大（约 ${Math.round(settings.sliceMs / 60_000)} 分钟）。`}
+          label="单次时长"
+          hint={`到点就让位；下一片马上再来（约 ${Math.round(settings.sliceMs / 60_000)} 分钟）。`}
           value={Math.round(settings.sliceMs / 60_000)}
           min={Math.ceil(CHAT_SLICE_MS_MIN / 60_000)}
           max={Math.floor(CHAT_SLICE_MS_MAX / 60_000)}
@@ -332,7 +332,7 @@ export function ChatModeSettingsTab({
         />
         <NumberRow
           label="单次处理联系人上限"
-          hint="一次值守里最多翻几位联系人的会话。"
+          hint="一次切片里最多翻几位联系人的会话。"
           value={settings.maxContactsPerSlice}
           min={1}
           max={CHAT_CONTACTS_PER_SLICE_MAX}
@@ -407,11 +407,11 @@ export function ChatModeSettingsTab({
 
       <SettingsSection
         icon={<MessageSquare size={16} />}
-        title="自动值守"
-        description="打开总开关后，本应用会持续把在跑的环境拉起来值守；有消息就回，跑完马上再来。电脑休眠，或关掉本应用 / 浏览器时无法回复。"
+        title="自动聊天"
+        description="打开总开关后，持续把在跑的环境拉起来自动聊；有消息就回。电脑休眠或关掉应用/浏览器时无法回复。"
       >
         <NumberRow
-          label="同时值守的环境数"
+          label="同时自动聊的环境数"
           hint={
             "到期的环境多于这个数时会排队（排队数量会显示在「聊天模式」视图里，不会被丢掉）。" +
             "免费档恒为 1；Pro 最高 " +

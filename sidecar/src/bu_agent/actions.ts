@@ -67,6 +67,7 @@ import {
   isEngineHomepageUrl,
 } from "../core/page_policy.js";
 import { verifyDeliverables, deniedVerdicts, uncertainVerdicts } from "../core/deliverable_verify.js";
+import { pageIsSerpForQuery } from "./deterministic.js";
 import {
   isUnrequestedDeliverable,
   isUnverifiableNavigation,
@@ -672,7 +673,7 @@ async function retryFieldWrite(
   await locator.press("Control+a", { timeout: 5_000 }).catch(() => undefined);
   await locator.press("Backspace", { timeout: 5_000 }).catch(() => undefined);
   if (value.length > 0) {
-    await locator.pressSequentially(value, { delay: 30, timeout: Math.max(8_000, value.length * 60) });
+    await locator.pressSequentially(value, { timeout: Math.max(8_000, value.length * 60) });
   }
 }
 
@@ -1378,17 +1379,23 @@ async function buildVerifierContext(ctx: ActionContext, claim: string) {
     .slice(0, 120);
   const lexicon = loadCompletionLexicon();
   const signals = lexicon ? await scanPageSignals(ctx.page, lexicon) : undefined;
+  const currentUrl = ctx.page.url();
+  const liveSerp = pageIsSerpForQuery(
+    currentUrl,
+    ctx.pageFacts?.queryTerms ?? [],
+    String(ctx.browserState?.pageDigest ?? ""),
+  );
   return {
     goal: ctx.goal,
     ledger: ctx.evidence!,
-    currentUrl: ctx.page.url(),
+    currentUrl,
     currentTitle: ctx.browserState?.title ?? "",
     visibleLabels: labels,
     signals,
     artifacts: ctx.artifacts,
     claim,
     minClaimChars: lexicon?.minClaimChars ?? 30,
-    serpForQuery: ctx.pageFacts?.serpForQuery === true,
+    serpForQuery: ctx.pageFacts?.serpForQuery === true || liveSerp,
     observedUrl: ctx.browserState?.url,
     // 信息型目标的阅读对象就是当前页 → verifyNavigation 不据此判「未达成」
     goalIntent: classifyGoalIntent(ctx.goal, lexicon),
@@ -2450,7 +2457,6 @@ export function registerAllActions(): void {
     for (let i = 0; i < 8; i++) {
       const found = await ctx.page.getByText(text, { exact: false }).first().isVisible().catch(() => false);
       if (found) {
-        await ctx.page.getByText(text, { exact: false }).first().scrollIntoViewIfNeeded().catch(() => null);
         return ok(`已找到文本: ${text}`);
       }
       await resolveGateway(ctx.page).scroll("down");

@@ -218,7 +218,8 @@ export const LIVE_REPLY_MIN_GAP_MS = 2_000;
  * 而这里**必须有上限**：接不上（用户关了自动聊天 / 已交人工）时，5 分钟后放弃盯守，
  * 交回正常回访节奏 —— 否则会变成 15 秒一轮的永久空转。
  */
-export const PENDING_REPLY_LADDER_SECONDS: readonly number[] = [15, 30, 60, 120, 300];
+/** 对方在等我：优先 3～8 秒续盯（现场「slice_complete 后两分钟不理」过慢） */
+export const PENDING_REPLY_LADDER_SECONDS: readonly number[] = [3, 8, 15, 30, 60];
 
 export function liveReplyRecheckAt(input: {
   nowIso: string;
@@ -447,4 +448,108 @@ export function followUpSkipLabel(reason: FollowUpSkipReason): string {
 export function isColdOpening(state: FollowUpState): boolean {
   if (state.followUpIndex > 0) return false;
   return !state.lastContactAt;
+}
+
+/* ————————————————————————— 温热追问（不冷场） ————————————————————————— */
+
+/**
+ * 对话中的「不冷场」追问：对方沉默时按角色/目标轻推一两句。
+ * 与长周期销售回访（`planFollowUp`，小时/天）分开 —— 这是分钟级、像真人接着聊。
+ *
+ * 默认：首追约 3 分钟，其后 8→15→30→60 分钟，一轮最多 3 次（可配 1～5）。
+ */
+export interface WarmSteerConfig {
+  enabled: boolean;
+  firstMinutes: number;
+  backoffMinutes: number[];
+  /** 一轮最多追问几次；0 = 关；上限 5 */
+  maxNudges: number;
+}
+
+export const DEFAULT_WARM_STEER: WarmSteerConfig = {
+  enabled: true,
+  firstMinutes: 3,
+  backoffMinutes: [8, 15, 30, 60],
+  maxNudges: 3,
+};
+
+export const WARM_STEER_LIMITS = {
+  firstMinutes: [1, 120],
+  maxNudges: [0, 5],
+} as const;
+
+/** 第 `index` 次温热追问对应的基准间隔（分钟） */
+export function warmSteerMinutesFor(
+  index: number,
+  config: WarmSteerConfig = DEFAULT_WARM_STEER,
+): number {
+  const idx = Math.max(0, Math.trunc(index));
+  if (idx === 0) return Math.max(1, config.firstMinutes);
+  const backoff =
+    config.backoffMinutes.length > 0 ? config.backoffMinutes : DEFAULT_WARM_STEER.backoffMinutes;
+  const value = backoff[Math.min(idx - 1, backoff.length - 1)];
+  return Math.max(1, Number.isFinite(value) ? value : DEFAULT_WARM_STEER.firstMinutes);
+}
+
+export function computeNextWarmDueAt(
+  threadKey: string,
+  followUpIndex: number,
+  config: WarmSteerConfig,
+  nowIso: string,
+): string {
+  const minutes = warmSteerMinutesFor(followUpIndex, config);
+  const factor = jitterFactor(threadKey, followUpIndex, 0.15);
+  const now = new Date(nowIso).getTime();
+  return new Date(now + minutes * 60_000 * factor).toISOString();
+}
+
+/**
+ * 温热追问判定：我方刚说过话、对方还没接上 → 到点就轻推一句，把话题往目标带。
+ * `nextDueAt` 为空时，用 `lastContactAt + 首追间隔` 推导（老会话也能接上）。
+ */
+export function planWarmSteer(
+  state: FollowUpState,
+  config: WarmSteerConfig = DEFAULT_WARM_STEER,
+  nowIso: string,
+  ctx: {
+    sentToday: number;
+    maxPerDay: number;
+    contactFollowUpOff?: boolean;
+    chatOff?: boolean;
+  },
+): FollowUpPlan {
+  if (!config.enabled || config.maxNudges <= 0) return { action: "skip", reason: "disabled" };
+  if (ctx.chatOff === true) return { action: "skip", reason: "chat_off" };
+  if (ctx.contactFollowUpOff === true) return { action: "skip", reason: "contact_off" };
+  if (state.stopped) return { action: "skip", reason: "stopped" };
+  if (!state.lastContactAt) return { action: "skip", reason: "not_due" };
+  if (repliedSinceLastContact(state)) return { action: "skip", reason: "replied" };
+  if (state.followUpIndex >= config.maxNudges) return { action: "skip", reason: "round_exhausted" };
+
+  const now = new Date(nowIso).getTime();
+  const last = new Date(state.lastContactAt).getTime();
+  if (!Number.isFinite(now) || !Number.isFinite(last)) return { action: "skip", reason: "not_due" };
+
+  // 超过一天没互动：交给长周期回访（若启用），温热通道不再硬追
+  if (now - last > LIVE_REPLY_WINDOW_MINUTES * 60_000) {
+    return { action: "skip", reason: "not_due" };
+  }
+
+  let dueMs: number;
+  if (state.nextDueAt && Number.isFinite(new Date(state.nextDueAt).getTime())) {
+    dueMs = new Date(state.nextDueAt).getTime();
+  } else {
+    dueMs = last + warmSteerMinutesFor(state.followUpIndex, config) * 60_000;
+  }
+  if (dueMs > now) return { action: "skip", reason: "not_due" };
+
+  if (ctx.maxPerDay > 0 && ctx.sentToday >= ctx.maxPerDay) {
+    return { action: "skip", reason: "daily_cap" };
+  }
+
+  return {
+    action: "send",
+    reason: "due",
+    intervalHours: warmSteerMinutesFor(state.followUpIndex, config) / 60,
+  };
 }

@@ -2,7 +2,6 @@ import type { Locator, Page } from "playwright-core";
 
 import { resolveGateway } from "./core/action_gateway.js";
 
-const KEYSTROKE_DELAY_MS = 50;
 const INTERACTION_TIMEOUT_MS = 3000;
 const SELECT_TRY_TIMEOUT_MS = 1500;
 const CASCADE_SELECT_WAIT_MS = 5000;
@@ -19,7 +18,7 @@ export function assertPageAlive(page: Page): void {
 }
 
 function typingTimeoutMs(value: string, baseMs: number): number {
-  return Math.max(baseMs, value.length * (KEYSTROKE_DELAY_MS + 10) + 1500);
+  return Math.max(baseMs, value.length * 60 + 1500);
 }
 
 export function isAddressLikeField(dataKey: string, selector: string): boolean {
@@ -33,7 +32,7 @@ export function isAddressLikeField(dataKey: string, selector: string): boolean {
   );
 }
 
-export async function bypassAddressAutocompleteManualEntry(page: Page): Promise<boolean> {
+async function bypassAddressAutocompleteManualEntry(page: Page): Promise<boolean> {
   assertPageAlive(page);
   const manualBtn = page
     .locator(
@@ -120,7 +119,7 @@ async function waitForSelectOptionLoaded(
   }
 }
 
-export async function forceFocusElement(locator: Locator): Promise<void> {
+async function forceFocusElement(locator: Locator): Promise<void> {
   await locator
     .evaluate((node) => {
       if (node instanceof HTMLElement) {

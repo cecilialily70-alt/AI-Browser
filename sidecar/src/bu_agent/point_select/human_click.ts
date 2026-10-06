@@ -166,7 +166,7 @@ export async function maybeClickCaptchaConfirm(
   logger: JsonLogger,
 ): Promise<boolean> {
   await sleep(300);
-  const clicked = await page
+  const label = await page
     .evaluate(() => {
       const confirmRe = /^(确认|确定|验证|提交验证|完成验证|确认提交|确认验证|submit|confirm|verify)$/i;
       const skipRe = /提交参赛|参赛|刷新|换一张|换一个|重新获取|重新发送|条款|协议|取消|关闭|返回/;
@@ -183,18 +183,28 @@ export async function maybeClickCaptchaConfirm(
           .replace(/[。.!！?？,，]+$/, "")
           .trim();
         if (!t || skipRe.test(t) || !confirmRe.test(t)) continue;
-        (el as HTMLElement).click();
         return t;
       }
       return "";
     })
     .catch(() => "");
-  if (clicked) {
-    logger.agentProgress(`点完后顺手点了「${clicked}」按钮`, {
-      phase: "point_select_captcha",
-      stage: "confirm",
-    });
-    return true;
+  if (!label) return false;
+  const locator = page
+    .locator("button, a, [role='button'], input[type='button'], input[type='submit']")
+    .filter({ hasText: label })
+    .first();
+  try {
+    await locator.click({ timeout: 2_000 });
+  } catch {
+    try {
+      await locator.click({ force: true, timeout: 2_000 });
+    } catch {
+      return false;
+    }
   }
-  return false;
+  logger.agentProgress(`点完后顺手点了「${label}」按钮`, {
+    phase: "point_select_captcha",
+    stage: "confirm",
+  });
+  return true;
 }

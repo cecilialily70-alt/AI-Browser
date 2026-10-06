@@ -13,13 +13,27 @@
  */
 import {
   DEFAULT_CADENCE,
+  DEFAULT_WARM_STEER,
   LIVE_REPLY_WINDOW_MINUTES,
+  computeNextWarmDueAt,
   isColdOpening,
+  isWithinQuietHours,
   liveReplyRecheckAt,
   nextQuietEnd,
+  planWarmSteer,
   type CadenceConfig,
   type FollowUpState,
+  type WarmSteerConfig,
 } from "./cadence.js";
+import {
+  draftMatchesPeerLanguage,
+  draftMatchesPeerPunctuation,
+  inferPeerPunctuationHabit,
+  inferPeerReplyLanguage,
+  languageRewriteHint,
+  punctuationRewriteHint,
+} from "./chat_prompt.js";
+import { agentDebugLog } from "../../debug_session_log.js";
 import { checkDuplicate, shouldGiveUpDraft, type DedupeHistory } from "./dedupe.js";
 import {
   beginSend,
@@ -38,6 +52,7 @@ import {
   bumpProgress,
   createInitialSnapshot,
   dueContacts,
+  followUpOf,
   isStoppingStage,
   rollCountersIfNewDay,
   setContacts,
@@ -49,7 +64,16 @@ import {
   type ChatStateSnapshot,
 } from "./state.js";
 import { canTransition, type ChatPhase } from "./phases.js";
+import {
+  decidePaymentGate,
+  findMatchingPaymentMethod,
+  isPaymentAsk,
+  isTradeSignal,
+  plainPaymentText,
+  type ChatPaymentMethod,
+} from "./chat_payment.js";
 import { hasOneTimeCode, hasPaymentIntent, isRedlineText } from "./chat_redaction.js";
+import { DEFAULT_PACING, incomingTextOf, planSendWait, type PacingConfig } from "./pacing.js";
 import { unansweredIncoming, type ChatMessage } from "./conversation_extract.js";
 import {
   classifyTurnIntent,
@@ -57,6 +81,7 @@ import {
   intentPromptDirective,
   intentRewriteHint,
   maxBubblesForTurn,
+  trustFallbackText,
   wantsOutboundImage,
   type TurnIntent,
 } from "./turn_intent.js";
@@ -122,6 +147,8 @@ function turnDone(
  * 「短复查已到期但这一片没收掉」时的兜底唤醒间隔（毫秒）——秒级近实时。
  */
 const IMMEDIATE_REWAKE_MS = 5_000;
+/** browser_closed / 异常退出后的最短续盯间隔，防止秒级空转风暴 */
+const ABNORMAL_REWAKE_FLOOR_MS = 20_000;
 
 /**
  * 「只有 nextCheckAt / 空闲」时的兜底唤醒间隔（毫秒）——持续值守，不空转停机。
@@ -132,27 +159,53 @@ const DUE_REWAKE_MS = 10_000;
 const INBOUND_QUIET_MS = 5_000;
 
 /**
- * 默认发送闸门：R2（一次性码）/ R1（支付与证件语义）/ 词表。
- * 这是**兜底**（宿主可覆盖以接入自己的 lexicon），但默认必须是 fail-closed。
+ * 聊天发送闸门：一次性码永禁；付款方式只许已配置的纯内容（可 rewrite）；禁用词。
+ * 与 Agent 支付红线分开——聊天可以发用户配置好的收款方式，但绝不能编造。
  */
-export function defaultGateSend(text: string, bannedWords: readonly string[] = []): ChatSendGateResult {
+export function defaultGateSend(
+  text: string,
+  bannedWords: readonly string[] = [],
+  paymentMethods: readonly ChatPaymentMethod[] = [],
+): ChatSendGateResult {
   const raw = String(text ?? "").trim();
   if (!raw) return { allow: false, kind: "banned", reason: "空内容" };
 
-  if (hasPaymentIntent(raw)) {
-    return {
-      allow: false,
-      kind: "redline",
-      reason: "含支付/证件语义：聊天模式不得代发（R1）",
-      needHandover: true,
-    };
-  }
   if (hasOneTimeCode(raw)) {
     return {
       allow: false,
       kind: "redline",
       reason: "含疑似一次性码：聊天模式不代发验证码（R2）",
       needHandover: false,
+    };
+  }
+  // 证件 / CVV 仍禁（除非整段就是已配置的银行卡付款方式）
+  if (/(cvv|安全码|身份证|护照)/i.test(raw)) {
+    return {
+      allow: false,
+      kind: "redline",
+      reason: "含证件/安全码语义：聊天模式不得代发",
+      needHandover: true,
+    };
+  }
+  const pay = decidePaymentGate(raw, paymentMethods);
+  if (pay.kind === "block") {
+    return {
+      allow: false,
+      kind: "redline",
+      reason: pay.reason,
+      needHandover: pay.needHandover,
+    };
+  }
+  if (pay.kind === "plain_only") {
+    return { allow: true, rewriteText: pay.plain };
+  }
+  // 支付语义词（转账/付款等）仍禁，除非整段就是已配置的纯付款方式
+  if (hasPaymentIntent(raw) && !findMatchingPaymentMethod(raw, paymentMethods)) {
+    return {
+      allow: false,
+      kind: "redline",
+      reason: "含支付语义：请在聊天设置配置付款方式后只发纯内容，禁止代发转账指令",
+      needHandover: true,
     };
   }
   for (const word of bannedWords) {
@@ -229,6 +282,11 @@ export class ChatEngine {
   private readonly deps: ChatEngineDeps;
   private readonly options: ChatEngineOptions;
   private readonly cadence: CadenceConfig;
+  private readonly warmSteer: WarmSteerConfig;
+  private readonly pacing: PacingConfig;
+  private readonly paymentMethods: readonly ChatPaymentMethod[];
+  /** 草稿失败 / 对方仍在等 → 片末强制秒级续盯 */
+  private urgentRewake = false;
   /** 上一次把快照写盘的时刻（`noteProgress` 按它节流；相位推进时也刷新） */
   private lastFlushAt = 0;
 
@@ -236,6 +294,14 @@ export class ChatEngine {
     this.deps = deps;
     this.options = options;
     this.cadence = options.cadence ?? DEFAULT_CADENCE;
+    // 温热追问默认开；若设置里把 maxFollowUps 配在 1～5，用作本轮上限
+    const maxFromCadence =
+      this.cadence.followUpEnabled && this.cadence.maxFollowUps > 0
+        ? Math.min(5, this.cadence.maxFollowUps)
+        : DEFAULT_WARM_STEER.maxNudges;
+    this.warmSteer = { ...DEFAULT_WARM_STEER, maxNudges: maxFromCadence };
+    this.pacing = deps.pacing ?? DEFAULT_PACING;
+    this.paymentMethods = deps.paymentMethods ?? [];
     this.snapshot =
       initial ?? createInitialSnapshot({ envId: options.envId, profileId: options.profileId, now: deps.now() });
   }
@@ -406,8 +472,24 @@ export class ChatEngine {
     }
     // 片末先刷新「短复查」时间，再据此算下次唤醒 —— 顺序不能反（否则唤醒时间算的还是旧值）
     await this.refreshReplyWatch();
-    this.snapshot = setNextWakeAt(this.snapshot, this.computeNextWakeAt());
+    this.snapshot = setNextWakeAt(this.snapshot, this.computeNextWakeAt(stopReason));
     await this.save();
+    // #region agent log
+    agentDebugLog("H-wake", "engine.ts:finish", "slice yield wake plan", {
+      stopReason,
+      urgentRewake: this.urgentRewake,
+      nextWakeAt: this.snapshot.engine.nextWakeAt,
+      paymentMethods: this.paymentMethods.length,
+      processed,
+      sent,
+      skipped,
+      nextChecks: this.snapshot.contacts.map((c) => ({
+        k: c.key.slice(0, 24),
+        nextCheckAt: c.nextCheckAt,
+        trade: c.suspectedTradeCount ?? 0,
+      })),
+    });
+    // #endregion
     this.deps.log(`值守片让位：${stopReason}（总开关开着会自动续盯，不是监控结束）`, {
       type: "chat_patrol_yield",
       phase: this.snapshot.engine.phase,
@@ -445,7 +527,7 @@ export class ChatEngine {
    * 对方刚回话、我们却因为「现在是静默时段」把几分钟后的复查推到明天早上 ——
    * 用户看到的就是「对方秒回没人接」。
    */
-  private computeNextWakeAt(): string {
+  private computeNextWakeAt(stopReason?: ChatEngineStopReason): string {
     // **只用注入时钟**（`deps.now`）：排班是纯粹的耐久状态计算，不该偷偷读墙钟 ——
     // 两套时钟混用会让「刚排好 30 秒后的复查」被真墙钟当成「已过期」再推一轮（也会让测试不可复现）。
     const nowIso = this.deps.now();
@@ -477,10 +559,15 @@ export class ChatEngine {
       (c) => isLive(c) && Array.isArray(c.pendingTexts) && c.pendingTexts.length > 0,
     );
     if (hasPending) wakeAt = Math.min(wakeAt, now + IMMEDIATE_REWAKE_MS);
+    if (this.urgentRewake) wakeAt = Math.min(wakeAt, now + IMMEDIATE_REWAKE_MS);
     if (wakeAt <= now) {
       // 已到期但本轮没处理完 → 秒级再来（持续值守，不空转停机）
       const checkOverdue = Number.isFinite(checkWake) && checkWake <= now;
-      wakeAt = now + (checkOverdue || hasPending ? IMMEDIATE_REWAKE_MS : DUE_REWAKE_MS);
+      wakeAt = now + (checkOverdue || hasPending || this.urgentRewake ? IMMEDIATE_REWAKE_MS : DUE_REWAKE_MS);
+    }
+    // 异常退出：抬高地板，避免 Host 30s 容差把 5–10s 续盯当成「已到期」秒级空转
+    if (stopReason === "browser_closed") {
+      wakeAt = Math.max(wakeAt, now + ABNORMAL_REWAKE_FLOOR_MS);
     }
     return new Date(wakeAt).toISOString();
   }
@@ -524,16 +611,27 @@ export class ChatEngine {
             windowMinutes: LIVE_REPLY_WINDOW_MINUTES,
           })
         : null;
-      if ((contact.nextCheckAt ?? null) !== at) {
-        next[index] = { ...contact, nextCheckAt: at };
+      // 本片已排的更早复查（如草稿失败后的 3s）优先，不被阶梯抬晚
+      let merged = at;
+      if (contact.nextCheckAt && at) {
+        const existingMs = new Date(contact.nextCheckAt).getTime();
+        const atMs = new Date(at).getTime();
+        if (Number.isFinite(existingMs) && Number.isFinite(atMs) && existingMs < atMs) {
+          merged = contact.nextCheckAt;
+        }
+      } else if (contact.nextCheckAt && !at) {
+        merged = contact.nextCheckAt;
+      }
+      if ((contact.nextCheckAt ?? null) !== merged) {
+        next[index] = { ...contact, nextCheckAt: merged };
         changed = true;
-        if (at) {
+        if (merged) {
           const updated = next[index]!;
           this.deps.log("已排短复查：片让位后会继续盯（有新话再回，没话不发）", {
             type: "chat_reply_watch",
             phase: this.snapshot.engine.phase,
             threadKey: updated.key,
-            nextCheckAt: at,
+            nextCheckAt: merged,
           });
         }
       }
@@ -780,6 +878,8 @@ export class ChatEngine {
         threadKey: contact.key,
         reason: "user_active",
       });
+      // 主程序仍开着：让位后秒级续盯，别掉进「未到回访时间」长睡
+      this.urgentRewake = true;
       return turnDone(contact, "skipped");
     }
 
@@ -788,11 +888,12 @@ export class ChatEngine {
     const opened = await this.deps.openContact(contact);
     assertNotAborted(signal);
     if (!opened.ok) {
-      this.deps.log("打不开会话，跳过该联系人", {
+      const openReason = opened.reason ?? "container_missing";
+      this.deps.log(`打不开会话，跳过该联系人（${openReason}）`, {
         type: "chat_contact_open",
         phase: "reading",
         threadKey: contact.key,
-        reason: opened.reason ?? "container_missing",
+        reason: openReason,
       });
       return turnDone(contact, "skipped");
     }
@@ -877,11 +978,27 @@ export class ChatEngine {
     // `newIncoming` 仍保留在读数里供诊断对账，但**不再**是「要不要回」的判据。
     // `isOwnText`：方向没判出来的行，只要内容就是我们发过的（快照/流水指纹或已发原文），
     // 也算「我方发过话」—— 一次方向误判不该变成反复回同一句话（R7）。
+    const ownThread = ctx.history?.thread ?? [];
     ctx.incoming = unansweredIncoming(read.messages, {
-      isOwnText: (text) =>
-        this.isOwnSentText(text, contact, ctx.history?.thread ?? []),
+      isOwnText: (text) => this.isOwnSentText(text, contact, ownThread),
+      // 已有发件证据时才纠「假 out」（否则冷会话会把历史出站全当成对方）
+      reinterpretMislabeledOut: ownThread.length > 0,
     });
     ctx.hasNewIncoming = ctx.incoming.length > 0;
+    // #region agent log
+    {
+      const tail = read.messages.slice(-6).map((m) => ({
+        d: m.direction,
+        h: String(m.text ?? "").slice(0, 40),
+      }));
+      agentDebugLog("H6", "engine.ts:readContact", "unanswered after read", {
+        unanswered: ctx.incoming.length,
+        msgCount: read.messages.length,
+        ownEvidence: ownThread.length,
+        tail,
+      });
+    }
+    // #endregion
     if (ctx.hasNewIncoming && read.newIncoming.length === 0) {
       // 不静默：这批消息**不是本片新增**（上一片读到过、却没回成），照样要回 —— 说清楚
       this.deps.log("对方有消息还没回，接着回", {
@@ -1011,8 +1128,6 @@ export class ChatEngine {
     assertNotAborted(signal);
 
     // 冷开场：从没聊过 → 只要「自动聊天」开着就主动开口。
-    // 「定时回访 / 主动追发」产品已下线（§0.5.3 H）：对方没回时只盯守、不催；
-    // 开场只认 autoReply，不再和已删除的回访开关做 OR。
     // P5：历史未读完时禁止推销开场（只许接最新可见未回复，上面已处理）。
     if (isColdOpening(ctx.followUpState) && !ctx.contact.stopped) {
       if (ctx.historyIncomplete) {
@@ -1058,13 +1173,53 @@ export class ChatEngine {
       return null;
     }
 
-    // 没有未回复、也不是冷开场：不主动追发（回访已删除）。排短复查，继续盯守。
-    this.deps.log("对方没有未回复消息：继续盯守，不主动追发", {
-      type: "chat_followup_skipped",
-      phase: "deciding",
-      threadKey: ctx.contact.key,
-      reason: "not_due",
-    });
+    // 温热追问：对方沉默时不冷场，按角色/目标轻推（分钟级，一轮最多几句）
+    if (isWithinQuietHours(this.deps.now(), this.cadence.quietHours)) {
+      this.deps.log("对方没有未回复消息：静默时段内不主动追问", {
+        type: "chat_followup_skipped",
+        phase: "deciding",
+        threadKey: ctx.contact.key,
+        reason: "quiet_hours",
+      });
+    } else {
+      const warm = planWarmSteer(ctx.followUpState, this.warmSteer, this.deps.now(), {
+        sentToday: this.snapshot.counters.sentToday,
+        maxPerDay: this.cadence.maxPerDay,
+        chatOff: !autoReplyOf(ctx.contact),
+        contactFollowUpOff: !followUpOf(ctx.contact),
+      });
+      if (warm.action === "send") {
+        ctx.isFollowUp = true;
+        ctx.planReason = "due";
+        ctx.intent = { kind: "continue", excerpt: "" };
+        this.deps.log(
+          `对方一阵没回：准备主动追问（第 ${ctx.followUpState.followUpIndex + 1}/${this.warmSteer.maxNudges} 次）`,
+          {
+            type: "chat_note",
+            phase: "deciding",
+            threadKey: ctx.contact.key,
+            reason: "due",
+            followUpIndex: ctx.followUpState.followUpIndex,
+          },
+        );
+        return null;
+      }
+      this.deps.log(
+        warm.reason === "round_exhausted"
+          ? "本轮主动追问次数已用尽：继续盯守，有新话再回"
+          : warm.reason === "replied"
+            ? "对方已接过话：等新消息再回，不空催"
+            : warm.reason === "contact_off"
+              ? "该联系人已关「主动追问」：只回话不催"
+              : "对方没有未回复消息：继续盯守，到点再追问",
+        {
+          type: "chat_followup_skipped",
+          phase: "deciding",
+          threadKey: ctx.contact.key,
+          reason: warm.reason,
+        },
+      );
+    }
     ctx.contact = this.consumeIncoming(ctx.contact);
     this.snapshot = upsertContact(this.snapshot, ctx.contact);
     await this.save();
@@ -1133,64 +1288,128 @@ export class ChatEngine {
           ? classifyTurnIntent(ctx.incoming)
           : { kind: "continue", excerpt: "" };
       }
-      if (wantsOutboundImage(ctx.intent) && this.deps.pickMedia) {
-        ctx.mediaPick = this.deps.pickMedia({ excerpt: ctx.intent.excerpt }) ?? null;
-        if (ctx.intent.kind === "image_request" && !ctx.mediaPick) {
-          this.deps.log("图库没有对应图片，改用文字说明备图情况", {
-            type: "chat_image_missing",
+      // 疑似交易记账（对方要付款方式 / 成交语境）
+      const inboundBlob = incomingTextOf(ctx.incoming);
+      if (isPaymentAsk(inboundBlob) || isTradeSignal(inboundBlob)) {
+        const nextCount = Math.max(0, Number(ctx.contact.suspectedTradeCount ?? 0)) + 1;
+        ctx.contact = { ...ctx.contact, suspectedTradeCount: nextCount };
+        this.snapshot = upsertContact(this.snapshot, ctx.contact);
+        await this.save();
+        this.deps.log(`疑似交易：${nextCount}`, {
+          type: "chat_trade_signal",
+          phase: "drafting",
+          threadKey: ctx.contact.key,
+          suspectedTradeCount: nextCount,
+        });
+      }
+      // 付款方式：确定性只发已配置纯内容，不经模型编造
+      if (ctx.intent.kind === "payment_ask") {
+        await this.enter("drafting", {}, { threadKey: ctx.contact.key });
+        const method = this.paymentMethods[0];
+        if (!method) {
+          this.deps.log("对方要付款方式，但未配置：交人工设置", {
+            type: "chat_payment_unconfigured",
             phase: "drafting",
             threadKey: ctx.contact.key,
           });
+          this.urgentRewake = true;
+          await this.deps.handover({
+            contact: ctx.contact,
+            reason: "chat_payment_unconfigured",
+            detail: "请在聊天设置填写 USDT/银行卡等付款方式后再继续",
+          });
+          return { kind: "handover" };
         }
-        if (ctx.intent.kind === "voice_video_request") {
-          this.deps.log(
-            ctx.mediaPick
-              ? "对方要语音/视频：先发实拍、不承诺音视频"
-              : "对方要语音/视频：用文字借口带过，不主动提能力缺陷",
-            {
-              type: "chat_media_refused",
+        const plain = plainPaymentText(method);
+        ctx.draft = { text: plain, texts: [plain], angle: "付款方式", costMicroUsd: 0 };
+        this.deps.log("已配置付款方式：本轮只发纯付款内容", {
+          type: "chat_payment_plain",
+          phase: "drafting",
+          threadKey: ctx.contact.key,
+          label: method.label,
+        });
+      } else {
+        if (wantsOutboundImage(ctx.intent) && this.deps.pickMedia) {
+          ctx.mediaPick = this.deps.pickMedia({ excerpt: ctx.intent.excerpt }) ?? null;
+          if (ctx.intent.kind === "image_request" && !ctx.mediaPick) {
+            this.deps.log("图库没有对应图片，改用文字说明备图情况", {
+              type: "chat_image_missing",
               phase: "drafting",
               threadKey: ctx.contact.key,
-              hasImage: Boolean(ctx.mediaPick),
-            },
-          );
+            });
+          }
+          if (ctx.intent.kind === "voice_video_request") {
+            this.deps.log(
+              ctx.mediaPick
+                ? "对方要语音/视频：先发实拍、不承诺音视频"
+                : "对方要语音/视频：用文字借口带过，不主动提能力缺陷",
+              {
+                type: "chat_media_refused",
+                phase: "drafting",
+                threadKey: ctx.contact.key,
+                hasImage: Boolean(ctx.mediaPick),
+              },
+            );
+          }
         }
-      }
-      await this.enter("drafting", {}, { threadKey: ctx.contact.key });
-      const draft = await this.generateDraft(
-        ctx.contact,
-        ctx.stage,
-        ctx.incoming,
-        ctx.history,
-        ctx.isFollowUp,
-        ctx.intent,
-        signal,
-      );
-      assertNotAborted(signal);
-      if (!draft) {
-        if (ctx.mediaPick && this.deps.sendImage) {
-          ctx.draft = { text: "", texts: [], angle: null, costMicroUsd: 0 };
+        await this.enter("drafting", {}, { threadKey: ctx.contact.key });
+        const draft = await this.generateDraft(
+          ctx.contact,
+          ctx.stage,
+          ctx.incoming,
+          ctx.history,
+          ctx.isFollowUp,
+          ctx.intent,
+          signal,
+          ctx.planReason === "opening" || ctx.planReason === "due" ? ctx.planReason : null,
+        );
+        assertNotAborted(signal);
+        if (!draft) {
+          if (ctx.mediaPick && this.deps.sendImage) {
+            ctx.draft = { text: "", texts: [], angle: null, costMicroUsd: 0 };
+          } else if (ctx.intent.kind === "trust_attack") {
+            // 信任质疑绝不能沉默：模型连拒后发确定性短澄清，再由节奏护栏犹豫一下
+            const peerLang = inferPeerReplyLanguage(ctx.incoming);
+            const plain = trustFallbackText(peerLang);
+            ctx.draft = { text: plain, texts: [plain], angle: "信任澄清", costMicroUsd: 0 };
+            this.deps.log("信任质疑草稿失败：改用短澄清兜底", {
+              type: "chat_trust_fallback",
+              phase: "drafting",
+              threadKey: ctx.contact.key,
+              peerLang,
+            });
+            // #region agent log
+            agentDebugLog("H-trust", "engine.ts:draftTurn", "trust fallback used", {
+              peerLang,
+              textHead: plain.slice(0, 60),
+            });
+            // #endregion
+          } else {
+            this.deps.log("草稿未能通过去重，本轮不发", {
+              type: "chat_draft_rejected",
+              phase: "drafting",
+              threadKey: ctx.contact.key,
+              reason: "no_passing_draft",
+            });
+            // 没发出去：保留未回复，秒级续盯（不要 consume 后假装已处理）
+            this.urgentRewake = true;
+            const soon = new Date(Date.now() + 3_000).toISOString();
+            ctx.contact = { ...ctx.contact, nextCheckAt: soon };
+            this.snapshot = upsertContact(this.snapshot, ctx.contact);
+            await this.save();
+            return turnDone(ctx.contact, "skipped");
+          }
         } else {
-          this.deps.log("草稿未能通过去重，本轮不发", {
-            type: "chat_draft_rejected",
-            phase: "drafting",
-            threadKey: ctx.contact.key,
-            reason: "no_passing_draft",
-          });
-          ctx.contact = this.consumeIncoming(ctx.contact);
-          this.snapshot = upsertContact(this.snapshot, ctx.contact);
-          await this.save();
-          return turnDone(ctx.contact, "skipped");
+          ctx.draft = draft;
         }
-      } else {
-        ctx.draft = draft;
       }
     }
 
     // 闸门（红线 → 禁用词 → 意图 → 去重）：整批发之前先把每一句过一遍；任一红线即停。
     await this.enter("verifying", {}, { threadKey: ctx.contact.key });
-    const texts = draftTextsOf(ctx.draft);
+    let texts = draftTextsOf(ctx.draft);
     const intent = ctx.intent ?? { kind: "continue" as const, excerpt: "" };
+    const rewritten: string[] = [];
     for (const text of texts) {
       const gate = this.deps.gateSend(text);
       if (!gate.allow) {
@@ -1202,14 +1421,25 @@ export class ChatEngine {
           detail: gate.reason,
         });
         if (gate.kind === "redline" && gate.needHandover) {
+          this.urgentRewake = true;
           await this.deps.handover({ contact: ctx.contact, reason: "chat_redline", detail: gate.reason });
           return { kind: "handover" };
         }
+        this.urgentRewake = true;
         return turnDone(ctx.contact, "skipped");
       }
-      if (draftViolatesIntent(text, intent)) {
+      const outbound = gate.rewriteText?.trim() || text;
+      if (gate.rewriteText?.trim()) {
+        this.deps.log("付款方式夹废话：已改成只发纯付款内容", {
+          type: "chat_payment_stripped",
+          phase: "verifying",
+          threadKey: ctx.contact.key,
+        });
+      }
+      if (draftViolatesIntent(outbound, intent)) {
         if (ctx.mediaPick && this.deps.sendImage) {
           ctx.draft = { text: "", texts: [], angle: ctx.draft?.angle ?? null, costMicroUsd: ctx.draft?.costMicroUsd ?? 0 };
+          rewritten.length = 0;
           break;
         }
         this.deps.log("发送被拦：草稿未回应对方意图（疑似继续推销）", {
@@ -1219,8 +1449,19 @@ export class ChatEngine {
           reason: "intent_mismatch",
           intent: intent.kind,
         });
+        this.urgentRewake = true;
         return turnDone(ctx.contact, "skipped");
       }
+      rewritten.push(outbound);
+    }
+    if (rewritten.length > 0) {
+      texts = rewritten;
+      ctx.draft = {
+        text: rewritten[0]!,
+        texts: rewritten,
+        angle: ctx.draft?.angle ?? null,
+        costMicroUsd: ctx.draft?.costMicroUsd ?? 0,
+      };
     }
 
     const draftCorpus = texts.join("\n");
@@ -1301,6 +1542,48 @@ export class ChatEngine {
       }
 
       const text = queue[i]!;
+      // 人味犹豫：阅读延迟 + 同线程最小间隔（信任质疑再多想一会儿）
+      const lastSentMs = ctx.contact.updatedAt ? new Date(ctx.contact.updatedAt).getTime() : null;
+      const waitPlan = planSendWait({
+        threadKey: ctx.contact.key,
+        now: Date.now(),
+        lastSentAt: Number.isFinite(lastSentMs) ? lastSentMs : null,
+        incomingText: incomingTextOf(ctx.incoming),
+        config: this.pacing,
+      });
+      let waitMs = waitPlan.waitMs;
+      if (ctx.intent?.kind === "trust_attack" || ctx.intent?.kind === "direct_question") {
+        waitMs = Math.max(waitMs, 2_500);
+      }
+      if (waitMs > 0) {
+        this.deps.log(`发送前犹豫 ${Math.round(waitMs / 100) / 10}s（${waitPlan.reason}）`, {
+          type: "chat_send_pacing",
+          phase: "sending",
+          threadKey: ctx.contact.key,
+          waitMs,
+          reason: waitPlan.reason,
+        });
+        // #region agent log
+        agentDebugLog("H-pace", "engine.ts:deliverAndRecord", "send pacing wait", {
+          waitMs,
+          reason: waitPlan.reason,
+          intent: ctx.intent?.kind ?? null,
+        });
+        // #endregion
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, waitMs);
+          const onAbort = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          if (signal.aborted) {
+            onAbort();
+            return;
+          }
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        assertNotAborted(signal);
+      }
       const delivered = await this.deliver(
         ctx.contact,
         text,
@@ -1318,11 +1601,34 @@ export class ChatEngine {
       }
     }
 
+    // 发出后排温热追问：回话/开场 → 从 0 起算下次；本次本就是追问 → 序号 +1
+    const nowIso = this.deps.now();
+    let nextFollowUpIndex = 0;
+    let nextDueAt: string | null = null;
+    if (sentCount > 0 && this.warmSteer.enabled && this.warmSteer.maxNudges > 0 && followUpOf(ctx.contact)) {
+      if (ctx.planReason === "due") {
+        nextFollowUpIndex = Math.min(
+          this.warmSteer.maxNudges,
+          Math.max(0, ctx.followUpState.followUpIndex) + 1,
+        );
+      } else {
+        nextFollowUpIndex = 0;
+      }
+      if (nextFollowUpIndex < this.warmSteer.maxNudges) {
+        nextDueAt = computeNextWarmDueAt(
+          ctx.contact.key,
+          nextFollowUpIndex,
+          this.warmSteer,
+          nowIso,
+        );
+      }
+    }
+
     ctx.contact = this.consumeIncoming({
       ...ctx.contact,
       stage: ctx.stage,
-      followUpIndex: 0,
-      nextDueAt: null,
+      followUpIndex: nextFollowUpIndex,
+      nextDueAt,
       ...(ctx.contact.pendingTexts?.length ? {} : { pendingTexts: [] }),
     });
     this.snapshot = upsertContact(this.snapshot, ctx.contact);
@@ -1374,13 +1680,24 @@ export class ChatEngine {
       };
       await this.save();
 
-      if (ctx.planReason) {
+      if (ctx.planReason === "opening") {
         this.deps.log("开场消息已发出", {
           type: "chat_followup_sent",
           phase: "recording",
           threadKey: ctx.contact.key,
           reason: ctx.planReason,
           bubbles: sentCount,
+          nextDueAt,
+        });
+      } else if (ctx.planReason === "due") {
+        this.deps.log("主动追问已发出", {
+          type: "chat_followup_sent",
+          phase: "recording",
+          threadKey: ctx.contact.key,
+          reason: ctx.planReason,
+          bubbles: sentCount,
+          followUpIndex: nextFollowUpIndex,
+          nextDueAt,
         });
       }
 
@@ -1430,9 +1747,10 @@ export class ChatEngine {
         signal: ctx.signal,
       });
       if (!read.ok) return [];
+      const ownThread = ctx.history?.thread ?? [];
       const unanswered = unansweredIncoming(read.messages, {
-        isOwnText: (text) =>
-          this.isOwnSentText(text, ctx.contact, ctx.history?.thread ?? []),
+        isOwnText: (text) => this.isOwnSentText(text, ctx.contact, ownThread),
+        reinterpretMislabeledOut: ownThread.length > 0,
       });
       const known = new Set(ctx.incoming.map((message) => message.id).filter(Boolean));
       return unanswered.filter((message) => {
@@ -1631,9 +1949,23 @@ export class ChatEngine {
     isFollowUp: boolean,
     intent: TurnIntent,
     signal: AbortSignal,
+    planReason: "opening" | "due" | null = null,
   ): Promise<DraftResult | null> {
-    const maxBubbles = maxBubblesForTurn(incoming, intent);
+    // 温热追问只许 1 句，避免冷场时连发施压
+    const maxBubbles = planReason === "due" ? 1 : maxBubblesForTurn(incoming, intent);
     const intentDirective = intentPromptDirective(intent);
+    const peerLang = inferPeerReplyLanguage(incoming);
+    const peerPunct = inferPeerPunctuationHabit(incoming);
+    // #region agent log
+    agentDebugLog("H1-H5", "engine.ts:draftOnce", "draft gates input", {
+      intent: intent.kind,
+      maxBubbles,
+      peerLang,
+      peerPunct,
+      planReason,
+      excerptHead: String(intent.excerpt ?? "").slice(0, 80),
+    });
+    // #endregion
     let rewriteHint: string | null = null;
     let attempts = 0;
     let totalCost = 0;
@@ -1648,6 +1980,7 @@ export class ChatEngine {
         history,
         rewriteHint,
         isFollowUp,
+        planReason,
         intentDirective,
         maxBubbles,
         signal,
@@ -1666,6 +1999,18 @@ export class ChatEngine {
         return null;
       }
 
+      // #region agent log
+      agentDebugLog("H1-H5", "engine.ts:draftOnce:candidate", "draft candidate before gates", {
+        attempts,
+        intent: intent.kind,
+        peerLang,
+        peerPunct,
+        textHeads: rawTexts.map((t) => String(t).slice(0, 60)),
+        periodCount: (rawTexts.join("\n").match(/[.。]/g) ?? []).length,
+        hasEmDash: /[—–]/.test(rawTexts.join("\n")),
+      });
+      // #endregion
+
       // 意图硬闸：信任攻击/提问下仍倒产品 → 强制重写（最多 2 次意图重写，计入总 attempts）
       let intentBlocked = false;
       for (const piece of rawTexts) {
@@ -1675,6 +2020,13 @@ export class ChatEngine {
         }
       }
       if (intentBlocked) {
+        // #region agent log
+        agentDebugLog("H1-H2", "engine.ts:draftOnce:intent_reject", "rejected by intent gate", {
+          attempts,
+          intent: intent.kind,
+          textHeads: rawTexts.map((t) => String(t).slice(0, 60)),
+        });
+        // #endregion
         this.deps.log(`草稿未回应对方意图（第 ${attempts} 次），强制重写`, {
           type: "chat_draft_rejected",
           phase: "drafting",
@@ -1696,6 +2048,62 @@ export class ChatEngine {
         continue;
       }
 
+      // 语种硬闸：对方英文却回中文（现场）→ 强制重写，绝不发出错语种
+      if (!draftMatchesPeerLanguage(rawTexts, peerLang)) {
+        this.deps.log(`草稿语种与对方不一致（第 ${attempts} 次），强制重写`, {
+          type: "chat_draft_rejected",
+          phase: "drafting",
+          threadKey: contact.key,
+          reason: "language_mismatch",
+          peerLang,
+        });
+        if (shouldGiveUpDraft(attempts)) {
+          this.deps.log("语种重写仍不一致，放弃本轮（不发错语种）", {
+            type: "chat_draft_rejected",
+            phase: "drafting",
+            threadKey: contact.key,
+            reason: "language_give_up",
+            attempts,
+            peerLang,
+          });
+          return null;
+        }
+        rewriteHint = languageRewriteHint(peerLang);
+        continue;
+      }
+
+      // 标点习惯硬闸：对方少标点却写成书面长句 → 强制重写
+      if (!draftMatchesPeerPunctuation(rawTexts, peerPunct)) {
+        // #region agent log
+        agentDebugLog("H3-H4", "engine.ts:draftOnce:punct_reject", "rejected by punctuation gate", {
+          attempts,
+          peerPunct,
+          textHeads: rawTexts.map((t) => String(t).slice(0, 60)),
+          periodCount: (rawTexts.join("\n").match(/[.。]/g) ?? []).length,
+        });
+        // #endregion
+        this.deps.log(`草稿标点习惯与对方不一致（第 ${attempts} 次），强制重写`, {
+          type: "chat_draft_rejected",
+          phase: "drafting",
+          threadKey: contact.key,
+          reason: "punctuation_mismatch",
+          peerPunct,
+        });
+        if (shouldGiveUpDraft(attempts)) {
+          this.deps.log("标点重写仍过书面，放弃本轮", {
+            type: "chat_draft_rejected",
+            phase: "drafting",
+            threadKey: contact.key,
+            reason: "punctuation_give_up",
+            attempts,
+            peerPunct,
+          });
+          return null;
+        }
+        rewriteHint = punctuationRewriteHint(peerPunct);
+        continue;
+      }
+
       // 去重按整批拼接判一次；任一句撞历史也算重复
       const joined = rawTexts.join("\n");
       const decision = checkDuplicate(joined, history);
@@ -1708,6 +2116,16 @@ export class ChatEngine {
           }
         }
         if (!blocked) {
+          // #region agent log
+          agentDebugLog("H1-H5", "engine.ts:draftOnce:accept", "draft accepted after gates", {
+            attempts,
+            intent: intent.kind,
+            peerLang,
+            peerPunct,
+            textHeads: rawTexts.map((t) => String(t).slice(0, 60)),
+            periodCount: (rawTexts.join("\n").match(/[.。]/g) ?? []).length,
+          });
+          // #endregion
           return {
             text: rawTexts[0]!,
             texts: rawTexts,

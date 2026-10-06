@@ -42,6 +42,8 @@ export interface ChatSessionConfig {
    * **只为防封号，不做任何每日上限**（唯一的每日口径是 `cadence.maxPerDay`，`0`＝不限）。
    */
   pacing?: PacingConfig;
+  /** 已配置付款方式（USDT/银行卡）；空则对方索要时交人工 */
+  paymentMethods?: readonly import("../core/web_chat/chat_payment.js").ChatPaymentMethod[];
   /**
    * 快照文件（耐久续跑）。
    * `null` = 这一片没有 userDataDir（无记忆模式）：**不读也不写**快照，
@@ -184,14 +186,8 @@ export function seedIdentityOf(
 }
 
 /**
- * 「绑用户当前窗口、只读不导航」这条纪律**只对「没指定对象」成立**（§1.6 / R7）。
- *
- * 依据就是设置项自己的原话：「**未指定对象时**使用当前打开的窗口」。用户一旦写下要聊的人，
- * 目标本身就是目的地，必须能打开过去 —— 否则页面停在会话列表（Telegram 首屏就是列表、
- * 没点开会话）时，引擎既打不开任何会话（`container_missing`）又不会自己开标签，
- * 整片只会「一秒结束」（现场日志：`chat_site_without_conversation` → `no_targets`）。
- *
- * 有显式目标时改走**聊天专用标签**（复用上次留下的那一个，绝不劫持用户正在看的标签）。
+ * 「绑用户当前窗口」只对**没指定对象**成立：名单空时聊当前打开的会话。
+ * 有显式目标时走同窗 `openContact`（先认当前对话头，再点列表切换），不另开标签。
  */
 export function useCurrentWindowMode(useCurrentWindow: boolean, targetCount: number): boolean {
   return useCurrentWindow && targetCount <= 0;

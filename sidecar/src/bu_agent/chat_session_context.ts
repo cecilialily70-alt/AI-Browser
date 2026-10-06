@@ -144,6 +144,9 @@ export function createContextLayer(input: ContextLayerInput): ContextLayer {
       patch.stopped = true;
       patch.stopReason = state.stopReason ?? visit.stopReason;
     }
+    if ((visit.suspectedTradeCount ?? 0) > (state.suspectedTradeCount ?? 0)) {
+      patch.suspectedTradeCount = visit.suspectedTradeCount;
+    }
     return patch;
   };
 

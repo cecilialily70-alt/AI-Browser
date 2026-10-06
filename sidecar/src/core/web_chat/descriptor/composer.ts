@@ -261,7 +261,7 @@ async function writeComposer(
     case "fill": {
       // Playwright 原生 `fill`（contenteditable 走 `execCommand`）：**返回值不可信**，
       // 且站点可能整个忽略合成写入 —— 所以排在真实按键之后，只作兜底。
-      await gateway.fill(selector, text, { semanticLabel: options.semanticLabel ?? "聊天输入" });
+      await gateway.fill(selector, text, { humanLike: false, semanticLabel: options.semanticLabel ?? "聊天输入" });
       return;
     }
     case "insertText": {

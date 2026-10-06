@@ -13,10 +13,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Locator, Page } from "playwright-core";
 
+import { HUMAN_NO_MISTYPE } from "../cloakbrowser_extra.js";
 import {
   NO_OFFSET,
   scopePage,
-  toPagePoint,
   type DomScope,
   type FrameOffset,
 } from "./dom_scope.js";
@@ -135,7 +135,10 @@ export interface OmniActionOptions {
   record?: boolean;
   skipSettle?: boolean;
   semanticLabel?: string;
-  /** fill：拟人逐键输入 */
+  /**
+   * fill：true / 缺省 = 走 Locator.fill（CloakBrowser 包装层会逐字输入）。
+   * false = OTP/验证码整段直填（优先未打补丁的原始 fill，禁止错字回改）。
+   */
   humanLike?: boolean;
   /** fill：不清空、在现有内容后追加（仍落盘为 fill，回放会整框重填该 value） */
   append?: boolean;
@@ -158,7 +161,62 @@ const ACTION_TIMEOUT_MS = 5_000;
 const ACTION_DELAY_MS = 50;
 const SETTLE_NETWORK_IDLE_MS = 4_000;
 const SETTLE_HARD_BUFFER_MS = 1_000;
-const KEYSTROKE_DELAY_MS = 50;
+const SCROLL_BOTTOM_MAX_WHEELS = 24;
+
+type PageHumanOriginals = {
+  fill?: (selector: string, value: string, options?: Record<string, unknown>) => Promise<void>;
+};
+
+function pageHumanOriginals(page: Page): PageHumanOriginals | undefined {
+  return (page as Page & { _original?: PageHumanOriginals })._original;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function humanFillTimeoutMs(value: string, baseMs: number): number {
+  return Math.max(baseMs, value.length * 180 + 4_000);
+}
+
+async function fillInstant(
+  page: Page,
+  locator: Locator,
+  primarySelector: string,
+  value: string,
+  timeout: number,
+): Promise<void> {
+  const orig = pageHumanOriginals(page)?.fill;
+  if (orig && primarySelector && !isTempIdSelector(primarySelector)) {
+    await orig(primarySelector, value, { force: true, timeout });
+    return;
+  }
+  await locator.fill(value, {
+    force: true,
+    timeout,
+    human_config: HUMAN_NO_MISTYPE,
+  } as { force: boolean; timeout: number; human_config: { mistype_chance: number } });
+}
+
+async function readScrollY(page: Page): Promise<number> {
+  try {
+    return await page.evaluate(() => window.scrollY || document.documentElement.scrollTop || 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function wheelTowardBottom(page: Page, delta: number): Promise<void> {
+  let lastY = await readScrollY(page);
+  for (let i = 0; i < SCROLL_BOTTOM_MAX_WHEELS; i += 1) {
+    await page.mouse.wheel(0, delta);
+    const nextY = await readScrollY(page);
+    if (nextY <= lastY + 2) {
+      break;
+    }
+    lastY = nextY;
+  }
+}
 
 type PageSource = Page | (() => Page);
 
@@ -462,11 +520,7 @@ export class OmniActionGateway {
     await page
       .waitForLoadState("networkidle", { timeout: SETTLE_NETWORK_IDLE_MS })
       .catch(() => undefined);
-    try {
-      await page.waitForTimeout(SETTLE_HARD_BUFFER_MS);
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, SETTLE_HARD_BUFFER_MS));
-    }
+    await sleepMs(SETTLE_HARD_BUFFER_MS);
   }
 
   async capturePostCondition(page: Page = this.page()): Promise<TrajectoryPostCondition> {
@@ -784,7 +838,7 @@ export class OmniActionGateway {
     }
 
     await locator.focus({ timeout }).catch(() => undefined);
-    const humanLike = options?.humanLike === true;
+    const humanLike = options?.humanLike !== false;
     const append = options?.append === true;
     // 幂等前置：目标字段里**已经就是**要写的值 → 什么都不做。
     // 「全选+删除+逐字重打」是可见的（内容被清掉再打一遍），在重发验证码/触发校验类字段上
@@ -812,31 +866,18 @@ export class OmniActionGateway {
       // 追加语义必须落在文本末尾：点击落点决定光标位置，不修正会插到中间
       await locator.press("End", { timeout }).catch(() => undefined);
       if (value.length > 0) {
+        // 不传 delay：包装层会接管 page.keyboard.type；再套固定 50ms 会叠两层节奏
         await locator.pressSequentially(value, {
-          delay: KEYSTROKE_DELAY_MS,
-          timeout: Math.max(timeout, value.length * (KEYSTROKE_DELAY_MS + 10) + 1500),
+          timeout: humanFillTimeoutMs(value, timeout),
         });
       }
     } else if (humanLike) {
-      await locator.press("Control+a", { timeout }).catch(() => undefined);
-      await locator.press("Backspace", { timeout }).catch(() => undefined);
-      if (value.length > 0) {
-        await locator.focus({ timeout }).catch(() => undefined);
-        await locator.pressSequentially(value, {
-          delay: KEYSTROKE_DELAY_MS,
-          timeout: Math.max(timeout, value.length * (KEYSTROKE_DELAY_MS + 10) + 1500),
-        });
-      }
+      await locator.fill(value, {
+        force: true,
+        timeout: humanFillTimeoutMs(value, timeout),
+      });
     } else {
-      await locator
-        .fill(value, { force: true, timeout })
-        .catch(async () => {
-          await locator.fill("").catch(() => undefined);
-          await locator.pressSequentially(value, {
-            delay: ACTION_DELAY_MS,
-            timeout,
-          });
-        });
+      await fillInstant(page, locator, primarySelector, value, timeout);
     }
 
     if (!semanticLabel) {
@@ -857,23 +898,18 @@ export class OmniActionGateway {
     return payload;
   }
 
-  /** 滚动流水线 */
+  /** 滚动流水线：一次用户滚轮交给包装层；禁止 evaluate(scrollTo/scrollBy) 瞬跳 */
   async scroll(
     direction: "up" | "down" | "bottom",
     options?: OmniActionOptions,
   ): Promise<OmniActionTrajectory> {
     const page = this.page();
     const distance = Math.min(Math.max(Number(options?.distance) || 600, 50), 4000);
-    await page.evaluate(
-      ({ direction: dir, distance: dist }) => {
-        if (dir === "bottom") {
-          window.scrollTo(0, document.documentElement.scrollHeight);
-          return;
-        }
-        window.scrollBy(0, dir === "up" ? -dist : dist);
-      },
-      { direction, distance },
-    );
+    if (direction === "bottom") {
+      await wheelTowardBottom(page, distance);
+    } else {
+      await page.mouse.wheel(0, direction === "up" ? -distance : distance);
+    }
 
     const payload: OmniActionTrajectory = {
       actionType: "scroll",
@@ -914,36 +950,6 @@ export class OmniActionGateway {
       postCondition,
     });
     return payload;
-  }
-
-  /** 兼容：仅录导航（goto 已在外部完成） */
-  recordNavigate(finalUrl: string, postCondition?: TrajectoryPostCondition): void {
-    this.pushTrajectory(
-      {
-        actionType: "navigate",
-        primarySelector: "",
-        value: finalUrl,
-        semanticLabel: finalUrl,
-      },
-      { url: finalUrl, postCondition },
-    );
-  }
-
-  /** 复杂自愈填表后的强制落盘（物理已在外部经网关或需补录） */
-  recordFill(partial: {
-    selector: string;
-    value: string;
-    label?: string;
-  }): void {
-    this.pushTrajectory(
-      {
-        actionType: "fill",
-        primarySelector: partial.selector,
-        value: partial.value,
-        semanticLabel: partial.label,
-      },
-      { url: this.page().url() },
-    );
   }
 
   recordClick(partial: {
@@ -1043,37 +1049,6 @@ export class OmniActionGateway {
         url: page.url(),
       });
     }
-  }
-
-  /** 兼容旧 OmniActionExecutor 方法名 */
-  async executePointClick(
-    x: number,
-    y: number,
-    options?: OmniActionOptions,
-  ): Promise<OmniActionTrajectory> {
-    return this.pointClick(x, y, options);
-  }
-
-  async executeLocatorClick(
-    target: ClickTarget,
-    options?: OmniActionOptions,
-  ): Promise<OmniActionTrajectory> {
-    return this.click(target, options);
-  }
-
-  async executeLocatorFill(
-    target: FillTarget,
-    value: string,
-    options?: OmniActionOptions,
-  ): Promise<OmniActionTrajectory> {
-    return this.fill(target, value, options);
-  }
-
-  async executeScroll(
-    direction: "up" | "down" | "bottom",
-    options?: OmniActionOptions,
-  ): Promise<OmniActionTrajectory> {
-    return this.scroll(direction, options);
   }
 
   /** 按键经网关执行并落盘 keypress（回放引擎支持） */

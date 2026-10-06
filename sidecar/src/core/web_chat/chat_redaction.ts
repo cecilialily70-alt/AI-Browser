@@ -21,7 +21,10 @@ import { hashText } from "./outbox.js";
 export const OTP_CONTEXT_RE =
   /(验证码|校验码|动态码|短信码|一次性密码|口令|code|otp|pin|token)[^\d\n]{0,12}\d{4,8}|\d{4,8}[^\d\n]{0,6}(验证码|校验码|动态码|短信码)/i;
 
-/** 支付 / 证件语义（显式词表，避免误伤「转 2 号线地铁」这类日常用语） */
+/**
+ * Agent 侧支付 / 证件语义（显式词表，避免误伤「转 2 号线地铁」）。
+ * 聊天模式的 USDT/钱包通道另走 `chat_payment.ts`（只许发已配置付款方式，禁止编造）。
+ */
 export const SENSITIVE_TEXT_RE =
   /转账|转钱|转款|打款|汇款|付款|支付|收款码|付款码|红包提现|绑定银行卡|银行卡号|信用卡|卡号|cvv|安全码|身份证|护照|验证令牌|verification code|one[\s-]?time/i;
 

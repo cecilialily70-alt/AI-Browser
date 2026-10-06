@@ -648,10 +648,12 @@ test("有未读 → 发送 → 计数与持久化正确", async () => {
   assert.equal(last.counters.sentTotal, 1);
   assert.equal(last.counters.sentToday, 1);
 
-  // 回访节奏已删：不再写 nextDueAt；盯守靠 nextWakeAt / nextCheckAt
+  // 发出后排温热追问（分钟级），不再排 48h 销售回访
   const contact = last.contacts.find((c) => c.key === "env-1|telegram|alice");
   assert.ok(contact, "联系人状态应写回快照");
-  assert.equal(contact.nextDueAt, null, "连续聊不再排 48h 回访到期");
+  assert.ok(contact.nextDueAt, "发出后应排下次主动追问时间");
+  const dueMs = new Date(contact.nextDueAt).getTime() - new Date(T0).getTime();
+  assert.ok(dueMs > 60_000 && dueMs < 10 * 60_000, `温热追问应在数分钟内，实际 ${dueMs}ms`);
   assert.equal(contact.lastIncomingHash, null, "未读标记应被消费，避免反复触发");
 
   // 下次唤醒时间必须写进快照（这是 Host 调度器排班的依据）
@@ -918,6 +920,14 @@ test("默认发送闸门：正常内容放行，支付/证件语义拦下并要�
   assert.equal(pay.kind, "redline");
   assert.equal(pay.needHandover, true);
 
+  // 现场：希伯来语索要 USDT + TRC20 钱包地址曾漏拦
+  const crypto = defaultGateSend(
+    "תעביר 1000 USDT ב TRC20 לכתובת TG4d2pVco1AagGg5oW1tLotFDF2r41SC1q ואני מסדר לך את המשלוח",
+  );
+  assert.equal(crypto.allow, false, "USDT/TRC20 转账语义必须拦");
+  assert.equal(crypto.kind, "redline");
+  assert.equal(crypto.needHandover, true);
+
   const banned = defaultGateSend("加个微信吧", ["微信"]);
   assert.equal(banned.allow, false);
   assert.equal(banned.kind, "banned");
@@ -926,6 +936,8 @@ test("默认发送闸门：正常内容放行，支付/证件语义拦下并要�
 
   assert.equal(isRedlineText("验证码 123456"), true);
   assert.equal(isRedlineText("今天天气不错"), false);
+  // USDT 走付款闸门（非旧 Agent 支付词表）
+  assert.equal(defaultGateSend("send 500 USDT trc20").allow, false);
 });
 
 /* ————————————————————————— 回访节奏 ————————————————————————— */
@@ -954,7 +966,7 @@ test("回访未到期 → 不发（避免回访风暴）", async () => {
   assert.ok(h.logsOf("chat_followup_skipped").some((l) => l.reason === "not_due"));
 });
 
-test("对方已回话且没有新未回复 → 不主动追发", async () => {
+test("对方已回话且没有新未回复 → 不空催", async () => {
   const contact = makeContact({ lastIncomingHash: null, nextDueAt: T0, followUpIndex: 1 });
   const h = makeHarness({
     contacts: [contact],
@@ -972,7 +984,7 @@ test("对方已回话且没有新未回复 → 不主动追发", async () => {
 
   const result = await h.engine.run();
   assert.equal(result.sent, 0);
-  assert.ok(h.logsOf("chat_followup_skipped").some((l) => l.reason === "not_due"));
+  assert.ok(h.logsOf("chat_followup_skipped").some((l) => l.reason === "replied"));
 });
 
 test("自己刚发出的消息渲染成新节点 → 绝不当成对方回话（方向是结构的一部分）", async () => {
@@ -1074,8 +1086,8 @@ test("能从自己写下的持久化快照续跑（waiting / stopped 都要能�
   }
 });
 
-test("对方回话后序列归零（回访额度不再累加；nextDueAt 清空改走短复查）", async () => {
-  // 场景：已经回访 3 次，这次对方终于回话了 → 我们回复后，序列应归零
+test("对方回话后追问序号归零，并重排温热追问", async () => {
+  // 场景：已经追问过几次，对方终于回话 → 我们回复后序号归零，再排下次轻推
   const contact = makeContact({ lastIncomingHash: "in-9", followUpIndex: 3 });
   const h = makeHarness({
     contacts: [contact],
@@ -1095,8 +1107,8 @@ test("对方回话后序列归零（回访额度不再累加；nextDueAt 清空�
   assert.equal(result.sent, 1, "对方回话后应当正常回复");
 
   const updated = result.snapshot.contacts.find((c) => c.key === contact.key);
-  assert.equal(updated.followUpIndex, 0, "回话后序列必须归零");
-  assert.equal(updated.nextDueAt, null, "不再排 48h 回访；盯守靠 nextCheckAt / 短复查");
+  assert.equal(updated.followUpIndex, 0, "回话后追问序号必须归零");
+  assert.ok(updated.nextDueAt, "回话后应重排温热追问，不冷场");
 });
 
 test("生产环境 detectRecentUserActivity 探针不可用时不阻拦引擎", async () => {
@@ -1320,12 +1332,38 @@ test("方向没判出来的行，只要内容是我方发过的 → 也算「我
   assert.deepEqual(unansweredIncoming(messages).map((m) => m.id), ["m-1"]);
 });
 
+test("方向误判：对方气泡被标成 out、但我方证据对不上 → 仍算未回复", () => {
+  const isOwnText = (text) => text === "我方已发过这句";
+  const messages = [
+    { id: "m-0", direction: "out", text: "我方已发过这句" },
+    { id: "m-1", direction: "out", text: "אתה נוכל" },
+  ];
+  assert.deepEqual(
+    unansweredIncoming(messages, { isOwnText, reinterpretMislabeledOut: true }).map((m) => m.id),
+    ["m-1"],
+  );
+  // 没有发件证据时绝不反转（避免冷会话把历史出站全当成对方）
+  assert.deepEqual(
+    unansweredIncoming(messages, { isOwnText, reinterpretMislabeledOut: false }).map((m) => m.id),
+    [],
+  );
+});
+
+test("方向误判：我方气泡被标成 in → 按出站截断，不反复回", () => {
+  const isOwnText = (text) => text === "סבבה זה שמור אצלי";
+  const messages = [
+    { id: "m-1", direction: "in", text: "אתה רובוט" },
+    { id: "m-2", direction: "in", text: "סבבה זה שמור אצלי" },
+  ];
+  assert.deepEqual(unansweredIncoming(messages, { isOwnText }).map((m) => m.id), []);
+});
+
 /* ————————————————————————— 回访产品已删：不追发，只盯守 ————————————————————————— */
 
 /** 静默时段永不生效的节奏（否则断言会随测试机器时区变红） */
 const NO_QUIET = { start: "00:00", end: "00:00" };
 
-test("没有未回复且不是冷开场 → 不主动追发（回访已删除）", async () => {
+test("没有未回复且本轮追问次数已用尽 → 不追", async () => {
   const contact = makeContact({ lastIncomingHash: null });
   const h = makeHarness({
     contacts: [contact],
@@ -1343,9 +1381,9 @@ test("没有未回复且不是冷开场 → 不主动追发（回访已删除）
   });
   const result = await h.engine.run();
 
-  assert.equal(h.indexOf("sendText"), -1, "不主动追发");
+  assert.equal(h.indexOf("sendText"), -1, "次数用尽不追");
   assert.equal(h.indexOf("draft"), -1, "不该白调模型");
-  assert.ok(h.logsOf("chat_followup_skipped").some((l) => l.reason === "not_due"));
+  assert.ok(h.logsOf("chat_followup_skipped").some((l) => l.reason === "round_exhausted"));
   assert.equal(result.sent, 0);
 });
 
@@ -1368,16 +1406,18 @@ test("长期静默也不会因「重启一轮」再追（回访通道已删）",
   const result = await h.engine.run();
 
   assert.equal(h.logsOf("chat_followup_revived").length, 0, "不再走回访重启");
-  assert.equal(result.sent, 0, "不主动追发");
-  assert.ok(h.logsOf("chat_followup_skipped").some((l) => l.reason === "not_due"));
+  assert.equal(result.sent, 0, "超窗外 / 次数用尽不硬追");
+  assert.ok(
+    h.logsOf("chat_followup_skipped").some(
+      (l) => l.reason === "not_due" || l.reason === "round_exhausted",
+    ),
+  );
 });
 
 /* ————— 首次开场 vs 回访：两条路不能混（§0.5.3 H「选了人却永远不说话」的真坑） ————— */
 
-test("冷联系人 + 关掉「定时回访」→ 仍然发出开场（选了人就必须会开口）", async () => {
-  // 用户现场：把 Anne 放进「要聊的人」，点开始 → 一秒结束，日志只有一句 contact_off。
-  // 根因：首次开场与「回访」共用同一条判定通道，于是关掉回访 = 一个从没聊过的人永远不会被搭话。
-  // 现在：开场只认 autoReply；followUp 开关已废弃。
+test("冷联系人 + 关掉「主动追问」→ 仍然发出开场（选了人就必须会开口）", async () => {
+  // 开场只认 autoReply；关掉「主动追问」只影响对方沉默后的轻推，不影响首次搭话。
   const contact = makeContact({ followUp: false, lastIncomingHash: null });
   const h = makeHarness({
     contacts: [contact],
@@ -1388,10 +1428,11 @@ test("冷联系人 + 关掉「定时回访」→ 仍然发出开场（选了人�
 
   const result = await h.engine.run();
 
-  assert.equal(result.sent, 1, "开场不是回访：关掉回访也要开口");
+  assert.equal(result.sent, 1, "开场不是追问：关掉主动追问也要开口");
   assert.equal(h.logsOf("chat_followup_skipped").length, 0, "不该再出现「本轮不发」");
   const updated = result.snapshot.contacts.find((c) => c.key === contact.key);
-  assert.equal(updated?.followUpIndex, 0, "发出后序列归零（连续聊不再累加回访轮次）");
+  assert.equal(updated?.followUpIndex, 0, "关掉追问则发出后不排下次追问序号");
+  assert.equal(updated?.nextDueAt, null, "关掉追问则不排下次到期");
   assert.ok(updated?.lastIncomingHash === null, "本轮无未读，发完也要保持已消费");
 });
 
@@ -1410,7 +1451,7 @@ test("冷联系人 + 全局关掉回访 → 开场照发（全局开关也只管
   assert.equal(result.sent, 1, "全局关回访不影响开场");
 });
 
-test("已经发过话 + 没有未回复 → 不主动追（回访通道已删）", async () => {
+test("已经发过话 + 关掉主动追问 → 不催", async () => {
   const contact = makeContact({ followUp: false, followUpIndex: 1 });
   const h = makeHarness({
     contacts: [contact],
@@ -1429,9 +1470,36 @@ test("已经发过话 + 没有未回复 → 不主动追（回访通道已删）
 
   const result = await h.engine.run();
 
-  assert.equal(result.sent, 0, "对方没回 → 不追");
+  assert.equal(result.sent, 0, "关掉主动追问 → 不催");
   assert.equal(h.indexOf("draft"), -1, "不该白调模型");
-  assert.ok(h.logsOf("chat_followup_skipped").some((l) => l.reason === "not_due"));
+  assert.ok(h.logsOf("chat_followup_skipped").some((l) => l.reason === "contact_off"));
+});
+
+test("已经发过话 + 到点 → 主动追问一句", async () => {
+  const contact = makeContact({ lastIncomingHash: null, followUpIndex: 0 });
+  const h = makeHarness({
+    contacts: [contact],
+    messages: [],
+    newCount: 0,
+    initialSnapshot: seedSnapshot({ contacts: [contact] }),
+    cadence: { ...DEFAULT_CADENCE, quietHours: NO_QUIET },
+    followUp: {
+      followUpIndex: 0,
+      nextDueAt: T0,
+      lastContactAt: "2026-09-26T11:50:00.000Z",
+      lastReplyAt: null,
+      stopped: false,
+    },
+    drafts: [{ text: "那个酒红 512 你还看着吗", angle: "追问库存", costMicroUsd: 1 }],
+  });
+
+  const result = await h.engine.run();
+
+  assert.equal(result.sent, 1, "到点应主动追问");
+  assert.ok(h.logsOf("chat_followup_sent").some((l) => l.reason === "due"));
+  const updated = result.snapshot.contacts.find((c) => c.key === contact.key);
+  assert.equal(updated?.followUpIndex, 1);
+  assert.ok(updated?.nextDueAt, "应排下次追问时间");
 });
 
 test("关掉「自动聊天」→ 不开口，并给出可照做的说明（不静默、不白调模型）", async () => {
@@ -1625,7 +1693,7 @@ test("moreAbove=true 且冷开场 → 禁止推销开场", async () => {
   );
 });
 
-test("对方问「你是骗子吗」+ 推销草稿 → 意图闸拦下不发", async () => {
+test("对方问「你是骗子吗」+ 推销草稿 → 意图闸拦下，改发短澄清兜底", async () => {
   const h = makeHarness({
     messages: [{ id: "m-1", direction: "in", text: "你是骗子吗" }],
     newCount: 1,
@@ -1643,12 +1711,15 @@ test("对方问「你是骗子吗」+ 推销草稿 → 意图闸拦下不发", a
 
   await h.engine.run();
 
-  assert.equal(h.sentTexts.length, 0, "信任攻击下不得发出产品句");
+  assert.equal(h.sentTexts.length, 1, "信任质疑不能沉默");
+  assert.match(h.sentTexts[0], /不是骗子|不是机器人|真人/);
+  assert.ok(!/散热|帧率|Apple18/.test(h.sentTexts[0]), "不得发出产品句");
   const rejected = h.logsOf("chat_draft_rejected");
   assert.ok(
     rejected.some((l) => l.reason === "intent_mismatch" || l.reason === "intent_give_up"),
     "必须留下意图违规日志",
   );
+  assert.ok(h.logsOf("chat_trust_fallback").length >= 1, "应走短澄清兜底");
 });
 
 test("对方问骗子 + 正面澄清草稿 → 允许发出", async () => {

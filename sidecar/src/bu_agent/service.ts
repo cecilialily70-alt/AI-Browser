@@ -143,6 +143,7 @@ import {
 } from "./replan.js";
 import {
   goalHasFollowupDeliverable,
+  pageIsSerpForQuery,
   queryMatchedOnPage,
   tryDeterministicDone,
   tryDeterministicEngineHome,
@@ -2500,7 +2501,10 @@ async function runBuAutonomousAgentLoopInner(
         taskRules,
         recordingHardCases: enableRecording ? recordingHardCases : undefined,
         // 本步页面事实：当前页是否就是任务检索词的结果页（done 闸门的 submitted 核销要用）
-        pageFacts: { serpForQuery: pageKind.serpLike && queryMatched },
+        pageFacts: {
+          serpForQuery: pageKind.serpLike && queryMatched,
+          queryTerms: analyzed.queryTerms,
+        },
         // 每步一次的「视觉找回」预算：index 失效时用来把目标从画面上找回来，用尽即回到普通失败
         relocationBudget: { left: VISION_RELOCATE_MAX_PER_STEP },
         screenshotAfterMutation: () =>
@@ -2624,8 +2628,10 @@ async function runBuAutonomousAgentLoopInner(
         url: activePage.url(),
         stepStartUrl,
         stepActionNames: actions.map((a) => a.name),
-        // 当前页就是本次检索词的结果页（主循环本步已算出的两项事实，零成本）
-        serpForQuery: pageKind.serpLike && queryMatched,
+        // 用动作后的当前地址判定：本步里提交搜索再立刻 done 时，观察时的 pageKind 仍是首页
+        serpForQuery:
+          (pageKind.serpLike && queryMatched) ||
+          pageIsSerpForQuery(activePage.url(), analyzed.queryTerms),
         // 这些「可见文案」是**上一轮观察**的产物；页面若已被本步动作带走，它们就属于旧页面
         observedUrl: pageUrl,
         title: browserState?.title,

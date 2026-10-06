@@ -25,7 +25,13 @@ import {
 } from "./completion_evidence.js";
 import { isContentPageUrl } from "./url_match.js";
 import { normalizeHaystack, termHit } from "./text_match.js";
-import type { DeliverableKind, DeliverableSpec } from "../bu_agent/task_contract.js";
+import {
+  isSearchResultsArrival,
+  isSearchSubmitDeliverable,
+  strongElementStateHints,
+  type DeliverableKind,
+  type DeliverableSpec,
+} from "../bu_agent/task_contract.js";
 
 export type VerifierName = DeliverableKind | "llm_judge";
 
@@ -173,6 +179,9 @@ function startHitsHints(hints: string[], ctx: VerifierContext): string | null {
 }
 
 function verifyNavigation(spec: DeliverableSpec, ctx: VerifierContext): VerifierResult {
+  if (ctx.serpForQuery && isSearchResultsArrival(spec.text, spec.hints)) {
+    return { ok: true, verifier: "navigation", reason: "当前页已是本次检索词的搜索引擎结果页" };
+  }
   if (!isRealPage(ctx)) {
     return {
       ok: false,
@@ -366,7 +375,8 @@ function verifySubmitted(spec: DeliverableSpec, ctx: VerifierContext): VerifierR
    * 推演既拿不到提交动作、又拿不到回读基准，交付物永远核销不了，
    * 于是 done 闸门判「未完成」→ 重写剩余计划 → 把已到达的结果页丢掉回首页重搜）。
    */
-  if (ctx.serpForQuery) {
+  // 只有「搜索并到达结果页」类 submitted 才能靠 SERP 核销；注册/下单绝不因停在谷歌结果页被勾掉
+  if (ctx.serpForQuery && isSearchSubmitDeliverable(spec.text, spec.hints)) {
     return { ok: true, verifier: "submitted", reason: "当前页已是本次检索词的搜索引擎结果页" };
   }
 
@@ -446,8 +456,20 @@ function verifyDownload(spec: DeliverableSpec, ctx: VerifierContext): VerifierRe
 }
 
 function verifyElementState(spec: DeliverableSpec, ctx: VerifierContext): VerifierResult {
-  const seen = hintSeen(spec.hints, ctx);
+  if (ctx.serpForQuery && isSearchResultsArrival(spec.text, spec.hints)) {
+    return { ok: true, verifier: "element_state", reason: "当前页已是本次检索词的搜索引擎结果页" };
+  }
+  // 顶栏「图片/新闻」与动作词「点击」永远出现在 SERP 上，不能当「已切入栏目」的证据
+  const strongHints = strongElementStateHints(spec.hints);
+  const seen = hintSeen(strongHints, ctx);
   if (seen) return { ok: true, verifier: "element_state", reason: `当前页已处于该项要求的状态（命中线索「${seen}」）` };
+  if (strongHints.length === 0 && hintSeen(spec.hints, ctx)) {
+    return {
+      ok: null,
+      verifier: "element_state",
+      reason: "线索只有动作词或结果页顶栏频道名，不足以确认目标栏目/状态已打开",
+    };
+  }
   const fact = lastFact(ctx.ledger, ["navigated", "choice_changed", "overlay_cleared"]);
   if (fact) {
     return {

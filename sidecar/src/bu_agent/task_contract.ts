@@ -246,6 +246,135 @@ function normalizeDeliverableKindForIntent(
 }
 
 /**
+ * 结果页之后还要做的事（点第 N 项 / 下载 / 切栏目…）。
+ * 命中则绝不能把句子收成「到达结果页」submitted，也不能靠站在 SERP 上核销。
+ */
+export function hasPostSerpFollowup(text: string, hints: readonly string[] = []): boolean {
+  const hay = normalizeHaystack(`${text} ${hints.join(" ")}`);
+  if (!hay) return false;
+  return (
+    /(下载|另存|保存为|导出|缩略图|右键)/.test(hay) ||
+    /(第\s*[一二两三四五六七八九十\d]+\s*张|第\s*[一二两三四五六七八九十\d]+\s*个|前\s*[一二两三四五六七八九十\d]+\s*张|前\s*[一二两三四五六七八九十\d]+\s*条)/.test(
+      hay,
+    ) ||
+    /(点击第|点开第|打开第|进入第)/.test(hay) ||
+    /(切换到|切换至|点开|点击).{0,8}(图片|图像|新闻|视频|购物|地图|images?|news|videos?)/.test(hay) ||
+    /(图片|图像|新闻|视频|购物|栏目|频道).{0,6}(点击|点开|切换)/.test(hay)
+  );
+}
+
+/**
+ * 句子是不是「确认已进入搜索结果页」这类到达债。
+ * 只认到达短语，不再用宽泛的「结果页」子串（否则「在图片结果页上点第二张」会被误收）。
+ */
+export function isSearchResultsArrival(text: string, hints: readonly string[] = []): boolean {
+  const hay = normalizeHaystack(`${text} ${hints.join(" ")}`);
+  if (!hay || hasPostSerpFollowup(text, hints)) return false;
+  return /进入搜索结果|到达搜索结果|进入结果页|到达结果页|确认已进入.*结果|搜索结果页已|已进入搜索结果|已到达搜索结果/.test(
+    hay,
+  );
+}
+
+/**
+ * submitted 能不能用「当前已是检索词 SERP」直接核销。
+ * 只有搜索到达类债务才行；注册/下单的 submitted 绝不能因为人还停在谷歌结果页就被勾掉。
+ */
+export function isSearchSubmitDeliverable(text: string, hints: readonly string[] = []): boolean {
+  if (isSearchResultsArrival(text, hints)) return true;
+  if (hasPostSerpFollowup(text, hints)) return false;
+  const hay = normalizeHaystack(`${text} ${hints.join(" ")}`);
+  if (!hay) return false;
+  return /(搜索|检索|查询|搜一下|search\b)/.test(hay) && /(提交|进入|到达|结果)/.test(hay);
+}
+
+function collapseSearchArrivalKind(kind: DeliverableKind, text: string): DeliverableKind {
+  if ((kind === "element_state" || kind === "navigation") && isSearchResultsArrival(text)) {
+    return "submitted";
+  }
+  return kind;
+}
+
+function alreadyHasSearchSubmitted(specs: DeliverableSpec[], text: string): boolean {
+  if (!specs.some((spec) => spec.kind === "submitted")) return false;
+  return (
+    isSearchSubmitDeliverable(text) ||
+    specs.some((spec) => isSearchSubmitDeliverable(spec.text, spec.hints))
+  );
+}
+
+/** 用户目标是否真的在要「搜索/提交检索」——否则拒绝收搜索到达类 submitted */
+export function goalRequestsSearchSubmit(goal: string): boolean {
+  return /(搜索|检索|查询|搜一下|search\b)/.test(normalizeHaystack(goal));
+}
+
+/**
+ * 搜索到达类 submitted 只能出现在「目标真的要求搜索」的任务里。
+ * 模型/计划给点图下载任务塞「确认进入结果页」时直接丢掉，避免 SERP 假核销。
+ */
+function isOrphanSearchSubmit(kind: DeliverableKind, text: string, goal: string): boolean {
+  if (kind !== "submitted") return false;
+  if (!isSearchSubmitDeliverable(text) && !isSearchResultsArrival(text)) return false;
+  return !goalRequestsSearchSubmit(goal);
+}
+
+const FALLBACK_CHROME_CHANNELS = [
+  "图片",
+  "图像",
+  "新闻",
+  "视频",
+  "购物",
+  "地图",
+  "全部",
+  "网页",
+  "images",
+  "image",
+  "news",
+  "videos",
+  "video",
+  "shopping",
+  "maps",
+  "map",
+  "all",
+  "web",
+];
+
+let cachedChromeChannels: string[] | null | undefined;
+
+/** 搜索结果顶栏常驻频道名（数据文件 terms.chromeChannels；缺省用内置兜底） */
+export function loadChromeChannelTerms(): string[] {
+  if (cachedChromeChannels !== undefined) return cachedChromeChannels ?? FALLBACK_CHROME_CHANNELS;
+  cachedChromeChannels = null;
+  const path = resolveDeliverableLexiconPath();
+  if (!path) return FALLBACK_CHROME_CHANNELS;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const terms = (parsed.terms ?? {}) as Record<string, unknown>;
+    const list = sanitizeTermList(terms.chromeChannels);
+    cachedChromeChannels = list.length ? list : null;
+  } catch {
+    cachedChromeChannels = null;
+  }
+  return cachedChromeChannels ?? FALLBACK_CHROME_CHANNELS;
+}
+
+/**
+ * element_state 核销时哪些线索算数。
+ * 动作动词（点击/进入）与顶栏频道名（图片/新闻）单独出现在可见文案里，
+ * 不能证明「已经点进该状态」——网页 SERP 顶栏永远写着「图片」。
+ */
+export function strongElementStateHints(hints: readonly string[]): string[] {
+  const kinds = loadDeliverableKinds();
+  const weak = new Set<string>([
+    ...loadChromeChannelTerms(),
+    ...(kinds?.terms.element_state ?? []),
+    ...(kinds?.terms.navigation ?? FALLBACK_NAVIGATION_VERBS),
+  ]);
+  return hints
+    .map((hint) => normalizeHaystack(hint))
+    .filter((hint) => hint.length > 0 && !weak.has(hint));
+}
+
+/**
  * 交付物类型裁定：**文本优先于模型自述**。
  *
  * 模型给的 `kind` 是自由字段，历史上出现过「文本写的是总结结论、kind 却填 navigation」这种
@@ -388,8 +517,13 @@ export function deriveContractFromRules(input: DeriveContractInput): TaskContrac
     if (specs.length >= max) break;
     const kind = classifyDeliverableText(text, kinds);
     if (!kind) continue;
-    const effectiveKind = normalizeDeliverableKindForIntent(kind, input.intent);
+    const effectiveKind = collapseSearchArrivalKind(
+      normalizeDeliverableKindForIntent(kind, input.intent),
+      text,
+    );
     if (isPhantomNavigation(effectiveKind, input.intent, input.explicitNavigation === true)) continue;
+    if (isOrphanSearchSubmit(effectiveKind, text, goal)) continue;
+    if (effectiveKind === "submitted" && alreadyHasSearchSubmitted(specs, text)) continue;
     const hints = collectHints(text, input.queryTerms ?? [], kinds);
     // 说不出目的地的「打开某页」不立债务（否则 done 会被它永久卡死）
     if (effectiveKind === "navigation" && !hasConcreteNavigationTarget(hints, kinds)) continue;
@@ -466,8 +600,13 @@ export function buildTaskContract(input: NormalizeContractInput): TaskContract {
       ? (rawKind as DeliverableKind)
       : null;
     // 文本优先裁定类型；再由结构闸门拦掉「目标从未要求」或「说不出目的地」的导航债务
-    const kind = resolveDeliverableKind(text, declared, kinds, input.intent);
+    const kind = collapseSearchArrivalKind(
+      resolveDeliverableKind(text, declared, kinds, input.intent),
+      text,
+    );
     if (isPhantomNavigation(kind, input.intent, input.explicitNavigation === true)) continue;
+    if (isOrphanSearchSubmit(kind, text, input.goal)) continue;
+    if (kind === "submitted" && alreadyHasSearchSubmitted(specs, text)) continue;
     const hints = Array.isArray(item.hints)
       ? sanitizeTermList(item.hints)
       : collectHints(text, input.queryTerms ?? [], kinds);

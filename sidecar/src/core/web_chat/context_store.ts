@@ -195,9 +195,14 @@ export function appendThreadMessages(
       skipped += 1;
       continue;
     }
+    // 方向未知绝不默认成 in（现场：unknown→in 后同文再落 out，造成 in/out 翻转与假未回复）
+    if (message.direction !== "in" && message.direction !== "out") {
+      skipped += 1;
+      continue;
+    }
     prepared.push({
       id,
-      direction: message.direction === "out" ? "out" : "in",
+      direction: message.direction,
       text: sanitizeForLedger(rawText),
       ts: message.ts ?? null,
       at: now,
@@ -301,6 +306,8 @@ export interface VisitState {
   /** 累计收发条数 */
   totalIn: number;
   totalOut: number;
+  /** 疑似交易次数（对方要付款方式 / 成交语境） */
+  suspectedTradeCount?: number;
   updatedAt: string;
 }
 
@@ -317,6 +324,7 @@ export function emptyVisitState(now = new Date().toISOString()): VisitState {
     stopReason: null,
     totalIn: 0,
     totalOut: 0,
+    suspectedTradeCount: 0,
     updatedAt: now,
   };
 }
@@ -359,21 +367,28 @@ export function settleVisitState(
     stage: ChatStage;
     stopped?: boolean;
     stopReason?: string | null;
+    suspectedTradeCount?: number;
   },
 ): VisitState {
   const hasReply = input.incomingCount > 0;
+  const trade = Math.max(
+    previous.suspectedTradeCount ?? 0,
+    Math.max(0, Math.round(input.suspectedTradeCount ?? 0)),
+  );
   return {
     label: String(input.label ?? "").trim() || previous.label,
     firstContactAt: previous.firstContactAt ?? (input.sent ? input.now : null),
     lastContactAt: input.sent ? input.now : previous.lastContactAt,
     lastReplyAt: hasReply ? input.now : previous.lastReplyAt,
     followUpIndex: Math.max(0, Math.round(input.followUpIndex)),
-    nextDueAt: input.nextDueAt ?? previous.nextDueAt,
+    // 引擎权威：null 表示「本轮不再追」，不得用旧值顶回来
+    nextDueAt: input.nextDueAt,
     stage: input.stage,
     stopped: input.stopped ?? previous.stopped,
     stopReason: input.stopReason ?? previous.stopReason,
     totalIn: previous.totalIn + Math.max(0, input.incomingCount),
     totalOut: previous.totalOut + (input.sent ? 1 : 0),
+    suspectedTradeCount: trade,
     updatedAt: input.now,
   };
 }

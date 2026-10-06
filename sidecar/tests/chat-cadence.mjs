@@ -516,17 +516,17 @@ test("冷阶段阶梯走完后按末档重复，且绝不越过 24 小时窗口"
 test("对方刚回话、我方还没接上 → 短阶梯追上去（绝不掉到 48 小时后的回访）", () => {
   const last = new Date(T0).getTime();
   const ladder = [...PENDING_REPLY_LADDER_SECONDS];
-  assert.deepEqual(ladder, [15, 30, 60, 120, 300]);
+  assert.deepEqual(ladder, [3, 8, 15, 30, 60]);
 
   // 对方在我方发出后 40 秒回话
   const replyAt = new Date(last + 40_000).toISOString();
-  // 片末结算时「现在」= 发出后 42 秒 → 下一个刻度 = 对方回话时间 + 15 秒
+  // 片末结算时「现在」= 发出后 42 秒 → 下一档 3 秒，但安全网抬到 now+2s
   const at = liveReplyRecheckAt({
     nowIso: new Date(last + 42_000).toISOString(),
     lastContactAt: T0,
     lastReplyAt: replyAt,
   });
-  assert.equal(new Date(at).getTime(), last + 40_000 + 15_000);
+  assert.equal(new Date(at).getTime(), last + 42_000 + 2_000);
   assert.ok(new Date(at).getTime() > last + 42_000, "必须排在未来（否则立刻空转）");
 
   // 追了 6 分钟还接不上 → 落到冷阶段阶梯，绝不返回 null

@@ -10,7 +10,7 @@
  */
 import type { Page } from "playwright-core";
 
-import { resolveCoordToViewportPixels } from "./core/action_gateway.js";
+import { resolveCoordToViewportPixels, resolveGateway } from "./core/action_gateway.js";
 import { safeGoto, softSettleAfterNavigation } from "./cdp_session.js";
 import {
   buildDeterministicReplayPassword,
@@ -1406,8 +1406,7 @@ export async function replayTrajectoryOnPage(
               await withAbort(
                 signal,
                 locator.fill(finalValue, { timeout: FILL_TIMEOUT_MS }).catch(async () => {
-                  await locator.fill("").catch(() => undefined);
-                  await page.keyboard.type(finalValue, { delay: 15 });
+                  await locator.pressSequentially(finalValue, { timeout: FILL_TIMEOUT_MS });
                 }),
               );
               // 稳态回读：空框硬失败，禁止「填了其实空」继续点下一步
@@ -1854,13 +1853,7 @@ export async function replayTrajectoryOnPage(
           const direction = String(step.value ?? "down").toLowerCase();
           const dir =
             direction === "up" || direction === "bottom" ? direction : "down";
-          await page.evaluate((d: string) => {
-            if (d === "bottom") {
-              window.scrollTo(0, document.documentElement.scrollHeight);
-              return;
-            }
-            window.scrollBy(0, d === "up" ? -600 : 600);
-          }, dir);
+          await resolveGateway(page).scroll(dir, { record: false, skipSettle: true });
           await sleep(200);
           break;
         }

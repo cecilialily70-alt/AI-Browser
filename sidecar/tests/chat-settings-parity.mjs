@@ -323,7 +323,9 @@ test("每联系人开关与全局开关都真的接到引擎上（不是画了�
   // ③b 列表里每行的开关用的是**侧车算好的键**（前端没有 siteKeyOf / sanitizeSegment，
   //     自己拼迟早对不上 → 「在列表里关了自动回复，引擎照样开口」，§0.5.3 H）
   assert.ok(/item\.flagKey/.test(chatModal), "视图必须用侧车回传的 flagKey 写开关");
-  assert.ok(/from "\.\/contactCard"/.test(chatModal) && /FlagToggle/.test(chatModal), "列表里必须有每行开关");
+  assert.ok(/from "\.\/contactCard"/.test(chatModal), "列表必须用 contactCard");
+  const contactCardSrc = readFileSync(join(ROOT, "src", "components", "chat", "contactCard.tsx"), "utf8");
+  assert.ok(/FlagToggle/.test(contactCardSrc) && /autoReply/.test(contactCardSrc), "列表里必须有每行开关");
   const chatContacts = readFileSync(
     join(ROOT, "sidecar", "src", "bu_agent", "chat_contacts.ts"),
     "utf8",

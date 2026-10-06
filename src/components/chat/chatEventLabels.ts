@@ -70,6 +70,12 @@ export const CHAT_EVENT_STYLES: Record<string, ChatEventStyle> = {
   chat_inbound_burst: { label: "对方连发已合批", tone: "muted" },
   chat_contacts_discovered: { label: "自动纳入新人", tone: "muted" },
   chat_contacts_discover_failed: { label: "扫描列表失败", tone: "warning" },
+  chat_trade_signal: { label: "疑似交易", tone: "warning" },
+  chat_payment_plain: { label: "只发付款方式", tone: "success" },
+  chat_payment_unconfigured: { label: "未配置付款方式", tone: "warning" },
+  chat_payment_stripped: { label: "已去掉付款夹话", tone: "muted" },
+  chat_send_pacing: { label: "发送前犹豫", tone: "muted" },
+  chat_trust_fallback: { label: "信任质疑兜底回复", tone: "muted" },
 
   // —— 引擎：开场 / 本轮不发 ——
   chat_followup_sent: { label: "主动发出", tone: "success" },
@@ -106,6 +112,7 @@ export const CHAT_EVENT_STYLES: Record<string, ChatEventStyle> = {
   // —— 宿主：调度器与看门狗（P8） ——
   // 叠片撞锁时会每秒刷「拉起 → 正忙」：协议与调度照旧，只不进值守日志面板
   chat_patrol_launch: { label: "自动拉起值守", tone: "muted", showInLog: false },
+  chat_patrol_busy: { label: "环境正忙", tone: "muted", showInLog: false },
   chat_patrol_queue: { label: "排队等待席位", tone: "muted" },
   chat_patrol_resumed: { label: "恢复自动值守", tone: "success" },
   chat_watchdog_stall: { label: "值守卡住了", tone: "warning" },
@@ -124,17 +131,17 @@ const TONE_CLASS: Record<ChatEventTone, string> = {
  * 未知代码**不拼进日志**（宁可不写，也不甩蛇形英文）。
  */
 const REASON_LABELS: Readonly<Record<string, string>> = {
-  disabled: "主动追发未启用（产品已下线）",
+  disabled: "主动追问未启用",
   chat_off: "「自动聊天」关着（引擎不会主动开口）",
-  contact_off: "该联系人的主动追发已关（不主动追；产品已下线）",
+  contact_off: "该联系人已关「主动追问」",
   stopped: "该联系人已停止",
   replied: "对方已回复",
   not_due: "对方没有未回复消息，继续盯守",
-  round_exhausted: "本轮回访次数已用尽",
+  round_exhausted: "本轮主动追问次数已用尽",
   no_new_angle: "没有新角度",
   daily_cap: "已达当日发送上限",
   quiet_hours: "处于静默时段",
-  due: "到点回访（产品已下线）",
+  due: "到点主动追问",
   opening: "首次开场",
   empty_roster: "没有要聊的对象",
   no_passing_draft: "草稿没通过去重",
@@ -173,10 +180,13 @@ export function formatChatEvent(event: {
   const kind = String(event.kind ?? "chat_note");
   const style = CHAT_EVENT_STYLES[kind];
   const stopReason = String(event.stopReason ?? "").trim();
-  // 调度叠片被拒：stopReason 稳定码；功能照旧，只不刷面板
-  const quietBusy = stopReason === "engine_busy";
-  const showInLog = quietBusy ? false : style ? style.showInLog !== false : true;
   const msg = String(event.msg ?? "").trim();
+  // 调度叠片被拒：stopReason / 专用 kind；落库旧行只剩文案时用协议前缀（非任意中文猜）
+  const quietBusy =
+    stopReason === "engine_busy" ||
+    kind === "chat_patrol_busy" ||
+    msg.startsWith("当前环境正忙，请先停止当前任务");
+  const showInLog = quietBusy ? false : style ? style.showInLog !== false : true;
   const code = event.reason ? String(event.reason) : "";
   const reasonZh = code ? REASON_LABELS[code] ?? "" : "";
   const reasonSuffix =

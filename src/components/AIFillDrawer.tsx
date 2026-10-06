@@ -1658,8 +1658,6 @@ export function AIFillDrawer({
             ? `文件已保存：${event.payload.localPath}`
             : `已采集 ${event.payload.count ?? rows.length} 条数据${event.payload.mode ? ` · ${event.payload.mode}` : ""}`,
       );
-      // 宪法 §5.3：采集结果在 Ai Chat 可见；勿强制拽回 Agent Tab
-      setActiveTab((current) => (current === "trajectory" ? current : "ai"));
     })
       .then((fn) => {
         if (cancelled) {
@@ -2819,6 +2817,33 @@ export function AIFillDrawer({
         </div>
       </div>
 
+      {scrapedData && scrapedData.rows.length > 0 ? (
+        <div className="shrink-0 px-2">
+          <ScraperDataPanel
+            data={scrapedData.rows}
+            profileId={targetProfileId ?? ""}
+            meta={{
+              mode: scrapedData.mode,
+              url: scrapedData.url,
+              count: scrapedData.count,
+              localPath: scrapedData.localPath,
+            }}
+            onToastError={onError}
+            onToastSuccess={(message) => pushLine("success", message)}
+            onClear={() => {
+              if (!targetProfileId) {
+                return;
+              }
+              setScrapedDataByEnv((current) => {
+                const next = { ...current };
+                delete next[targetProfileId];
+                return next;
+              });
+            }}
+          />
+        </div>
+      ) : null}
+
       {activeTab === "agent" ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden p-2">
@@ -3134,30 +3159,6 @@ export function AIFillDrawer({
       {activeTab === "ai" ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2">
-            {scrapedData && scrapedData.rows.length > 0 ? (
-              <ScraperDataPanel
-                data={scrapedData.rows}
-                profileId={targetProfileId ?? ""}
-                meta={{
-                  mode: scrapedData.mode,
-                  url: scrapedData.url,
-                  count: scrapedData.count,
-                  localPath: scrapedData.localPath,
-                }}
-                onToastError={onError}
-                onToastSuccess={(message) => pushLine("success", message)}
-                onClear={() => {
-                  if (!targetProfileId) {
-                    return;
-                  }
-                  setScrapedDataByEnv((current) => {
-                    const next = { ...current };
-                    delete next[targetProfileId];
-                    return next;
-                  });
-                }}
-              />
-            ) : null}
             <AIChatPanel
               lines={chatLines}
               chatInput={chatInput}

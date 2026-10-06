@@ -9,10 +9,15 @@ import test from "node:test";
 
 import {
   buildChatDraftMessages,
+  draftMatchesPeerLanguage,
+  draftMatchesPeerPunctuation,
   formatChatTodayLabel,
+  inferPeerPunctuationHabit,
+  inferPeerReplyLanguage,
   looksLikeOptOut,
   looksLikeRejection,
   parseChatDraft,
+  scoreTextLanguage,
   CHAT_DRAFT_SYSTEM_PROMPT,
 } from "../dist/core/web_chat/chat_prompt.js";
 import {
@@ -107,9 +112,12 @@ test("text 键可用 message 别名", () => {
 
 /* ————————————————————————— 提示词构建 ————————————————————————— */
 
-test("系统提示词明确禁止机器痕迹、复读、敏感信息；问价须报价；默认单句、先答后推", () => {
+test("系统提示词明确禁止机器痕迹、复读、敏感信息；问价须报价；默认单句、先答后推；跟对方语种", () => {
   for (const must of [
     "对方使用的语言",
+    "禁止中英夹杂",
+    "当地人日常私聊",
+    "书写习惯都要跟对方",
     "严禁复述",
     "作为AI",
     "不编造敏感",
@@ -142,6 +150,82 @@ test("maxBubbles=1 时 texts 超限被截断；硬顶最多 3 句", () => {
   assert.deepEqual(three.texts, ["一", "二", "三"]);
   const hard = parseChatDraft('{"texts":["一","二","三","四","五","六"],"angle":"x"}');
   assert.deepEqual(hard.texts, ["一", "二", "三"]);
+});
+
+test("对方英文入站 → 推断 en，并写入语种锁定；中文草稿判不一致", () => {
+  assert.equal(scoreTextLanguage("What about the 512GB price for 18 Pro Max?"), "en");
+  assert.equal(scoreTextLanguage("国行还是港版？大概多少钱"), "zh");
+  const recent = [
+    { direction: "out", text: "Which part sounded off?", id: "1", stableId: true },
+    { direction: "in", text: "What about the 512GB price for the 18 Pro Max?", id: "2", stableId: true },
+    { direction: "in", text: "China version", id: "3", stableId: true },
+  ];
+  assert.equal(inferPeerReplyLanguage(recent), "en");
+  assert.equal(draftMatchesPeerLanguage(["Fair enough — prices dipped a bit."], "en"), true);
+  assert.equal(draftMatchesPeerLanguage(["行，那国行还是港版？"], "en"), false);
+  assert.equal(
+    draftMatchesPeerLanguage(["Fair enough.", "价格最近有点松动，你更倾向国行还是港版？"], "en"),
+    false,
+  );
+
+  const messages = buildChatDraftMessages({
+    siteLabel: "whatsapp",
+    contactLabel: "+852",
+    stage: "negotiating",
+    goal: "查询苹果手机",
+    styleHint: null,
+    roleName: null,
+    rolePrompt: null,
+    rollingSummary: null,
+    longTermFacts: [],
+    usedAngles: [],
+    recent,
+    isFollowUp: false,
+    followUpIndex: 0,
+    rewriteHint: null,
+  });
+  const user = messages.find((row) => row.role === "user")?.content ?? "";
+  assert.ok(/回话语种锁定：English/.test(user), "对方英文时必须写入 English 语种锁定");
+  assert.ok(/禁止中文句子/.test(user), "英文锁定必须禁止中文句子");
+});
+
+test("希伯来语少标点 → sparse 习惯；书面句号/破折号草稿被拦；提示词写入锁定", () => {
+  assert.equal(scoreTextLanguage("אתה נוכל"), "he");
+  const recent = [
+    { direction: "in", text: "אתה נוכל", id: "1", stableId: true },
+    { direction: "in", text: "הישראלים לא משתמשים בסימני פיסוק", id: "2", stableId: true },
+    { direction: "in", text: "אתה חשוד מאוד", id: "3", stableId: true },
+  ];
+  assert.equal(inferPeerReplyLanguage(recent), "he");
+  assert.equal(inferPeerPunctuationHabit(recent), "sparse");
+  assert.equal(draftMatchesPeerPunctuation(["לא אני לא נוכל חחח"], "sparse"), true);
+  assert.equal(
+    draftMatchesPeerPunctuation(
+      ["לא, אני לא נוכל. אני סוחר אמיתי — אם משהו נראה חשוד תגיד."],
+      "sparse",
+    ),
+    false,
+  );
+
+  const messages = buildChatDraftMessages({
+    siteLabel: "whatsapp",
+    contactLabel: "+852",
+    stage: "engaged",
+    goal: "卖手机",
+    styleHint: null,
+    roleName: null,
+    rolePrompt: null,
+    rollingSummary: null,
+    longTermFacts: [],
+    usedAngles: [],
+    recent,
+    isFollowUp: false,
+    followUpIndex: 0,
+    rewriteHint: null,
+  });
+  const user = messages.find((row) => row.role === "user")?.content ?? "";
+  assert.ok(/书写习惯锁定/.test(user), "对方吐槽标点时必须写入书写习惯锁定");
+  assert.ok(/Hebrew|עברית/.test(user), "希伯来语必须写入语种锁定");
 });
 
 test("意图指令与气泡上限写入 user 提示", () => {

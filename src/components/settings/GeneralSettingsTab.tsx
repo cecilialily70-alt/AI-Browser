@@ -45,7 +45,6 @@ import {
   testKeyFile,
   updateCloakBinary,
   updateSetting,
-  openDownloadDir,
   type ExternalDataApiState,
 } from "../../lib/tauri";
 import type {
@@ -936,20 +935,6 @@ export function GeneralSettingsTab({
     }
   };
 
-  const handleOpenDownloadDir = async (track: "browser" | "scraper") => {
-    try {
-      const opened = await openDownloadDir(track);
-      onToast(
-        createToast(
-          "success",
-          track === "scraper" ? `已打开数据目录：${opened}` : `已打开下载目录：${opened}`,
-        ),
-      );
-    } catch (error) {
-      onToast(createToast("error", formatInvokeError(error)));
-    }
-  };
-
   // 与 sidecar 的内核解析优先级保持一致，推算本次启动实际会用的内核：
   // 指定 pin → 该版本的本地运行目录内核；「自动版本」→ 最新的本地免费系内核。
   const pinnedVersion = normalizeKernelPin(settings.default_browser_version);
@@ -1292,26 +1277,6 @@ export function GeneralSettingsTab({
             </button>
           </div>
         </label>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <button
-            type="button"
-            className="btn btn-outline"
-            disabled={saving}
-            onClick={() => void handleOpenDownloadDir("browser")}
-          >
-            <FolderOpen size={14} />
-            打开下载目录
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline"
-            disabled={saving}
-            onClick={() => void handleOpenDownloadDir("scraper")}
-          >
-            <FolderOpen size={14} />
-            打开数据目录
-          </button>
-        </div>
         <div className="mt-3 rounded-md bg-sunken p-3">
           <div className="text-ui font-medium text-foreground">缓存清理</div>
           <button

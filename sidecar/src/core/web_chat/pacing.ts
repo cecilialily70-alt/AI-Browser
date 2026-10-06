@@ -32,10 +32,10 @@ export interface PacingConfig {
  * 所以最小间隔取 2s（不是 0），阅读延迟按字数给（上限 4s），抖动 ±20%。
  */
 export const DEFAULT_PACING: PacingConfig = {
-  minSendIntervalMs: 2_000,
-  readDelayPerCharMs: 25,
-  readDelayMaxMs: 4_000,
-  jitterRatio: 0.2,
+  minSendIntervalMs: 4_000,
+  readDelayPerCharMs: 45,
+  readDelayMaxMs: 14_000,
+  jitterRatio: 0.25,
 };
 
 export type PacingWaitReason = "none" | "min_interval" | "read_delay";

@@ -114,6 +114,8 @@ struct VisitFile {
     stopped: Option<bool>,
     #[serde(default)]
     stop_reason: Option<String>,
+    #[serde(default)]
+    suspected_trade_count: Option<i64>,
 }
 
 fn read_visit(dir: &Path) -> VisitFile {
@@ -217,6 +219,9 @@ pub struct ChatThreadRow {
     pub auto_reply: bool,
     /// 兼容字段：曾表示到点要不要主动找话。主动追发已下线；缺省＝开仅作快照展示
     pub follow_up: bool,
+    /// 疑似交易次数（来自 visit.json；对方要付款方式 / 成交语境）
+    #[serde(default)]
+    pub suspected_trade_count: i64,
 }
 
 // 注意：`ChatThreadRow` **只序列化**（Host → 前端），所以 `#[serde(default = ...)]` 在这里
@@ -345,12 +350,20 @@ pub fn list_chat_threads(
             takeover_reason: None,
             auto_reply: true,
             follow_up: true,
+            suspected_trade_count: 0,
         })
     })?;
     let mut rows = mapped.collect::<Result<Vec<_>, _>>()?;
     // 接管模式与每联系人开关都来自引擎快照（不是索引表；索引表只存磁盘上的回访事实）
     let overlays = read_chat_contact_overlays(app, profile_id)?;
     apply_contact_overlays(&mut rows, &overlays);
+    // 疑似交易次数只在 visit.json，列表时补读（不另开表列）
+    let root = chat_context_root(app, profile_id)?;
+    for row in &mut rows {
+        let dir = root.join(&row.site_key).join(&row.contact_key);
+        let visit = read_visit(&dir);
+        row.suspected_trade_count = visit.suspected_trade_count.unwrap_or(0).max(0);
+    }
     Ok(rows)
 }
 
@@ -1469,6 +1482,7 @@ mod tests {
             takeover_reason: None,
             auto_reply: true,
             follow_up: true,
+            suspected_trade_count: 0,
         }
     }
 

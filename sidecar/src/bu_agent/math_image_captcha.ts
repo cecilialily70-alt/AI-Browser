@@ -19,8 +19,6 @@ import type { AgentFileSystem } from "./filesystem.js";
 import {
   encodeBytesToJpegOnPage,
   fetchImageBuffer,
-  freezePageForCapture,
-  unfreezePageForCapture,
   waitCaptureSettle,
 } from "./point_select/silent_capture.js";
 import { openCvDenoise } from "./opencv_preprocess.js";
@@ -564,45 +562,40 @@ async function visionReadExpr(input: {
     width: Math.max(1, Math.floor(input.box.w + pad * 2)),
     height: Math.max(1, Math.floor(input.box.h + pad * 2)),
   };
-  await freezePageForCapture(input.page);
+  await waitCaptureSettle();
   let buf: Buffer | undefined;
   let captureMethod = "screenshot";
-  try {
-    await waitCaptureSettle();
-    // 优先静默拉原图（防截屏闪屏）；失败再 screenshot 兜底
-    const src = String(input.box.src || "").trim();
-    if (src && src !== "canvas" && !/^data:image\/gif/i.test(src)) {
-      try {
-        const raw = await fetchImageBuffer(input.page, src);
-        if (raw && raw.length > 80) {
-          const jpeg = await encodeBytesToJpegOnPage(
-            input.page,
-            raw,
-            Math.round(input.box.w),
-            Math.round(input.box.h),
-          );
-          if (jpeg?.b64) {
-            buf = Buffer.from(jpeg.b64, "base64");
-            captureMethod = "fetch";
-          }
+  // 优先静默拉原图（防截屏闪屏）；失败再 screenshot 兜底
+  const src = String(input.box.src || "").trim();
+  if (src && src !== "canvas" && !/^data:image\/gif/i.test(src)) {
+    try {
+      const raw = await fetchImageBuffer(input.page, src);
+      if (raw && raw.length > 80) {
+        const jpeg = await encodeBytesToJpegOnPage(
+          input.page,
+          raw,
+          Math.round(input.box.w),
+          Math.round(input.box.h),
+        );
+        if (jpeg?.b64) {
+          buf = Buffer.from(jpeg.b64, "base64");
+          captureMethod = "fetch";
         }
-      } catch {
-        /* fall through */
       }
+    } catch {
+      /* fall through */
     }
-    if (!buf) {
-      buf = await captureScreenshot(input.page, {
-        type: "jpeg",
-        quality: 95,
-        clip,
-        scale: "css",
-        animations: "disabled",
-        caret: "hide",
-      });
-      captureMethod = "screenshot";
-    }
-  } finally {
-    await unfreezePageForCapture(input.page);
+  }
+  if (!buf) {
+    buf = await captureScreenshot(input.page, {
+      type: "jpeg",
+      quality: 95,
+      clip,
+      scale: "css",
+      animations: "disabled",
+      caret: "hide",
+    });
+    captureMethod = "screenshot";
   }
   if (!buf) return null;
   input.logger.agentProgress(`算式采帧：${captureMethod}`, {

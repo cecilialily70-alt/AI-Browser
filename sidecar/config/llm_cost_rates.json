@@ -1,0 +1,10 @@
+{
+  "currency": "USD",
+  "note": "估算单价（美元 / 百万 token），不是账单。未知模型用 defaultPerMillion。可按实际供应商改此文件。",
+  "defaultPerMillion": { "prompt": 0.5, "completion": 1.5 },
+  "models": {
+    "deepseek-chat": { "prompt": 0.14, "completion": 0.28 },
+    "gpt-4o-mini": { "prompt": 0.15, "completion": 0.6 },
+    "gpt-4o": { "prompt": 2.5, "completion": 10 }
+  }
+}

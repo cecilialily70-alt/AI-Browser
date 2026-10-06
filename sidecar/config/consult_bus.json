@@ -1,0 +1,4 @@
+{
+  "_comment": "P5.5 Consult 接线预算。每个 Agent 任务最多 askJson 这么多次（一次 askJson 计 1，含其内部纠正轮）。耗尽、影子档或已中止时，计划矛盾回落 HITL。0 表示从不咨询。无站点文案。",
+  "maxCallsPerRun": 4
+}

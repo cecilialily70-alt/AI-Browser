@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "天枢台页面翻译",
+  "version": "1.0.0",
+  "description": "右键翻译选中文字 / 整页（Google 翻译）。可与 TWP 等第三方扩展并存。",
+  "permissions": ["contextMenus", "tabs", "activeTab", "storage"],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },
+  "browser_action": {
+    "default_title": "翻译当前页",
+    "default_popup": "popup.html"
+  }
+}

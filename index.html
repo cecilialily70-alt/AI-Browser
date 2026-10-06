@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>天枢台</title>
+    <script>
+      // 首帧前恢复主题，避免深→浅闪烁。默认深色（未存过偏好时）。
+      (function () {
+        try {
+          var stored = localStorage.getItem("tianshutai-theme");
+          if (stored === "light" || stored === "dark") {
+            document.documentElement.setAttribute("data-theme", stored);
+          }
+        } catch (error) {
+          /* 隐私模式 / 存储被禁用时保持默认深色 */
+        }
+      })();
+    </script>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+
+      :root,
+      [data-theme="dark"] {
+        --boot-bg: #090c14;
+        --boot-surface: #11151f;
+        --boot-border: #1d222e;
+        --boot-fg: #e2e8f0;
+        --boot-muted: #7c8798;
+        --boot-accent: #6366f1;
+        color-scheme: dark;
+      }
+
+      [data-theme="light"] {
+        --boot-bg: #f7f8fb;
+        --boot-surface: #ffffff;
+        --boot-border: #dfe3ea;
+        --boot-fg: #131a2a;
+        --boot-muted: #6b7688;
+        --boot-accent: #4f46e5;
+        color-scheme: light;
+      }
+
+      body {
+        background: var(--boot-bg);
+        color: var(--boot-fg);
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      #root {
+        width: 100%;
+        height: 100%;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .initial-loader {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        padding: 24px;
+        text-align: center;
+      }
+
+      .initial-loader__mark {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+
+      .initial-loader__glyph {
+        width: 26px;
+        height: 26px;
+        border-radius: 8px;
+        background: linear-gradient(140deg, var(--boot-accent), #22d3ee);
+        box-shadow: 0 6px 18px rgb(99 102 241 / 0.28);
+      }
+
+      .initial-loader__brand {
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        color: var(--boot-fg);
+      }
+
+      .initial-loader__hint {
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        color: var(--boot-muted);
+      }
+
+      .initial-loader__skeleton {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        width: min(260px, 70vw);
+      }
+
+      .initial-loader__bar {
+        height: 6px;
+        border-radius: 999px;
+        background: linear-gradient(
+          90deg,
+          var(--boot-border) 0%,
+          var(--boot-surface) 50%,
+          var(--boot-border) 100%
+        );
+        background-size: 200% 100%;
+        animation: ai-browser-shimmer 1.4s ease-in-out infinite;
+      }
+
+      .initial-loader__bar:nth-child(2) {
+        width: 80%;
+        animation-delay: 0.12s;
+      }
+
+      .initial-loader__bar:nth-child(3) {
+        width: 58%;
+        animation-delay: 0.24s;
+      }
+
+      @keyframes ai-browser-shimmer {
+        0% {
+          background-position: 100% 0;
+        }
+        100% {
+          background-position: -100% 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="initial-loader" role="status" aria-live="polite" aria-label="天枢台 正在加载">
+        <div class="initial-loader__mark">
+          <span class="initial-loader__glyph" aria-hidden="true"></span>
+          <span class="initial-loader__brand">天枢台</span>
+        </div>
+        <div class="initial-loader__skeleton" aria-hidden="true">
+          <div class="initial-loader__bar"></div>
+          <div class="initial-loader__bar"></div>
+          <div class="initial-loader__bar"></div>
+        </div>
+        <div class="initial-loader__hint">正在载入工作台</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

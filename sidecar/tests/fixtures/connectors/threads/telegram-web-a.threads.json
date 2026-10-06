@@ -1,0 +1,12 @@
+{
+  "_note": "会话列表采集夹具（Telegram WebA）：页面上没有 `href` 的列表项（只有 `data-peer-id` + 可见文本）也要能用 —— key 取站点属性、url 为 null 时由上层按展示名点列表。",
+  "ok": true,
+  "reason": null,
+  "source": "descriptor",
+  "baseUrl": "https://web.telegram.org/a/",
+  "items": [
+    { "key": "-1009876543210", "label": "群聊 B", "href": null, "unread": true },
+    { "key": "555000111", "label": "小红", "href": null, "unread": false },
+    { "key": null, "label": "没有稳定身份的一个人", "href": null, "unread": false }
+  ]
+}

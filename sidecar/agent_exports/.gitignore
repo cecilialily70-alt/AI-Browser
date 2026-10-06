@@ -1,0 +1,4 @@
+# 运行期导出（保留目录结构）
+trajectories/*.json
+!trajectories/.gitkeep
+test_trajectory.json

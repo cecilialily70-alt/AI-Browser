@@ -1,0 +1,50 @@
+{
+  "id": "sample-im",
+  "version": 2,
+  "match": {
+    "hostPattern": "(^|\\.)sample-im\\.example$",
+    "pathPattern": null
+  },
+  "ready": {
+    "allOf": ["[data-testid=\"conversation-panel\"]"],
+    "absent": ["[data-testid=\"qrcode\"]"]
+  },
+  "peer": {
+    "fromAttribute": null,
+    "fallbackAttrs": [],
+    "fallbackHeader": null
+  },
+  "rows": {
+    "selector": "[data-testid=\"msg-row\"]",
+    "id": {
+      "attr": "data-id",
+      "accept": ["^(?:true|false)_[0-9A-F]{12,}$"]
+    },
+    "idPrefixDirection": { "out": "false_", "in": "true_" },
+    "thenTailIcons": null,
+    "thenCheckIcons": null,
+    "exclude": ["[data-testid=\"system-message\"]"],
+    "textSelectors": ["[data-testid=\"msg-text\"]"],
+    "attachmentSelectors": [],
+    "quotedReplySelectors": [],
+    "retractedSelectors": [],
+    "tokenAttrs": [],
+    "insertedAtTopMeansOlder": true
+  },
+  "composer": {
+    "selectors": ["div[contenteditable=\"true\"][data-testid=\"composer\"]"],
+    "input": {
+      "method": "selectAllBeforeInput",
+      "verify": "equals",
+      "retries": 3,
+      "failClosed": true
+    },
+    "send": {
+      "selectors": ["button[data-testid=\"send\"]"],
+      "method": "enterOnce",
+      "elseClick": true
+    }
+  },
+  "history": { "scrollRoot": [], "batchLimit": 40, "concurrency": 2 },
+  "presence": { "typing": [] }
+}

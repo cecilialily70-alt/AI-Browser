@@ -1,0 +1,16 @@
+{
+  "providers": {
+    "mailslurp": {
+      "baseUrl": "https://api.mailslurp.com",
+      "requiresApiKey": true,
+      "requiresInbox": true,
+      "aliases": ["mail-slurp"]
+    },
+    "1secmail": {
+      "baseUrl": "https://www.1secmail.com/api/v1",
+      "requiresApiKey": false,
+      "requiresInbox": true,
+      "aliases": ["onesecmail", "1sec"]
+    }
+  }
+}

@@ -1,0 +1,188 @@
+{
+  "id": "whatsapp-web",
+  "version": 1,
+  "source": "builtin",
+  "match": {
+    "hostPattern": "^web\\.whatsapp\\.com$",
+    "pathPattern": null
+  },
+  "ready": {
+    "allOf": [
+      "#main",
+      "#pane-side"
+    ],
+    "absent": [
+      "canvas[aria-label*=\"Scan\" i]",
+      "[data-testid=\"qrcode\"]",
+      "div[data-testid=\"qrcode\"]"
+    ]
+  },
+  "peer": {
+    "fromAttribute": {
+      "attr": "data-id",
+      "pattern": "(\\d{6,}(?:-\\d+)?)@(c\\.us|g\\.us|broadcast)",
+      "group": 1
+    },
+    "fallbackAttrs": [
+      "data-jid",
+      "data-peer",
+      "data-chat-jid",
+      "data-contact-id",
+      "data-chat-id"
+    ],
+    "fallbackHeader": {
+      "selectors": [
+        "#main header [data-testid=\"conversation-info-header-chat-title\"]",
+        "#main header span[title]",
+        "#main header [title]"
+      ],
+      "digitsOnly": false
+    }
+  },
+  "rows": {
+    "selector": "[data-testid^=\"conv-msg-\"], [data-id], [data-testid=\"msg-container\"]",
+    "id": {
+      "attr": "data-id",
+      "accept": [
+        "^(?:true|false)_[0-9a-zA-Z._@-]+$",
+        "^[0-9A-F]{12,}$"
+      ]
+    },
+    "idPrefixDirection": {
+      "out": "false_",
+      "in": "true_"
+    },
+    "thenTailIcons": {
+      "out": [
+        "[data-testid=\"tail-out\"]",
+        "[data-icon=\"tail-out\"]"
+      ],
+      "in": [
+        "[data-testid=\"tail-in\"]",
+        "[data-icon=\"tail-in\"]"
+      ]
+    },
+    "thenCheckIcons": {
+      "out": [
+        "[data-icon^=\"msg-dblcheck\"]",
+        "[data-icon^=\"msg-check\"]"
+      ]
+    },
+    "exclude": [
+      "[data-testid=\"system_message\"]"
+    ],
+    "textSelectors": [
+      "[data-testid=\"selectable-text\"]",
+      "[data-testid=\"conversation-text\"]",
+      "span[data-testid=\"text-content\"]",
+      "[data-testid=\"msg-text\"]",
+      "span[dir=\"ltr\"]",
+      "span[dir=\"rtl\"]",
+      "span[dir=\"auto\"]"
+    ],
+    "attachmentSelectors": [
+      "[data-testid=\"image-thumb\"]",
+      "[data-testid=\"media-content\"]",
+      "[data-testid=\"video-thumb\"]",
+      "[data-testid=\"audio-play\"]",
+      "[data-testid=\"document-thumb\"]",
+      "[data-testid=\"sticker\"]",
+      "[data-testid=\"ptt-status\"]"
+    ],
+    "quotedReplySelectors": [
+      "[data-testid=\"quoted-message\"]",
+      "[data-testid=\"msg-quoted\"]",
+      "[data-testid=\"quoted-mention\"]"
+    ],
+    "retractedSelectors": [
+      "[data-testid=\"recalled\"]",
+      "[data-testid=\"msg-recalled\"]"
+    ],
+    "tokenAttrs": [
+      "class",
+      "data-testid"
+    ],
+    "insertedAtTopMeansOlder": false
+  },
+  "composer": {
+    "selectors": [
+      "#main [data-testid=\"conversation-compose-box-input\"]",
+      "#main [data-testid=\"compose-box-input\"]",
+      "#main footer div[contenteditable=\"true\"][data-tab=\"10\"]",
+      "#main footer div[contenteditable=\"true\"][role=\"textbox\"]",
+      "#main div[contenteditable=\"true\"][aria-label*=\"message\" i]",
+      "#main div[contenteditable=\"true\"][title*=\"message\" i]",
+      "#main footer div[contenteditable=\"true\"]"
+    ],
+    "input": {
+      "method": "selectAllBeforeInput",
+      "verify": "equals",
+      "retries": 3,
+      "failClosed": true
+    },
+    "send": {
+      "selectors": [
+        "[data-testid=\"send\"]",
+        "[data-testid=\"compose-btn-send\"]",
+        "span[data-icon=\"send\"]",
+        "span[data-icon=\"wds-ic-send-filled\"]"
+      ],
+      "method": "enterOnce",
+      "elseClick": true
+    },
+    "attach": {
+      "buttonSelectors": [
+        "[data-testid=\"attach-menu-plus\"]",
+        "span[data-icon=\"plus-rounded\"]",
+        "span[data-icon=\"attach-menu-plus\"]",
+        "button[aria-label*=\"Attach\" i]"
+      ],
+      "menuItemSelectors": [
+        "[data-testid=\"mi-attach-image\"]",
+        "[data-testid=\"attach-image\"]",
+        "li[data-animate-dropdown-item]"
+      ],
+      "fileInputSelectors": [
+        "input[type=\"file\"][accept*=\"image\"]",
+        "input[type=\"file\"]"
+      ],
+      "previewReadySelectors": [],
+      "confirmSendSelectors": [
+        "[data-testid=\"send\"]",
+        "[data-testid=\"compose-btn-send\"]"
+      ]
+    }
+  },
+  "history": {
+    "scrollRoot": [
+      "[data-testid=\"conversation-panel-messages\"]",
+      "[data-testid=\"conversation-panel-wrapper\"]",
+      "#main div[role=\"application\"]",
+      "#main .copyable-area"
+    ],
+    "batchLimit": 80,
+    "concurrency": 4
+  },
+  "threads": {
+    "itemSelectors": [
+      "#pane-side [role=\"listitem\"]",
+      "#pane-side [data-testid=\"cell-frame-container\"]",
+      "#pane-side div[data-testid^=\"list-item-\"]"
+    ],
+    "keyAttr": null,
+    "hrefAttr": null,
+    "labelSelectors": [
+      "[data-testid=\"cell-frame-title\"] span[title]",
+      "[data-testid=\"cell-frame-title\"]",
+      "span[title]"
+    ],
+    "unreadSelectors": [
+      "[data-testid=\"icon-unread-count\"]",
+      "[aria-label*=\"unread\" i]"
+    ],
+    "limit": 60
+  },
+  "presence": {
+    "typing": []
+  }
+}

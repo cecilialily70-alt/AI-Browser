@@ -1,0 +1,63 @@
+{
+  "id": "sample-im",
+  "version": 1,
+  "match": {
+    "hostPattern": "(^|\\.)sample-im\\.example$",
+    "pathPattern": null
+  },
+  "ready": {
+    "allOf": ["[data-testid=\"conversation-panel\"]"],
+    "absent": ["[data-testid=\"qrcode\"]", "[data-testid=\"login-form\"]"]
+  },
+  "peer": {
+    "fromAttribute": null,
+    "fallbackAttrs": ["data-peer"],
+    "fallbackHeader": { "selectors": ["header h1"], "digitsOnly": false }
+  },
+  "rows": {
+    "selector": "[data-testid=\"msg-row\"]",
+    "id": {
+      "attr": "data-id",
+      "accept": ["^(?:true|false)_[0-9a-f]{6,}$", "^[0-9A-F]{12,}$"]
+    },
+    "idPrefixDirection": { "out": "false_", "in": "true_" },
+    "thenTailIcons": {
+      "out": ["[data-icon=\"tail-out\"]"],
+      "in": ["[data-icon=\"tail-in\"]"]
+    },
+    "thenCheckIcons": { "out": ["[data-icon=\"msg-check\"]"] },
+    "exclude": [
+      "[data-testid=\"system-message\"]",
+      "[data-testid=\"date-divider\"]",
+      "[data-testid=\"e2e-notice\"]"
+    ],
+    "textSelectors": ["[data-testid=\"msg-text\"]", ".copyable-text"],
+    "attachmentSelectors": ["[data-testid=\"media-content\"]", "[data-testid=\"audio-player\"]"],
+    "quotedReplySelectors": ["[data-testid=\"quoted-message\"]"],
+    "retractedSelectors": ["[data-testid=\"recalled-message\"]"],
+    "tokenAttrs": ["data-testid"],
+    "insertedAtTopMeansOlder": true
+  },
+  "composer": {
+    "selectors": ["div[contenteditable=\"true\"][data-testid=\"composer\"]"],
+    "input": {
+      "method": "selectAllBeforeInput",
+      "verify": "equals",
+      "retries": 3,
+      "failClosed": true
+    },
+    "send": {
+      "selectors": ["button[data-testid=\"send\"]"],
+      "method": "enterOnce",
+      "elseClick": true
+    }
+  },
+  "history": {
+    "scrollRoot": ["[data-testid=\"conversation-panel\"] > div"],
+    "batchLimit": 80,
+    "concurrency": 4
+  },
+  "presence": {
+    "typing": ["[data-testid=\"typing\"]"]
+  }
+}

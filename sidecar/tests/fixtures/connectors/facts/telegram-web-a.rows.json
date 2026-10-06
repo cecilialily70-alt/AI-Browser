@@ -1,0 +1,87 @@
+{
+  "_note": "脱敏结构化事实包（Telegram WebA，`web.telegram.org/a`）：零账号、零网络、可进仓库。字段口径见 descriptor/types.ts RowFact。",
+  "ok": true,
+  "reason": null,
+  "moreAbove": true,
+  "fallbackPoll": false,
+  "rows": [
+    {
+      "rawId": "9001",
+      "text": "<我方说的一句>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": "out",
+      "checkIcon": true,
+      "cxRatio": 0.86,
+      "tokens": ["Message", "is-out"],
+      "seenTs": "10:01",
+      "identity": null
+    },
+    {
+      "rawId": "9002",
+      "text": "<对方回了一句>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": "in",
+      "checkIcon": false,
+      "cxRatio": 0.15,
+      "tokens": ["Message", "is-in"],
+      "seenTs": "10:02",
+      "identity": null
+    },
+    {
+      "rawId": "9003",
+      "text": "",
+      "hasMedia": true,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": "in",
+      "checkIcon": false,
+      "cxRatio": 0.16,
+      "tokens": ["Message", "is-in"],
+      "seenTs": "10:03",
+      "identity": null
+    },
+    {
+      "rawId": "9004",
+      "text": "",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": true,
+      "tailIcon": "in",
+      "checkIcon": false,
+      "cxRatio": 0.17,
+      "tokens": ["Message", "is-in", "is-deleted"],
+      "seenTs": "10:04",
+      "identity": null
+    },
+    {
+      "rawId": null,
+      "text": "<服务消息不该出现>",
+      "hasMedia": false,
+      "excluded": true,
+      "retracted": false,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.5,
+      "tokens": ["ActionMessage"],
+      "seenTs": "10:05",
+      "identity": null
+    },
+    {
+      "rawId": "9006",
+      "text": "<分不出方向的一句>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.5,
+      "tokens": ["Message"],
+      "seenTs": "10:06",
+      "identity": null
+    }
+  ]
+}

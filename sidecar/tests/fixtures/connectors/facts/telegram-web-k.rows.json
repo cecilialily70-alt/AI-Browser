@@ -1,0 +1,87 @@
+{
+  "_note": "脱敏结构化事实包（Telegram WebK，`web.telegram.org/k`）：零账号、零网络、可进仓库。字段口径见 descriptor/types.ts RowFact。方向靠 `.is-out` / `.is-in`（描述符里映射为行级方向标记）。",
+  "ok": true,
+  "reason": null,
+  "moreAbove": false,
+  "fallbackPoll": false,
+  "rows": [
+    {
+      "rawId": "4521",
+      "text": "<我方说的一句>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": "out",
+      "checkIcon": true,
+      "cxRatio": 0.88,
+      "tokens": ["bubble", "is-out"],
+      "seenTs": "09:11",
+      "identity": null
+    },
+    {
+      "rawId": "4522",
+      "text": "<对方回了一句>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": "in",
+      "checkIcon": false,
+      "cxRatio": 0.12,
+      "tokens": ["bubble", "is-in"],
+      "seenTs": "09:12",
+      "identity": null
+    },
+    {
+      "rawId": "4523",
+      "text": "",
+      "hasMedia": true,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": "in",
+      "checkIcon": false,
+      "cxRatio": 0.14,
+      "tokens": ["bubble", "is-in"],
+      "seenTs": "09:13",
+      "identity": null
+    },
+    {
+      "rawId": "4524",
+      "text": "",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": true,
+      "tailIcon": "in",
+      "checkIcon": false,
+      "cxRatio": 0.16,
+      "tokens": ["bubble", "is-in", "is-deleted"],
+      "seenTs": "09:14",
+      "identity": null
+    },
+    {
+      "rawId": null,
+      "text": "<服务消息不该出现>",
+      "hasMedia": false,
+      "excluded": true,
+      "retracted": false,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.5,
+      "tokens": ["service-msg"],
+      "seenTs": "09:15",
+      "identity": null
+    },
+    {
+      "rawId": "4526",
+      "text": "<分不出方向的一句>",
+      "hasMedia": false,
+      "excluded": false,
+      "retracted": false,
+      "tailIcon": null,
+      "checkIcon": false,
+      "cxRatio": 0.5,
+      "tokens": ["bubble"],
+      "seenTs": "09:16",
+      "identity": null
+    }
+  ]
+}

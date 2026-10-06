@@ -1,0 +1,28 @@
+{
+  "id": "sample-bad-script",
+  "version": 1,
+  "match": { "hostPattern": "(^|\\.)bad-script\\.example$", "pathPattern": null },
+  "ready": { "allOf": ["#panel"], "absent": [] },
+  "peer": { "fromAttribute": null, "fallbackAttrs": [], "fallbackHeader": null },
+  "rows": {
+    "selector": "#panel [data-row]",
+    "id": null,
+    "idPrefixDirection": null,
+    "thenTailIcons": null,
+    "thenCheckIcons": null,
+    "exclude": [],
+    "textSelectors": ["() => document.body.innerText"],
+    "attachmentSelectors": [],
+    "quotedReplySelectors": [],
+    "retractedSelectors": [],
+    "tokenAttrs": [],
+    "insertedAtTopMeansOlder": true
+  },
+  "composer": {
+    "selectors": ["#composer"],
+    "input": { "method": "selectAllBeforeInput", "verify": "equals", "retries": 3, "failClosed": true },
+    "send": { "selectors": [], "method": "enterOnce", "elseClick": true }
+  },
+  "history": { "scrollRoot": [], "batchLimit": 40, "concurrency": 2 },
+  "presence": { "typing": [] }
+}

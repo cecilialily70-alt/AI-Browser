@@ -1,0 +1,106 @@
+# 天枢台 · AI 编码宪法
+
+仓库内最高约束。与口头约定、旧计划、README 冲突时以本文件为准；与代码事实冲突时 **先改本文件再改代码**。
+面向后续大幅修改：本文写方向与底线，不锁死旧接缝，不当事故档案。
+
+**产品**：本机指纹浏览器 + L4 Web Agent。浏览 / 注册 / 填表 / 采集 / 购物订票停在支付前；网页 IM 可值守回话。不追求无人支付。
+**协作**：非技术用户——少问、红线内自定命名与落点并做完。禁止擅自 `git commit` / `push`。
+**检查 / 审计**：只报告，不改码、不跑真实注册购物支付、不删用户数据。
+
+找文件：`.cursor/rules/code-map.mdc`（按需）。数字与默认值以代码常量为准，本文不抄会过期的字面量。
+
+---
+
+## 1. 硬红线（重构也不许拆）
+
+1. **支付**：不得自动提交支付 / 转账 / 改密 / 删号；不得 `done(success=true)` 冒充已付款。页面或会话出现付款/卡号/CVV 语义 → 停手交人。
+2. **一次性凭证**：不得编造 OTP / 短信码 / TOTP / 验证码 token；不得用聊天附件图或网页邮箱默认路径取码；码与卡号不得写入轨迹、聊天上下文、`results.md`。
+3. **指纹**：不得为过检测改 `navigator` / WebGL 或注入绕过脚本。合法指纹只走 CloakBrowser 配置。
+4. **密钥**：只经 Host `secret_store`。仓库与 Sidecar 日志禁止明文 API Key / 代理密码。
+5. **浏览器占用**：同一环境同一时刻只跑一种执行器（Agent / 填表 / 回放 / 聊天值守）。共享策略模块不算抢浏览器；并行踩同一 CDP 才算。
+6. **站点差异**：核心循环禁止写死某站 URL / 选择器。聊天加站优先描述符 JSON（只声明：选择器 / 属性 / 正则 / 枚举 / 数字）。禁止 `eval` / `new Function`；出站只走输入框真实事件链，读回不等则取消发送。
+7. **人工介入**：只有一个收件箱（`InterventionCenter*`）。新的确认 / 提问 / 交接必须进同一队列；禁止第二套抢焦点弹窗。聊天停手也要能被这个收件箱接回，不得只发事件然后自己挂死。
+
+验证码通道（内置 → 已配置委托 → 人工）、网页邮箱默认关闭：这是现行策略，可以改通道配置，但「失败就编造」永远禁止。
+
+---
+
+## 2. 当前架构（事实，不是圣旨）
+
+```
+React (src/) → Tauri 2 Host (src-tauri/) → Node Sidecar (sidecar/) → CloakBrowser CDP
+```
+
+Host 是唯一可信边界（SQLite 单写、密钥、进程、IPC）。Sidecar 无状态执行（stdin JSON / stdout JSONL）。`playwright-core` 只作现有 CDP 连接库，禁止再引入 Puppeteer / Selenium / 第二启动栈。
+
+| 执行器 | 现行入口 | 现行范式 |
+|--------|----------|----------|
+| 浏览器 Agent | `sidecar/src/bu_agent/service.ts` | ReAct 步进 |
+| 填表 / RPA | `engine.ts`；模板状态机在 `rpa/` | 动作状态机 |
+| 轨迹回放 | `replay_engine.ts`（可选 `replay_ai_heal.ts`） | 机械重放 + 有界修补 |
+| 聊天值守 | `core/web_chat/engine.ts` | 耐久相位机 |
+| 右栏 Ai Chat | `chat_engine.ts` | 对话 + 工具；可桥接 Agent，**不是**值守引擎 |
+
+执行器循环不要合成一个大循环。LLM 客户端、CDP、互斥、HITL、**用户策略（规则 + 人设）** 应下沉为共享模块，允许并鼓励复用。
+
+**产品面（以代码为准）**
+
+- 右栏四 Tab：Agent · Ai Chat · 运行历史 · 轨迹记忆。顶栏「聊天」是值守，不是 Ai Chat。
+- 设置五 Tab：AI · 验证码与邮箱 · 聊天 · 浏览器 · 代理。
+- 规则窗口（`AgentRulesModal`）管完成条件与人设库；环境表单不再管人设。
+
+---
+
+## 3. 已知接缝（后续重构优先）
+
+功能是一块块加上的。下列隔离是历史事故，**禁止再写成必须遵守的红线**。改这些时以统一用户体验为准，最小必要 diff，不要借机重写无关文件。
+
+1. **用户策略未贯通**  
+   规则条件与人设库在 `agent_rules` / `agent_personas`。现行几乎只靠前端 `resolveGoalMentions` 解析目标框里的 `@`；Sidecar/Host 不解析 `@`。聊天值守 **不读** `task_rules` / `persona_engine`。  
+   **方向**：规则 + 人设成为可附着的一层，Agent / 回放 / 聊天都能显式绑定，不必把 `@` 塞进一句话里才生效。
+
+2. **两套身份**  
+   Agent 人设是结构化字段（固定勾选、Geo）；聊天是 `chat_mode.roles` 自由提示词。  
+   **方向**：并入或映射成一套身份。没有绑定就不套人设；有绑定则各执行器读同一份。旧列 `profiles.persona_data` 仍被 SELECT，产品路径不要接回当数据源。
+
+3. **回放规则是收尾装饰**  
+   Agent 逐步评估规则（含命中即完成 / 角色 HITL）；回放多在全部步进完才 `guardUserConstraints`。heal 修选择器也核销不了完成条件。  
+   **方向**：回放与 heal 之后走与 Agent **同一套** 条件闸门。heal 可以不跑 ReAct，但必须能调用共享策略模块。
+
+4. **聊天 HITL 半接入**  
+   值守可发 `agent_ask_user` 后停在 `handover`，不等收件箱回复。接管是设置 overlay，第三套控制面。  
+   **方向**：支付 / OTP / 用户接管与 Agent 同一收件箱闭环（能停，也能被用户接回）。
+
+录制仍是 Agent 成功轨迹，不是第四套引擎。回放不得变成无人值守的自由 Agent；可以调用共享策略与有界 heal。
+
+---
+
+## 4. 改码纪律
+
+- 修 BUG：先归类并打开相关文件，写清根因再最小修复；禁止借 BUG 重写整文件或顺手加功能。
+- 加功能 / 重构：先对号（配置 / 描述符 / Skill / 共享模块 / 最后才动主循环）。能下沉复用就不要复制解析器、HITL、人设、数据集规则。
+- 异常：用类型 / 错误码 / 稳定 `phase`，禁止靠 `err.message.includes("中文")` 当主路径。
+- 判定没跑成（超时、探针抛错、页面未就绪）不得报成「未命中 / 没有会话 / 已发送」。
+- 新增设置键必须同时：`ALLOWED_SETTING_KEYS`、`seed_default_settings`、前端写失败回滚。
+- 交付：改了哪些文件、一句话原因、碰了哪条硬红线（若有）。残留字段写清谁写谁读。
+
+**已作废、不得再拿来挡重构**：人设唯一开关必须是 `@`；四种形态禁止互借模块（循环仍分开）；聊天必须永远独立命令/存储/视图；旧 B 系列 UI 快照（三 Tab、提取开关列、未挂载 RPA 面板）；Host 永远不得解析策略引用；把坑族故事当现行法律。
+
+---
+
+## 5. 路径（只指路）
+
+| 主题 | 路径 |
+|------|------|
+| Agent 循环 / 动作 | `sidecar/src/bu_agent/service.ts` · `actions.ts` |
+| 规则闸门 / 人设生成 | `sidecar/src/core/task_rules.ts` · `persona_engine.ts` · `src/lib/agentRules.ts` · `AgentRulesModal.tsx` |
+| 完成证据 / 契约 | `completion_evidence.ts` · `task_contract.ts` · `tests/task-contract.mjs` |
+| 填表 / RPA | `engine.ts` · `rpa/` · `fill_verify.ts` |
+| 录制 / 回放 / heal | `trajectory.ts` · `replay_engine.ts` · `replay_ai_heal.ts` · `BatchReplaySandbox.tsx` · `replay_job.rs` |
+| 聊天值守 | `core/web_chat/` · `bu_agent/chat_*.ts` · `ChatModeModal.tsx` · `chat_patrol.rs` · `chat_context.rs` |
+| 描述符 | `sidecar/connectors/*.json` · `core/web_chat/descriptor/` · 通用回落 `config/chat_sites.json` + `site_detect.ts` |
+| 右栏 Ai Chat | `chat_engine.ts` · `AIChatPanel.tsx` · `agentGoalRouter.ts` |
+| Host | `db.rs` · `rpa_session.rs` · `secret_store.rs` · `engine_mutex.ts` |
+| HITL UI | `InterventionCenterProvider.tsx` |
+| 运行历史 | `AgentRunHistoryPanel.tsx` |
+| 回归 | `sidecar/tests/chat-*.mjs` 等；以目录实有文件为准 |

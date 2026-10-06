@@ -1,0 +1,14 @@
+{
+  "_note": "会话列表采集夹具（Telegram WebK）：页内采集产物（`ThreadsProbe`）的脱敏形态。href 是站点的 hash 直链，必须被补成绝对地址（否则 openContact 会 goto 到错误的地方）。",
+  "ok": true,
+  "reason": null,
+  "source": "descriptor",
+  "baseUrl": "https://web.telegram.org/k/",
+  "items": [
+    { "key": "-1001234567890", "label": "群聊 A", "href": "#-1001234567890", "unread": true },
+    { "key": "123456789", "label": "小明", "href": "#123456789", "unread": false },
+    { "key": "123456789", "label": "小明（重复项）", "href": "#123456789", "unread": false },
+    { "key": null, "label": "@somechannel", "href": "#@somechannel", "unread": false },
+    { "key": "987654321", "label": "  多余空白  ", "href": "javascript:void(0)", "unread": false }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "_comment": "纯数据资源：从邮件主题/正文抽取一次性邮箱验证码。禁止在此写入特定银行/电商发件人域名或站点专属文案；差异化提示走 OtpFetchRequest.fromHint/subjectHint。可用 TIANSHUTAI_EMAIL_OTP_LEXICON 指向自定义路径整体替换。",
+  "policy": {
+    "codeMinLength": 4,
+    "codeMaxLength": 8,
+    "maxCandidates": 8
+  },
+  "patterns": [
+    {
+      "id": "labeled_zh",
+      "source": "any",
+      "regex": "(?:验证码|校验码|确认码|动态码|安全码|邮箱验证码|邮件验证码)[^0-9A-Za-z]{0,16}([0-9A-Za-z]{4,8})",
+      "group": 1,
+      "priority": 100
+    },
+    {
+      "id": "labeled_en",
+      "source": "any",
+      "regex": "(?:verification\\s*code|security\\s*code|one[-\\s]?time(?:\\s*(?:code|password|passcode))?|passcode|otp(?:\\s*code)?)[^0-9A-Za-z]{0,20}([0-9A-Za-z]{4,8})",
+      "group": 1,
+      "priority": 90
+    },
+    {
+      "id": "is_code",
+      "source": "any",
+      "regex": "(?:code|pin)\\s*(?:is|:|：)\\s*([0-9A-Za-z]{4,8})",
+      "group": 1,
+      "priority": 80
+    },
+    {
+      "id": "digits_isolated",
+      "source": "body",
+      "regex": "(?<![0-9])([0-9]{4,8})(?![0-9])",
+      "group": 1,
+      "priority": 20
+    }
+  ],
+  "subjectBoostTerms": [
+    "验证码",
+    "校验码",
+    "动态码",
+    "verification",
+    "verify",
+    "otp",
+    "one-time",
+    "passcode",
+    "security code"
+  ],
+  "fromNoiseTerms": [
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "mailer-daemon"
+  ]
+}
